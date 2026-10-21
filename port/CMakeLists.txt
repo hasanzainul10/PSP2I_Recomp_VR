@@ -55,11 +55,12 @@ add_executable(psp2i
     host/textedit.c
     host/font_win.c
     host/web_overlay.cpp
+    vr/vr_probe.c
     ${PSPRECOMP_DIR}/tools/allegrexrecomp/decode.c
     gen/recomp_funcs.c
     gen/recomp_imports.c
 )
-target_include_directories(psp2i PRIVATE gen ${PSPRECOMP_DIR}/tools/allegrexrecomp)
+target_include_directories(psp2i PRIVATE gen vr ${PSPRECOMP_DIR}/tools/allegrexrecomp)
 target_link_libraries(psp2i PRIVATE psprecomp)
 
 if(MSVC)
@@ -103,6 +104,30 @@ if(PSP2I_WEBVIEW_INC)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_BINARY_DIR}/_deps/webview/WebView2-LICENSE.txt $<TARGET_FILE_DIR:psp2i>/licenses/WebView2-LICENSE.txt)
 elseif(WIN32)
     target_link_libraries(psp2i PRIVATE shell32)
+endif()
+
+# VR (vr/): OpenXR, the theater for now. Only the headers are needed to build;
+# openxr_loader.dll is loaded at run time and copied next to the exe (see
+# cmake/FetchOpenXR.cmake). Without them the game builds without VR.
+if(WIN32)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FetchOpenXR.cmake)
+    psp2i_fetch_openxr(PSP2I_OPENXR_INC PSP2I_OPENXR_DLL)
+endif()
+if(PSP2I_OPENXR_INC)
+    target_sources(psp2i PRIVATE vr/vr_xr_d3d11.c)
+    target_include_directories(psp2i PRIVATE vr ${PSP2I_OPENXR_INC})
+    target_compile_definitions(psp2i PRIVATE PSP2I_VR)
+    target_link_libraries(psp2i PRIVATE dxgi)
+    # vr_test: the VR theater without the game (a test picture; prints the controllers).
+    add_executable(vr_test tests/vr_test.c vr/vr_xr_d3d11.c)
+    target_include_directories(vr_test PRIVATE vr ${PSP2I_OPENXR_INC})
+    target_link_libraries(vr_test PRIVATE d3d11 dxgi dxguid)
+    if(PSP2I_OPENXR_DLL)
+        add_custom_command(TARGET psp2i POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${PSP2I_OPENXR_DLL} $<TARGET_FILE_DIR:psp2i>)
+        add_custom_command(TARGET vr_test POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${PSP2I_OPENXR_DLL} $<TARGET_FILE_DIR:vr_test>)
+    endif()
 endif()
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FetchSDL3.cmake)
@@ -191,6 +216,9 @@ if(PSP2I_PROD)
         COMMENT "Copying the community build to ${PSP2I_PROD_DIR}")
     if(PSP2I_SDL3_PATH)
         add_custom_command(TARGET psp2i POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different ${PSP2I_SDL3_PATH} ${PSP2I_PROD_DIR})
+    endif()
+    if(PSP2I_OPENXR_INC AND PSP2I_OPENXR_DLL)               # VR: the OpenXR loader (Apache 2.0)
+        add_custom_command(TARGET psp2i POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different ${PSP2I_OPENXR_DLL} ${PSP2I_PROD_DIR})
     endif()
     if(TARGET psp2i_atrac)                              # ATRAC music: the LGPL decoder DLL and its licence files
         add_custom_command(TARGET psp2i POST_BUILD

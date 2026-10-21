@@ -90,6 +90,10 @@
 #include "prod.h"
 #include "textedit.h"
 #include "present.h"
+#ifdef PSP2I_VR
+#include "vr.h"
+#endif
+#include "vr_probe.h"
 
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
@@ -401,6 +405,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == VK_F9 && first && g_menu_vk != VK_F9) { functrace_toggle(); return 0; }   /* function-activity recorder */
         if (wp == VK_F7 && first && g_menu_vk != VK_F7) { rateaudit_start(); return 0; }    /* frame-rate audit */
         if (wp == VK_F6 && first && g_menu_vk != VK_F6) { rateaudit_start_press(); return 0; }   /* press audit */
+        if (wp == VK_F8 && first && g_menu_vk != VK_F8) { vr_probe_request(); return 0; }    /* VR probe report (vr_probe.h) */
 #endif
         if (text_ui_open() && wp != g_menu_vk) {
             uint32_t k = 0;
@@ -796,6 +801,36 @@ static int      g_sdl_on;
 static uint32_t g_pad_bits;
 static uint8_t  g_pad_ax = 128, g_pad_ay = 128;
 
+/* VR (vr/vr.h): the theater screen and the motion controllers as a pad.
+ * Saved in psp2i_display.ini (vr=, vr_distance=, vr_width=); --vr / --no-vr
+ * for one run. The controllers add to the SDL pad: buttons OR together, and
+ * the VR sticks win unless only the SDL one is pushed. */
+static int      g_vr_on;                    /* the saved choice (menu VR) */
+static int      g_vr_dist_dm = 25, g_vr_width_dm = 30;
+static int      g_vr_live;                  /* vr_start ran */
+static uint32_t g_vr_host;                  /* VR_HOST_* held */
+static uint8_t  g_vr_rx = 128, g_vr_ry = 128;
+static char     g_exe_dir[512];
+
+static int stick_off_centre(uint8_t x, uint8_t y) { return x < 96 || x > 160 || y < 96 || y > 160; }
+
+#ifdef PSP2I_VR
+static void vr_apply(void) {
+    const vr_config cfg = { g_vr_dist_dm / 10.0f, g_vr_width_dm / 10.0f, VR_SCALE_DEFAULT };
+    if (g_vr_on && !g_vr_live && !g_headless) {
+        vr_set_swap_circle_cross(g_swap_oc);
+        g_vr_live = vr_start(g_exe_dir, &cfg) == 0;
+    } else if (!g_vr_on && g_vr_live) {
+        vr_stop();
+        g_vr_live = 0;
+        g_vr_host = 0;
+        g_vr_rx = g_vr_ry = 128;
+    } else if (g_vr_live) {
+        vr_configure(&cfg);
+    }
+}
+#endif
+
 static void ctrl_commit(void) {
     uint32_t bits = g_script_bits | g_pad_bits;
 #ifdef _WIN32
@@ -861,6 +896,15 @@ static int display_load(void) {
         else if (!strncmp(line, "right_stick=", 12))   g_rs_on = strncmp(line + 12, "off", 3) != 0;
         else if (!strncmp(line, "test_tick_pacing=", 17)) g_test_ticks = !strncmp(line + 17, "on", 2);
         else if (!strncmp(line, "test_30hz_logic=", 16))  g_test_logic = !strncmp(line + 16, "on", 2);
+        else if (!strncmp(line, "vr=", 3))             g_vr_on = !strncmp(line + 3, "on", 2);
+        else if (!strncmp(line, "vr_distance=", 12) || !strncmp(line, "vr_width=", 9)) {
+            const int dist = line[3] == 'd';
+            int dm = (int)(atof(line + (dist ? 12 : 9)) * 10.0 + 0.5);
+            dm = (dm + VR_STEP_DM / 2) / VR_STEP_DM * VR_STEP_DM;   /* to the menu's 0.5 m steps */
+            const int lo = dist ? VR_DIST_MIN_DM : VR_WIDTH_MIN_DM, hi = dist ? VR_DIST_MAX_DM : VR_WIDTH_MAX_DM;
+            dm = dm < lo ? lo : dm > hi ? hi : dm;
+            if (dist) g_vr_dist_dm = dm; else g_vr_width_dm = dm;
+        }
         else if (!strncmp(line, "font=", 5)) {
             snprintf(g_font_key, sizeof g_font_key, "%s", line + 5);
             g_font_key[strcspn(g_font_key, "\r\n")] = '\0';
@@ -894,6 +938,9 @@ static void display_save(int res) {
     fprintf(f, "right_stick=%s\nrs_speed=%.2f\n", g_rs_on ? "on" : "off", (double)menu_rs_speed(&g_menu));
     fprintf(f, "; menu TESTS at 60 / 120 fps (off by default): the game's tick counters paced as at 30; frame-counted logic at 30 Hz\n");
     fprintf(f, "test_tick_pacing=%s\ntest_30hz_logic=%s\n", g_test_ticks ? "on" : "off", g_test_logic ? "on" : "off");
+    fprintf(f, "; VR (OpenXR): on = the game on a screen in the headset; its distance and width in metres\n");
+    fprintf(f, "vr=%s\nvr_distance=%d.%d\nvr_width=%d.%d\n", g_vr_on ? "on" : "off",
+            g_vr_dist_dm / 10, g_vr_dist_dm % 10, g_vr_width_dm / 10, g_vr_width_dm % 10);
     fclose(f);
 }
 
@@ -936,6 +983,10 @@ static void menu_step(void) {
     if (g_script_stick >= 0) { ax = g_stick[g_script_stick].x; ay = g_stick[g_script_stick].y; }
     uint32_t held = menu_inputs(psp, ax, ay) | g_host_held;
     if (input_sdl_host_buttons() & (INPUT_HOST_GUIDE | INPUT_HOST_RSTICK)) held |= MI_TOGGLE;
+#ifdef PSP2I_VR
+    if (g_vr_host & VR_HOST_MENU) held |= MI_TOGGLE;
+    snprintf(g_menu.vr_status, sizeof g_menu.vr_status, "%s", g_vr_live ? vr_status_name(vr_status()) : "");
+#endif
 
     snprintf(g_menu.sega, sizeof g_menu.sega, "%s", online_sega_redirect());
     snprintf(g_menu.adhoc, sizeof g_menu.adhoc, "%s", online_adhoc_server());
@@ -1011,9 +1062,24 @@ static void menu_step(void) {
     if (fx & MFX_SWAP_OC) {
         g_swap_oc = g_menu.swap_oc;
         input_sdl_set_swap_circle_cross(g_swap_oc);
+#ifdef PSP2I_VR
+        vr_set_swap_circle_cross(g_swap_oc);
+#endif
         if (!g_headless) display_save(g_res_saved);
         fprintf(stderr, "menu: Circle/Cross %s (saved)\n", g_swap_oc ? "swapped" : "normal");
     }
+#ifdef PSP2I_VR
+    if (fx & MFX_VR) {
+        g_vr_on = g_menu.vr_on;
+        g_vr_dist_dm = g_menu.vr_dist_dm;
+        g_vr_width_dm = g_menu.vr_width_dm;
+        vr_apply();
+        if (!g_headless) display_save(g_res_saved);
+        fprintf(stderr, "menu: VR %s, screen %d.%d m away, %d.%d m wide (saved)\n", g_vr_on ? "on" : "off",
+                g_vr_dist_dm / 10, g_vr_dist_dm % 10, g_vr_width_dm / 10, g_vr_width_dm % 10);
+    }
+    if (fx & MFX_VR_RECENTER) vr_recenter();
+#endif
     if (fx & MFX_FONT) {
         g_menu.font = font_win_select(g_menu.font);
         snprintf(g_menu.font_name, sizeof g_menu.font_name, "%s", font_win_name(g_menu.font));
@@ -1050,6 +1116,7 @@ static void menu_step(void) {
 static void update_camera_stick(uint64_t vb) {
     uint8_t rx = 128, ry = 128;
     if (g_sdl_on) input_sdl_right_stick(&rx, &ry);
+    if (g_vr_live && (stick_off_centre(g_vr_rx, g_vr_ry) || !stick_off_centre(rx, ry))) { rx = g_vr_rx; ry = g_vr_ry; }   /* the right VR controller */
     for (int i = 0; i < g_nrstick; i++)
         if (vb >= g_rstick[i].at && vb < g_rstick[i].at + g_rstick[i].len) { rx = g_rstick[i].x; ry = g_rstick[i].y; }
     if (g_rep_on) { rx = g_rep_rx; ry = g_rep_ry; }
@@ -1059,10 +1126,20 @@ static void update_camera_stick(uint64_t vb) {
 }
 
 static void poll_controllers(void) {
-    if (!g_sdl_on) return;
-    uint32_t b;
-    uint8_t ax, ay;
-    input_sdl_poll(&b, &ax, &ay);
+    if (!g_sdl_on && !g_vr_live) return;
+    uint32_t b = 0;
+    uint8_t ax = 128, ay = 128;
+    if (g_sdl_on) input_sdl_poll(&b, &ax, &ay);
+#ifdef PSP2I_VR
+    if (g_vr_live) {
+        vr_pad vp;
+        vr_pad_get(&vp);                      /* released (centred) while the headset has no focus */
+        b |= vp.buttons;
+        if (stick_off_centre(vp.ax, vp.ay) || !stick_off_centre(ax, ay)) { ax = vp.ax; ay = vp.ay; }
+        g_vr_host = vp.host;
+        g_vr_rx = vp.rx; g_vr_ry = vp.ry;
+    }
+#endif
     if (b != g_pad_bits || ax != g_pad_ax || ay != g_pad_ay) {
         g_pad_bits = b; g_pad_ax = ax; g_pad_ay = ay;
         ctrl_commit();
@@ -1237,6 +1314,7 @@ static void on_vblank(void) {
     if (g_dump_key) { g_dump_key = 0; take_dump(vb); }
 #ifndef PSP2I_PROD
     rateaudit_vblank();
+    vr_probe_vblank();
 #endif
     if (g_find_vblank && vb == g_find_vblank) find_word();
     if (g_watch_late_addr && psp_display_flips() >= g_watch_late_flip) {
@@ -1307,6 +1385,9 @@ static void on_vblank(void) {
         if (have_frame) g_have_frame = 1;
         if (g_have_frame) {
             compose();
+#ifdef PSP2I_VR
+            if (g_vr_live && have_frame) vr_submit_frame(g_rgba, SCREEN_W, SCREEN_H);   /* the same picture, in the headset */
+#endif
             if (window_show() != 0) InvalidateRect(g_wnd, NULL, FALSE);
         }
 #ifndef PSP2I_PROD
@@ -2087,6 +2168,7 @@ int main(int argc, char **argv) {
     int extracted = 0;                     /* --extracted: the disc folder even with an ISO about */
     uint32_t oracle_addr = 0;
     const char *renderer = NULL;            /* --renderer; else psp2i_display.ini */
+    int vr_arg = -1;                        /* --vr / --no-vr; else psp2i_display.ini */
     int res_arg = -1;                       /* --resolution; else psp2i_display.ini */
     int oracle_all = 0;
     int want_sdl = -1;                     /* -1: default (with a window) */
@@ -2151,6 +2233,8 @@ int main(int argc, char **argv) {
             g_menu_vk = (WPARAM)(VK_F1 + n - 1);
 #endif
         }
+        else if (!strcmp(argv[i], "--vr"))                            vr_arg = 1;
+        else if (!strcmp(argv[i], "--no-vr"))                         vr_arg = 0;
         else if (!strcmp(argv[i], "--audio"))                         want_audio = 1;
         else if (!strcmp(argv[i], "--no-audio"))                      want_audio = 0;
         else if (!strcmp(argv[i], "--log-floats") && i + 3 < argc) {
@@ -2352,6 +2436,17 @@ int main(int argc, char **argv) {
 #endif
     framerate_set_tests(g_test_ticks, g_test_logic);
     camera_init(menu_rs_speed(&g_menu));
+#ifdef PSP2I_VR
+    snprintf(g_exe_dir, sizeof g_exe_dir, "%s", dir);
+    if (vr_arg >= 0) g_vr_on = vr_arg;                  /* for this run; the menu saves its own choice */
+    g_menu.hidden &= ~MENU_BIT(MENU_VR);
+    g_menu.vr_on = g_vr_on;
+    g_menu.vr_dist_dm = g_vr_dist_dm;
+    g_menu.vr_width_dm = g_vr_width_dm;
+    vr_apply();
+#else
+    (void)vr_arg;
+#endif
     /* PSP savedata encryption: saves interchangeable with a PSP / PPSSPP */
     static const psp_savedata_crypto SAVE_CRYPTO = { savecrypt_decrypt, savecrypt_encrypt, savecrypt_sfo_hash };
     psp_savedata_set_crypto(&SAVE_CRYPTO);
@@ -2360,6 +2455,11 @@ int main(int argc, char **argv) {
     functrace_init(dir);
 #ifndef PSP2I_PROD
     rateaudit_init(dir);                  /* the vblank-use census, and F7's frame-rate audit */
+    {
+        char probe[700];
+        log_path(probe, sizeof probe, dir, "vr_probe.txt");
+        vr_probe_init(probe);             /* F8: the camera and the characters, for the VR work */
+    }
 #endif
     psp_sched_set_vblank_hook(on_vblank);
 
@@ -2390,6 +2490,9 @@ int main(int argc, char **argv) {
      * audio streams too; destroying them after that freed them twice
      * (heap corruption 0xC0000374 on nearly every exit, and the crash
      * dump it wrote was the pause after closing the window). */
+#ifdef PSP2I_VR
+    if (g_vr_live) vr_stop();
+#endif
     audio_shutdown();
     if (g_sdl_on) input_sdl_shutdown();
 #ifdef _WIN32

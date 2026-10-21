@@ -785,7 +785,7 @@ static void test_touch_host(void) {
     menu_state m;
     menu_init(&m, 30, 1);
     CHECK((m.hidden & MENU_BIT(MENU_TOUCH_COLOR)) && (m.hidden & MENU_BIT(MENU_TOUCH_ALPHA)));   /* Windows: hidden */
-    m.hidden = MENU_BIT(MENU_FRAME_RATE) | MENU_BIT(MENU_SEGA_SERVER) | MENU_BIT(MENU_FONT);
+    m.hidden = MENU_BIT(MENU_FRAME_RATE) | MENU_BIT(MENU_SEGA_SERVER) | MENU_BIT(MENU_FONT) | MENU_BIT(MENU_VR);   /* no VR there */
     CHECK(menu_update(&m, MI_TOGGLE, 0) == MFX_OPENED && m.sel == MENU_FPS_COUNTER);  /* the first shown item */
     menu_update(&m, 0, 0);
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
@@ -825,7 +825,47 @@ static void test_touch_host(void) {
     CHECK(menu_touch(&m, 480, 272, 2, 2) == MFX_CLOSED && !m.open);                     /* outside again: closes */
 }
 
+/* The VR page (hosts built with VR show its item): ON / OFF, the screen's
+ * distance and width in 0.5 m steps within their limits, RECENTER, BACK. */
+static void test_vr_page(void) {
+    menu_state m;
+    menu_init(&m, 30, 1);
+    CHECK(m.hidden & MENU_BIT(MENU_VR));                         /* hidden unless the host has VR */
+    m.hidden &= ~MENU_BIT(MENU_VR);
+    CHECK(menu_page_of(MENU_VR) == MENU_PAGE_MAIN && menu_page_of(MENU_VR_ON) == MENU_PAGE_VR);
+    menu_update(&m, MI_TOGGLE, 0); menu_update(&m, 0, 0);
+    while (m.sel != MENU_VR) { menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0); }
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == 0 && m.page == MENU_PAGE_VR && m.sel == MENU_VR_ON);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_VR && m.vr_on);
+    menu_update(&m, 0, 0);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_VR_DISTANCE && m.vr_dist_dm == 25);
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_VR && m.vr_dist_dm == 30);
+    menu_update(&m, 0, 0);
+    for (int i = 0; i < 20; i++) { menu_update(&m, MI_RIGHT, 0); menu_update(&m, 0, 0); }
+    CHECK(m.vr_dist_dm == VR_DIST_MAX_DM);                       /* stops at the maximum */
+    CHECK(menu_update(&m, MI_RIGHT, 0) == 0);
+    menu_update(&m, 0, 0);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_VR_WIDTH);
+    for (int i = 0; i < 30; i++) { menu_update(&m, MI_LEFT, 0); menu_update(&m, 0, 0); }
+    CHECK(m.vr_width_dm == VR_WIDTH_MIN_DM);                     /* stops at the minimum */
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_VR_RECENTER && menu_update(&m, MI_CONFIRM, 0) == MFX_VR_RECENTER);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_BACK, 0) == 0 && m.page == MENU_PAGE_MAIN && m.sel == MENU_VR);   /* Cross: back */
+    static uint32_t img_px[480 * 272];
+    menu_image img = { img_px, 480, 272 };
+    snprintf(m.vr_status, sizeof m.vr_status, "NO HEADSET");
+    menu_draw(&m, &img, 30, "F1");                               /* the main page with VR: still fits */
+    int x, y, bw, bh;
+    menu_box(&m, 480, 272, &x, &y, &bw, &bh);
+    CHECK(y >= 0 && y + bh <= 272);
+}
+
 int main(void) {
+    test_vr_page();
     test_open_close();
     test_values();
     test_repeat();

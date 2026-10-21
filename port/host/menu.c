@@ -20,7 +20,10 @@ void menu_init(menu_state *m, int fps, int show_fps) {
     m->att = ATT_DEFAULT;
     m->touch_alpha = TOUCH_ALPHA_DEFAULT;
     m->rs_on = 1;
-    m->hidden = MENU_BIT(MENU_TOUCH_COLOR) | MENU_BIT(MENU_TOUCH_ALPHA);   /* the touch host shows them */
+    m->vr_dist_dm = 25;
+    m->vr_width_dm = 30;
+    /* The touch host shows the touch items; a host built with VR shows VR. */
+    m->hidden = MENU_BIT(MENU_TOUCH_COLOR) | MENU_BIT(MENU_TOUCH_ALPHA) | MENU_BIT(MENU_VR);
 }
 
 static const char *const TOUCH_NAMES[TOUCH_COLORS] = { "DEFAULT", "WHITE", "BLACK", "YELLOW", "CYAN", "PINK" };
@@ -154,16 +157,40 @@ static int change(menu_state *m, int dir) {
         else              m->rs_step = (m->rs_step + 1) % MENU_RS_STEPS;
         return m->rs_step != old ? MFX_RS_SPEED : 0;
     }
+    case MENU_VR_ON:       m->vr_on = !m->vr_on; return MFX_VR;
+    case MENU_VR_DISTANCE: case MENU_VR_WIDTH: {        /* 0.5 m steps; Confirm wraps to the shortest */
+        int *v = m->sel == MENU_VR_DISTANCE ? &m->vr_dist_dm : &m->vr_width_dm;
+        const int lo = m->sel == MENU_VR_DISTANCE ? VR_DIST_MIN_DM : VR_WIDTH_MIN_DM;
+        const int hi = m->sel == MENU_VR_DISTANCE ? VR_DIST_MAX_DM : VR_WIDTH_MAX_DM;
+        const int old = *v;
+        if (dir < 0)      { if (*v > lo) *v -= VR_STEP_DM; }
+        else if (dir > 0) { if (*v < hi) *v += VR_STEP_DM; }
+        else              *v = *v >= hi ? lo : *v + VR_STEP_DM;
+        return *v != old ? MFX_VR : 0;
+    }
+    case MENU_VR_RECENTER: return dir == 0 ? MFX_VR_RECENTER : 0;
     default:               return 0;
     }
 }
 
 int menu_page_of(int item) {
-    return item >= MENU_TEST_TICKS ? MENU_PAGE_TESTS : item >= MENU_RS_ON ? MENU_PAGE_CONTROLS : MENU_PAGE_MAIN;
+    return item >= MENU_VR_ON ? MENU_PAGE_VR : item >= MENU_TEST_TICKS ? MENU_PAGE_TESTS
+         : item >= MENU_RS_ON ? MENU_PAGE_CONTROLS : MENU_PAGE_MAIN;
 }
 
 /* The main page's item that opens a sub-page (where BACK returns to). */
-static int page_item(int page) { return page == MENU_PAGE_TESTS ? MENU_TESTS : MENU_CONTROLS; }
+static int page_item(int page) {
+    return page == MENU_PAGE_TESTS ? MENU_TESTS : page == MENU_PAGE_VR ? MENU_VR : MENU_CONTROLS;
+}
+
+/* The sub-page a main-page item opens, or -1; and whether an item is a BACK. */
+static int opens_page(int item) {
+    return item == MENU_CONTROLS ? MENU_PAGE_CONTROLS : item == MENU_TESTS ? MENU_PAGE_TESTS
+         : item == MENU_VR ? MENU_PAGE_VR : -1;
+}
+static int is_back(int item) {
+    return item == MENU_CONTROLS_BACK || item == MENU_TESTS_BACK || item == MENU_VR_BACK;
+}
 
 /* On the page shown, and not left out by this host. */
 static int shown(const menu_state *m, int item) {
@@ -212,9 +239,9 @@ int menu_update(menu_state *m, uint32_t held, uint32_t latched) {
     if (press & (MI_LEFT | MI_RIGHT | MI_CONFIRM)) {
         if (m->sel == MENU_CLOSE) {
             if (press & MI_CONFIRM) { m->open = 0; fx |= MFX_CLOSED; }
-        } else if (m->sel == MENU_CONTROLS || m->sel == MENU_TESTS) {
-            if (press & (MI_CONFIRM | MI_RIGHT)) go_page(m, m->sel == MENU_TESTS ? MENU_PAGE_TESTS : MENU_PAGE_CONTROLS, -1);
-        } else if (m->sel == MENU_CONTROLS_BACK || m->sel == MENU_TESTS_BACK) {
+        } else if (opens_page(m->sel) >= 0) {
+            if (press & (MI_CONFIRM | MI_RIGHT)) go_page(m, opens_page(m->sel), -1);
+        } else if (is_back(m->sel)) {
             if (press & (MI_CONFIRM | MI_LEFT)) go_page(m, MENU_PAGE_MAIN, page_item(m->page));
         } else {
             fx |= change(m, (press & MI_LEFT) ? -1 : (press & MI_RIGHT) ? 1 : 0);
@@ -399,10 +426,9 @@ int menu_touch(menu_state *m, int w, int h, int x, int y) {
     if (item < 0) return 0;
     m->sel = item;
     if (item == MENU_CLOSE) { m->open = 0; return MFX_CLOSED; }
-    if (item == MENU_CONTROLS) { go_page(m, MENU_PAGE_CONTROLS, -1); return 0; }
-    if (item == MENU_TESTS) { go_page(m, MENU_PAGE_TESTS, -1); return 0; }
-    if (item == MENU_CONTROLS_BACK || item == MENU_TESTS_BACK) { go_page(m, MENU_PAGE_MAIN, page_item(m->page)); return 0; }
-    if (is_editor(item)) return change(m, 0);
+    if (opens_page(item) >= 0) { go_page(m, opens_page(item), -1); return 0; }
+    if (is_back(item)) { go_page(m, MENU_PAGE_MAIN, page_item(m->page)); return 0; }
+    if (is_editor(item) || item == MENU_VR_RECENTER) return change(m, 0);
     return change(m, x < x0 + VALUE_X + 30 ? -1 : 1);
 }
 
@@ -416,14 +442,16 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
 
     int y = y0 + 8;
     menu_text(img, x0 + 10, y, m->page == MENU_PAGE_CONTROLS ? "SETTINGS > CONTROLS"
-                             : m->page == MENU_PAGE_TESTS ? "SETTINGS > TESTS (60 / 120 FPS)" : "SETTINGS", WHITE);
+                             : m->page == MENU_PAGE_TESTS ? "SETTINGS > TESTS (60 / 120 FPS)"
+                             : m->page == MENU_PAGE_VR ? "SETTINGS > VR (THEATER)" : "SETTINGS", WHITE);
     y += CELL_H + 8;
 
     static const char *const NAMES[MENU_ITEMS] = { "FRAME RATE", "FPS COUNTER", "SEGA SERVER", "ADHOC SERVER",
                                                    "ADHOC MODE", "MODERN SERVER", "RESOLUTION", "RENDERER", "MASTER VOLUME",
                                                    "MUSIC VOLUME", "SFX VOLUME", "ATTENUATION", "FONT", "CONTROLS", "TESTS",
-                                                   "CLOSE", "RIGHT STICK", "SENSITIVITY", "CIRCLE/CROSS", "TOUCH COLOR",
-                                                   "TOUCH OPACITY", "BACK", "TICK PACING", "30 HZ LOGIC", "BACK" };
+                                                   "VR", "CLOSE", "RIGHT STICK", "SENSITIVITY", "CIRCLE/CROSS", "TOUCH COLOR",
+                                                   "TOUCH OPACITY", "BACK", "TICK PACING", "30 HZ LOGIC", "BACK",
+                                                   "VR", "SCREEN DISTANCE", "SCREEN WIDTH", "RECENTER", "BACK" };
     static const char *const ADHOC_MODES[3] = { "< PPSSPP DIRECT >", "< PPSSPP RELAY >", "< MODERN >" };
     char adhoc[32];
     snprintf(adhoc, sizeof adhoc, "%.25s", m->adhoc[0] ? m->adhoc : "NOT SET");
@@ -449,6 +477,12 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
     char tcol[24], talpha[24];
     snprintf(tcol, sizeof tcol, "< %s >", menu_touch_color_name(m->touch_color));
     snprintf(talpha, sizeof talpha, "< %d%% >", m->touch_alpha * 10);
+    char vr_main[32], vr_on[40], vr_dist[24], vr_width[24];
+    snprintf(vr_main, sizeof vr_main, "> %.22s", m->vr_on ? (m->vr_status[0] ? m->vr_status : "ON") : "OFF");
+    snprintf(vr_on, sizeof vr_on, "< %s >%s%.17s", m->vr_on ? "ON" : "OFF", m->vr_on && m->vr_status[0] ? " " : "",
+             m->vr_on ? m->vr_status : "");
+    snprintf(vr_dist, sizeof vr_dist, "< %d.%d M >", m->vr_dist_dm / 10, m->vr_dist_dm % 10);
+    snprintf(vr_width, sizeof vr_width, "< %d.%d M >", m->vr_width_dm / 10, m->vr_width_dm % 10);
     for (int i = 0; i < MENU_ITEMS; i++) {
         if (!shown(m, i)) continue;
         const uint32_t col = i == m->sel ? YELLOW : WHITE;
@@ -466,7 +500,9 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
                       : i >= MENU_MASTER_VOL && i <= MENU_SFX_VOL ? vol[i - MENU_MASTER_VOL]
                       : i == MENU_ATTENUATION ? att : i == MENU_FONT ? font
                       : i == MENU_SWAP_OC ? (m->swap_oc ? "< SWAPPED >" : "< NORMAL >")
-                      : i == MENU_TOUCH_COLOR ? tcol : i == MENU_TOUCH_ALPHA ? talpha : "";
+                      : i == MENU_TOUCH_COLOR ? tcol : i == MENU_TOUCH_ALPHA ? talpha
+                      : i == MENU_VR ? vr_main : i == MENU_VR_ON ? vr_on
+                      : i == MENU_VR_DISTANCE ? vr_dist : i == MENU_VR_WIDTH ? vr_width : "";
         menu_text(img, x0 + VALUE_X, y, v, col);
         y += ROW_H;
     }
