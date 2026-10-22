@@ -5,7 +5,7 @@ this file at the end of every working session: what changed, what was checked,
 what is next. The plan itself is [VR_PLAN.md](VR_PLAN.md); user-facing docs are
 [VR.md](VR.md); reverse-engineering results go in [ADDRESS_MAP.md](ADDRESS_MAP.md).
 
-_Last updated: 2026-10-22 (HUD and menus rebuilt the PSUEx-VR way: HUD panel, menu screen; captures and RE tools)._
+_Last updated: 2026-10-22 (the HUD panel seen in the headset: a ring of HUD pictures; NPC portraits on the panel)._
 
 ## Handoff: start here (2026-10-22)
 
@@ -94,8 +94,10 @@ the world; the user found it overwhelming. Those were removed. Now:
   head tracking is on.
 - **Which layers go on the panel** (main.c `psp2i_hud_panel`, by the HUD
   sheet's clip w from dumps and captures): menus < 80, the field HUD
-  84-85.99, the minimap frame 86.85-87.05 and its 3D map > 1000. Everything
-  else stays in the world: labels (86, 88), the lock-on reticle (90).
+  84-85.99, the minimap frame 86.85-87.05, the menu background sheet 92 and
+  the 3D map > 1000, plus any sheet covering over a fifth of the screen
+  (NPC portraits, at w 86). Everything else stays in the world: labels
+  (86, 88), the lock-on reticle (90).
 - **Effects:** small orthographic scene-pass draws on the 3D target (hit
   sparks, techniques; w = 1) are placed in the world 55 units along the
   camera's ray (`ST_FX`). Not yet seen in a capture of this build.
@@ -117,11 +119,32 @@ the world; the user found it overwhelming. Those were removed. Now:
   talk and the mission terminal show the HUD panel in the game's layout and
   a clean scene; mission select was head-tracked (fixed since, not rerun).
   The user has not judged this build yet.
+- **Third run, the user in the headset:** the HUD, the minimap and the
+  "Abandon mission?" options were **invisible**, though every capture had
+  them. Cause: captures read the HUD picture directly, but the headset gets
+  it through `share_eyes`, which only took it when its frame matched the
+  eyes' frame. The eyes of frame N are shared at the vblank after their
+  flip, when the game has usually begun frame N+1's HUD and cleared the one
+  picture, so the frames never matched. Also, some NPC portraits stayed in
+  the world (the shop portrait is a HUD sheet at w 86, the labels' layer),
+  hiding the talk text and menu.
+- **Fixed (commit `315939a`, psprecomp `8283d3a`):** d3d11.c keeps a ring of
+  three HUD pictures (`HUD_RING`), each named by its frame; `share_eyes`
+  takes the one of the eyes' frame (`hud_slot`). `hud_panel` now also gets
+  the draw's share of the screen (psprecomp `stereo_classify` -> `st_bbox`),
+  and any HUD-pass sheet over a fifth of the screen goes on the panel.
+  Report line: `HUD panel draws; frames shared with their HUD N, without M`;
+  each capture logs the HUD picture's coloured / alpha pixel counts.
+- **Fourth run, the user in the headset: "all looks working now".** Log:
+  4209 of 5119 frames reached the headset with their HUD; the other 910
+  had none drawn (menu scenes, loading). Every capture's HUD picture had
+  alpha. The user didn't report on each item separately (panel distance and
+  follow, NPC talk, the minimap's enemies), and still no F11 captures.
 
 **Next (in order):**
-1. **The user's verdict on the PSUEx-style HUD**, then the reticle / label /
-   effect check with F11 captures at those moments (lock-on, technique,
-   names), as agreed.
+1. **The reticle / label / effect check with F11 captures** at those moments
+   (lock-on, technique, names), as agreed; ask how the HUD panel's distance,
+   size and follow feel, and whether the minimap shows enemies again.
 2. **Sharpness:** try `render_scale=4`; the real fix is eye pictures taller
    than 480:272 (the vertical scale stretches pixels).
 3. Engine-menu items for `vr_stereo` and `vr_world_scale` (the menu has 31
@@ -141,7 +164,7 @@ unless the user asks.
 | P0 RE tooling | **Done, run in town and field:** the GE gets identity view matrices (camera folded into bones / world on the CPU). View matrix found in RAM at `0x08FA98A0`, player world position at player object +0x4B0 (2 reports each; writer not yet watched) |
 | P1 PCVR theater | **Done, checked in the headset** by the user (2026-10-22): screen size, sharpness, colours, recenter and the button mapping in VR.md all right. Nothing to fix |
 | P2 stereo third person | **Stereo window done and checked in the PS VR2 (2026-10-22):** each GE draw replayed per eye, both pictures on one world-locked screen, HUD at screen depth. User: "looks pretty good", "3D looks right and it's steadier". 3x at 60 fps in town: 59.7 fps average (min 55.9). Still open for P2: world-scale tuning, wider culling, menu items, cutscene handling |
-| P3 head-rate decoupling | **Head tracking works in the PS VR2 (2026-10-22):** each eye drawn from the head at the GE (`psp_gpu_stereo.eye_views`, one pose per frame by tag), a projection layer at that pose with the game's FOV, the horizon levelled. User: the world stays still, leaning and recenter work; 30 fps steady. Since then: a view of about 99 x 94° (border almost gone, but pixelated), the game's cull widened 8x (hook on `0x08D7D63C`), and the HUD pass seen from the head (labels, reticle and effects stay in the world; the HUD stays in front of the game camera). Still open: the big HUD menus seen at an angle, sharpness, the FramePacket replay at headset rate |
+| P3 head-rate decoupling | **Head tracking works in the PS VR2 (2026-10-22):** each eye drawn from the head at the GE (`psp_gpu_stereo.eye_views`, one pose per frame by tag), a projection layer at that pose with the game's FOV, the horizon levelled. User: the world stays still, leaning and recenter work; 30 fps steady. Since then: a view of about 99 x 94° (border almost gone, but pixelated), the game's cull widened 8x (hook on `0x08D7D63C`), and the HUD and menus the PSUEx-VR way: a body-following HUD panel (user: "all looks working now"), labels, reticle and effects in the world, menu scenes on the flat screen. Still open: the F11 check of the reticle / labels / effects, sharpness, the FramePacket replay at headset rate |
 | P4 to P8 | Not started |
 
 ## Branches and PR
@@ -156,8 +179,9 @@ unless the user asks.
   the GE stereo replay (`psp_gpu_set_stereo`, `draw_eye`, `mono_is_left`);
   `088e6cf` the per-eye view matrices for head tracking (`eye_views`,
   `on_frame`, `psp_gpu_stereo_tag`).
-- Now: main repo `vr-theater` at the P3 head-tracking commit (after
-  `5df9c1e`); psprecomp `vr-draw-observer` at `c8ee358` (wider eye views, the HUD pass from the eyes).
+- Now: main repo `vr-theater` at `315939a` (the HUD ring) plus this doc
+  update; psprecomp `vr-draw-observer` at `8283d3a` (`hud_panel` gets the
+  screen share).
 - `3ds_port` (main repo, origin): a placeholder branch from `fd149a1`.
 
 ## What exists
