@@ -135,8 +135,17 @@ _Last updated: 2026-10-22 (P2 stereo window)._
     game thread 60% idle (13% on the CPU path), some frames still 3-4
     vblanks. Then the user set 60 fps in the menu and the session went to
     WAITING (stereo off) for the rest, so stereo at 60 fps and longer stereo
-    play are **not measured yet**. Next for speed: skip the mono draws while
-    only the headset needs pictures (the GPU draws everything 3 times).
+    play were not measured in that run.
+  - **Stereo at 60 fps (headset, town, 2026-10-22):** the user saw 3D
+    throughout, "fps varies". Log: 13810 frames shared over 5 min; per
+    minute 50.3 / 56.4 / 53.5 / 59.9 fps average (min 30), game thread 18-58%
+    idle. The session dropped to WAITING (not VISIBLE/FOCUSED) every 20-40 s
+    while the user still saw 3D, and each drop turned stereo off for a
+    moment. Fixed: stereo stays on until 3 s without RUNNING, and the log
+    names each session state (`vr: session state ...`) so the next run shows
+    what SteamVR reports. Fix built, **not run in the headset yet**.
+  - Next for speed: skip the mono draws while only the headset needs
+    pictures (the GPU draws everything 3 times).
   - Not done: the window doesn't follow the head (P3: head tracking +
     projection layer); objects nearer than the screen distance come out of
     the window and may cross its edge; world-space name labels in the HUD

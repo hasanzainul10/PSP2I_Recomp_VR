@@ -900,8 +900,15 @@ static void vr_apply(void) {
 /* Once per vblank: the eyes are drawn while the headset shows the game (or
  * --stereo), with Direct3D 11 only (the backend with eye copies). */
 static void stereo_update(void) {
+    /* Through short drops out of RUNNING too: the session left VISIBLE /
+     * FOCUSED for moments while the user still saw the game in 3D, and each
+     * drop turned the 3D off. Off after 3 s without RUNNING. */
+    static uint64_t running_vb;
+    const uint64_t vb = psp_sched_vblank_count();
+    if (g_vr_live && vr_status() == VR_RUNNING) running_vb = vb ? vb : 1;
+    const int recent = running_vb && vb - running_vb < 180;
     const int on = g_renderer == REN_D3D11 &&
-                   (g_stereo_arg || (g_vr_live && g_vr_stereo && vr_status() == VR_RUNNING));
+                   (g_stereo_arg || (g_vr_live && g_vr_stereo && recent));
     psp_gpu_stereo st = { 0, 0, 0, 0 };
     if (on) {
         st.on = 1;

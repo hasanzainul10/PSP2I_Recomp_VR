@@ -605,6 +605,11 @@ static void poll_events(void) {
         } else if (ev.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
             const XrEventDataSessionStateChanged *sc = (const XrEventDataSessionStateChanged *)&ev;
             g_state = sc->state;
+            {
+                static const char *const NAMES[] = { "UNKNOWN", "IDLE", "READY", "SYNCHRONIZED", "VISIBLE",
+                                                     "FOCUSED", "STOPPING", "LOSS_PENDING", "EXITING" };
+                fprintf(stderr, "vr: session state %s\n", (unsigned)g_state < 9 ? NAMES[g_state] : "?");
+            }
             switch (g_state) {
             case XR_SESSION_STATE_READY: {
                 XrSessionBeginInfo bi = { XR_TYPE_SESSION_BEGIN_INFO };
