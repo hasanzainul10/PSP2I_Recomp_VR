@@ -56,7 +56,8 @@
     X(xrWaitSwapchainImage) X(xrReleaseSwapchainImage) X(xrWaitFrame) X(xrBeginFrame) X(xrEndFrame) \
     X(xrStringToPath) X(xrCreateActionSet) X(xrDestroyActionSet) X(xrCreateAction) \
     X(xrSuggestInteractionProfileBindings) X(xrAttachSessionActionSets) X(xrSyncActions) \
-    X(xrGetActionStateBoolean) X(xrGetActionStateFloat) X(xrGetActionStateVector2f) X(xrResultToString)
+    X(xrGetActionStateBoolean) X(xrGetActionStateFloat) X(xrGetActionStateVector2f) X(xrResultToString) \
+    X(xrLocateViews)
 
 #define DECL(f) static PFN_##f p_##f;
 XR_GLOBAL_FUNCS(DECL)
@@ -73,14 +74,18 @@ static HANDLE g_thread;
 static char g_dir[600];
 
 static SRWLOCK  g_cfg_lock = SRWLOCK_INIT;
-static vr_config g_cfg = { VR_DISTANCE_DEFAULT, VR_WIDTH_DEFAULT, VR_SCALE_DEFAULT };
+static vr_config g_cfg = { VR_DISTANCE_DEFAULT, VR_WIDTH_DEFAULT, VR_SCALE_DEFAULT, 0 };
+static float     g_ipd = VR_IPD_DEFAULT;    /* under g_cfg_lock */
+static float     g_tan_fov = 0.7311f;       /* the game's horizontal half-FOV tangent (fovy 45, 480:272) */
 
 static SRWLOCK  g_frame_lock = SRWLOCK_INIT;
 /* The latest picture (0xAARRGGBB): 480x272, or k times that when the game
  * renders at a higher internal resolution (up to 4x). */
 static uint32_t g_frame[GAME_W * 4 * GAME_H * 4];
+static uint32_t g_frame_r[GAME_W * 4 * GAME_H * 4];   /* the right eye's (vr_submit_stereo) */
 static int      g_frame_w = GAME_W, g_frame_h = GAME_H;
-static LONG     g_frame_seq;                /* bumped per vr_submit_frame */
+static int      g_frame_stereo;             /* g_frame is the left eye and g_frame_r the right */
+static LONG     g_frame_seq;                /* bumped per vr_submit_frame / vr_submit_stereo */
 
 static SRWLOCK  g_pad_lock = SRWLOCK_INIT;
 static vr_pad   g_pad = { 0, 128, 128, 128, 128, 0 };
@@ -431,7 +436,7 @@ static int swapchain_create(int scale) {
     if (pick < 0) { fprintf(stderr, "vr: no 8-bit RGBA swapchain format\n"); return -1; }
     if (!PREF[pick].srgb) fprintf(stderr, "vr: no sRGB swapchain format; colours will look washed out\n");
     g_chain_bgra = PREF[pick].bgra;
-    g_chain_w = GAME_W * scale;
+    g_chain_w = GAME_W * scale * 2;                     /* left eye | right eye */
     g_chain_h = GAME_H * scale;
     XrSwapchainCreateInfo ci = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
     ci.usageFlags = XR_SWAPCHAIN_USAGE_SAMPLED_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT | XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
@@ -453,7 +458,7 @@ static int swapchain_create(int scale) {
     g_upload = (uint32_t *)malloc((size_t)g_chain_w * g_chain_h * 4);
     g_chain_filled = 0;
     g_uploaded_seq = -1;
-    fprintf(stderr, "vr: screen swapchain %dx%d, %d images\n", g_chain_w, g_chain_h, (int)g_nimages);
+    fprintf(stderr, "vr: screen swapchain %dx%d (one picture per eye), %d images\n", g_chain_w, g_chain_h, (int)g_nimages);
     return g_upload ? 0 : -1;
 }
 
@@ -588,18 +593,21 @@ static void upload(void) {
     const LONG seq = InterlockedCompareExchange(&g_frame_seq, 0, 0);
     if (seq == g_uploaded_seq || !g_upload) return;
     AcquireSRWLockShared(&g_frame_lock);
-    const int fw = g_frame_w, fh = g_frame_h;
-    const int s = g_chain_w / fw;                                /* swapchain pixels per picture pixel */
+    const int fw = g_frame_w, fh = g_frame_h, half = g_chain_w / 2;
+    const int s = half / fw;                                     /* swapchain pixels per picture pixel */
     if (s < 1 || g_chain_h / fh != s) { ReleaseSRWLockShared(&g_frame_lock); g_uploaded_seq = seq; return; }
-    for (int y = 0; y < fh; y++) {
-        const uint32_t *src = &g_frame[(size_t)y * fw];
-        uint32_t *row = &g_upload[(size_t)y * s * g_chain_w];
-        for (int x = 0; x < fw; x++) {
-            uint32_t c = src[x] | 0xFF000000u;                   /* 0xAARRGGBB = BGRA bytes */
-            if (!g_chain_bgra) c = (c & 0xFF00FF00u) | ((c >> 16) & 0xFFu) | ((c & 0xFFu) << 16);
-            for (int k = 0; k < s; k++) row[x * s + k] = c;
+    for (int eye = 0; eye < 2; eye++) {                          /* mono: the same picture twice */
+        const uint32_t *pic = eye && g_frame_stereo ? g_frame_r : g_frame;
+        for (int y = 0; y < fh; y++) {
+            const uint32_t *src = &pic[(size_t)y * fw];
+            uint32_t *row = &g_upload[(size_t)y * s * g_chain_w + (size_t)eye * half];
+            for (int x = 0; x < fw; x++) {
+                uint32_t c = src[x] | 0xFF000000u;               /* 0xAARRGGBB = BGRA bytes */
+                if (!g_chain_bgra) c = (c & 0xFF00FF00u) | ((c >> 16) & 0xFFu) | ((c & 0xFFu) << 16);
+                for (int k = 0; k < s; k++) row[x * s + k] = c;
+            }
+            for (int k = 1; k < s; k++) memcpy(row + (size_t)k * g_chain_w, row, (size_t)half * 4);
         }
-        for (int k = 1; k < s; k++) memcpy(row + (size_t)k * g_chain_w, row, (size_t)g_chain_w * 4);
     }
     ReleaseSRWLockShared(&g_frame_lock);
     g_uploaded_seq = seq;
@@ -618,6 +626,29 @@ static void upload(void) {
     p_xrReleaseSwapchainImage(g_chain, &ri);
 }
 
+/* The IPD, from the distance between the two eye poses. */
+static void update_ipd(XrTime t) {
+    XrViewLocateInfo li = { XR_TYPE_VIEW_LOCATE_INFO };
+    li.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    li.displayTime = t;
+    li.space = g_view;
+    XrViewState vs = { XR_TYPE_VIEW_STATE };
+    XrView v[2] = { { XR_TYPE_VIEW }, { XR_TYPE_VIEW } };
+    uint32_t n = 0;
+    if (XR_FAILED(p_xrLocateViews(g_sess, &li, &vs, 2, &n, v)) || n != 2) return;
+    if (!(vs.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT)) return;
+    const float dx = v[1].pose.position.x - v[0].pose.position.x, dy = v[1].pose.position.y - v[0].pose.position.y,
+                dz = v[1].pose.position.z - v[0].pose.position.z;
+    const float ipd = sqrtf(dx * dx + dy * dy + dz * dz);
+    if (ipd < 0.04f || ipd > 0.09f) return;                      /* not a plausible IPD */
+    AcquireSRWLockExclusive(&g_cfg_lock);
+    if (fabsf(ipd - g_ipd) > 0.0005f) {
+        g_ipd = ipd;
+        fprintf(stderr, "vr: IPD %.1f mm\n", ipd * 1000.0f);
+    }
+    ReleaseSRWLockExclusive(&g_cfg_lock);
+}
+
 static void frame(void) {
     XrFrameWaitInfo wi = { XR_TYPE_FRAME_WAIT_INFO };
     XrFrameState fs = { XR_TYPE_FRAME_STATE };
@@ -628,25 +659,32 @@ static void frame(void) {
     if (XR_FAILED(r)) { fprintf(stderr, "vr: xrBeginFrame failed: %s\n", res_name(r)); g_session_over = 1; return; }
 
     input_update(g_state == XR_SESSION_STATE_FOCUSED);
-    XrCompositionLayerQuad quad = { XR_TYPE_COMPOSITION_LAYER_QUAD };
-    const XrCompositionLayerBaseHeader *layers[1];
+    XrCompositionLayerQuad quad[2] = { { XR_TYPE_COMPOSITION_LAYER_QUAD }, { XR_TYPE_COMPOSITION_LAYER_QUAD } };
+    const XrCompositionLayerBaseHeader *layers[2];
     uint32_t nl = 0;
     if (fs.shouldRender) {
         if (InterlockedExchange(&g_recenter, 0) || !g_placed) place_screen(fs.predictedDisplayTime);
+        update_ipd(fs.predictedDisplayTime);
         upload();
         if (g_placed && g_chain_filled) {
             AcquireSRWLockShared(&g_cfg_lock);
-            const float w = g_cfg.width_m;
+            /* The stereo window is as wide as the game's FOV at its distance:
+             * then it shows the game world at its own angular size. */
+            const float w = g_cfg.stereo ? 2.0f * g_cfg.distance_m * g_tan_fov : g_cfg.width_m;
             ReleaseSRWLockShared(&g_cfg_lock);
-            quad.space = g_local;
-            quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-            quad.subImage.swapchain = g_chain;
-            quad.subImage.imageRect.extent.width = g_chain_w;
-            quad.subImage.imageRect.extent.height = g_chain_h;
-            quad.pose = g_screen_pose;
-            quad.size.width = w;
-            quad.size.height = w * (float)GAME_H / (float)GAME_W;
-            layers[nl++] = (const XrCompositionLayerBaseHeader *)&quad;
+            for (int eye = 0; eye < 2; eye++) {          /* the same screen; each eye its own picture */
+                XrCompositionLayerQuad *q = &quad[eye];
+                q->space = g_local;
+                q->eyeVisibility = eye ? XR_EYE_VISIBILITY_RIGHT : XR_EYE_VISIBILITY_LEFT;
+                q->subImage.swapchain = g_chain;
+                q->subImage.imageRect.offset.x = eye * (g_chain_w / 2);
+                q->subImage.imageRect.extent.width = g_chain_w / 2;
+                q->subImage.imageRect.extent.height = g_chain_h;
+                q->pose = g_screen_pose;
+                q->size.width = w;
+                q->size.height = w * (float)GAME_H / (float)GAME_W;
+                layers[nl++] = (const XrCompositionLayerBaseHeader *)q;
+            }
         }
     }
     XrFrameEndInfo ei = { XR_TYPE_FRAME_END_INFO };
@@ -740,6 +778,7 @@ void vr_configure(const vr_config *cfg) {
     const int moved = cfg->distance_m != g_cfg.distance_m;
     g_cfg.distance_m = cfg->distance_m;
     g_cfg.width_m = cfg->width_m;
+    g_cfg.stereo = cfg->stereo;
     ReleaseSRWLockExclusive(&g_cfg_lock);
     if (moved) InterlockedExchange(&g_recenter, 1);
 }
@@ -751,8 +790,32 @@ void vr_submit_frame(const uint32_t *argb, int w, int h) {
     AcquireSRWLockExclusive(&g_frame_lock);
     memcpy(g_frame, argb, (size_t)w * h * 4);
     g_frame_w = w; g_frame_h = h;
+    g_frame_stereo = 0;
     ReleaseSRWLockExclusive(&g_frame_lock);
     InterlockedIncrement(&g_frame_seq);
+}
+
+void vr_submit_stereo(const uint32_t *left, const uint32_t *right, int w, int h, float tan_half_fov_x) {
+    if (!g_thread || w < GAME_W || w % GAME_W || h * GAME_W != w * GAME_H || w > GAME_W * 4) return;
+    AcquireSRWLockExclusive(&g_frame_lock);
+    memcpy(g_frame, left, (size_t)w * h * 4);
+    memcpy(g_frame_r, right, (size_t)w * h * 4);
+    g_frame_w = w; g_frame_h = h;
+    g_frame_stereo = 1;
+    ReleaseSRWLockExclusive(&g_frame_lock);
+    if (tan_half_fov_x > 0.1f && tan_half_fov_x < 10.0f) {
+        AcquireSRWLockExclusive(&g_cfg_lock);
+        g_tan_fov = tan_half_fov_x;
+        ReleaseSRWLockExclusive(&g_cfg_lock);
+    }
+    InterlockedIncrement(&g_frame_seq);
+}
+
+float vr_ipd(void) {
+    AcquireSRWLockShared(&g_cfg_lock);
+    const float ipd = g_ipd;
+    ReleaseSRWLockShared(&g_cfg_lock);
+    return ipd;
 }
 
 int vr_pad_get(vr_pad *out) {

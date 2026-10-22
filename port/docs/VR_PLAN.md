@@ -115,6 +115,58 @@ input: vr_input → psp_ctrl_set         with latest head pose → XR swapchains
 
 **P2: Stereo third person (PCVR).** Per-eye high-res targets, separate from VRAM. View-space re-projection, the HUD split to a panel, per-eye bloom, wider culling, comfort set 2-5, VR menu page.
 
+### P2 approach (decided 2026-10-22)
+
+Two ways to get two eyes were weighed:
+
+- **Two game-side renders through SetViewMatrix** (`0x08D81D84`): run the
+  game's scene build twice with a per-eye view. Rejected for now: the scene
+  build is interleaved with game logic, effects and the HUD in one display
+  list, so running it twice means re-entering game code mid-frame (side
+  effects on animation timers, particles, the online state).
+- **One game render, each draw replayed per eye at the GE** (chosen). In
+  PSP2i every 3D draw already reaches the GE in eye space (the VIEW register is
+  the identity; WORLD and the bones hold the camera). So after `psp_gpu_prim`
+  has transformed a draw for the game's own (mono) picture, it moves each
+  vertex in clip space for the eye and hands the draw again to the backend's
+  `draw_eye(eye, ...)`. Skinning, lighting and texture work are done once.
+
+Details of the replay:
+
+- **Per-eye offset** (`psp_gpu_set_stereo`): for an eye at view-space x = c
+  (±half IPD in game units), a vertex at distance `dist` moves by
+  `c·(dist/D − 1)` in view x. That is the eye's own camera plus an off-axis
+  shift, so points at distance D (the convergence distance) have no disparity
+  and points at infinity are one IPD apart on the screen plane. Only
+  perspective draws move (PROJ with a w that depends on z). Through-mode (2D)
+  and orthographic draws, the HUD included, are the same in both eyes: they
+  sit at screen depth.
+- **Per-eye shadow targets** in the D3D11 backend: every render target that
+  receives an eye draw gets two more textures (and its depth buffer two more
+  depth textures) at the internal resolution. The mono target keeps VRAM
+  coherence exactly as before; the eye copies follow it: an upload from VRAM
+  or a GPU transfer between targets is repeated into them, and a draw that
+  samples a render target samples the same eye's copy. So bloom, blur and the
+  final copy to the display buffer run per eye with the right eye's picture.
+- **To the headset:** at each flip the display target's two eye copies are
+  read back with the mono picture (asynchronously) and handed to the VR thread
+  (`vr_submit_stereo`). The theater shows them as a **stereo window**: two
+  quad layers at the same world-locked pose, one per eye. The window's width
+  matches the game's horizontal FOV at its distance, and the world scale
+  (game units per metre) sets IPD and convergence so the window is a portal
+  into the game world at the right size.
+
+Why a window and not a projection layer yet: a projection layer needs the
+game camera to follow the head, or the whole world turns with your head. That
+is P3 (head tracking on the camera chain, `0x08AFA598`) plus reprojection.
+The window is world-locked and comfortable now, and its pictures are exactly
+what a projection layer will need later (per-eye targets).
+
+Costs: the CPU repeats clipping and triangle setup per eye (not skinning or
+lighting); the GPU draws everything three times; two more readbacks per frame.
+Sharing the eye textures with the VR device instead of reading them back is
+the next optimisation.
+
 **P3: Head-rate decoupling.** FramePacket replay at headset rate on the render thread. Game logic stays at 30/60 (`framerate.c`).
 
 **P4: First person.** Head-bone camera, head hidden by bone weight, body-relative movement, lock-on in the world, the mirror.

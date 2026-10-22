@@ -21,6 +21,7 @@ typedef struct {
     float distance_m;   /* the screen's distance from the head at recenter */
     float width_m;      /* the screen's width (the height follows 480:272) */
     int   scale;        /* swapchain pixels per game pixel, 1..4 (nearest: sharp under the compositor's filter) */
+    int   stereo;       /* the screen is a stereo window (vr_submit_stereo): its width follows the game's FOV */
 } vr_config;
 
 #define VR_DISTANCE_DEFAULT 2.5f
@@ -48,6 +49,20 @@ void vr_recenter(void);                                     /* the screen in fro
  * whole multiple up to 4x (the internal resolution). Copied. Give the
  * swapchain the same scale (vr_config.scale) to keep every pixel. */
 void vr_submit_frame(const uint32_t *argb, int w, int h);
+
+/* Phase 2, the stereo window: one picture per eye (same sizes as
+ * vr_submit_frame), drawn by the game with each eye's offset. Each eye sees
+ * its own picture on the same world-locked screen, which is then as wide as
+ * the game's horizontal FOV at its distance (tan_half_fov_x: the game's
+ * horizontal half-FOV tangent; 0 = keep the last one), so the screen is a
+ * window into the game world. Copied. A later vr_submit_frame shows a mono
+ * picture again. */
+void vr_submit_stereo(const uint32_t *left, const uint32_t *right, int w, int h, float tan_half_fov_x);
+
+/* The headset's IPD in metres (the distance between the two eye poses), or
+ * VR_IPD_DEFAULT until the session reports it. */
+#define VR_IPD_DEFAULT 0.064f
+float vr_ipd(void);
 
 /* The controllers as a PSP pad. buttons: PSP_CTRL_* bits; sticks 0..255, 128
  * centre (left: the analog stick, right: the camera). host: VR_HOST_* actions

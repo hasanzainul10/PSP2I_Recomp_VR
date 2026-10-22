@@ -42,7 +42,11 @@
  *   --replay-input FILE      play back a PSP2I_INPUT_RECORD=FILE recording (same
  *               input on the same game frame; its fps unless --fps)
  *   --overlay-shot VBLANK  (repeatable) save the presented image, overlay
- *               included, as <capture-dir>/overlay_<vblank>.ppm
+ *               included, as <capture-dir>/overlay_<vblank>.ppm (and with
+ *               stereo on, each eye's picture as overlay_<vblank>_L/_R.ppm)
+ *   --ge-dump VBLANK  what F12 does, at that vblank (frame and draws in dumps/)
+ *   --stereo    (VR builds) draw the game once per eye without a headset, to
+ *               check the stereo pictures with --overlay-shot
  *   --audio / --no-audio  sound through SDL3.dll (audio_sdl.c): on by default
  *               with a window, off headless; PSP2I_AUDIO_DUMP=file.wav records
  *   --sdl / --no-sdl  controllers through SDL3.dll (input_sdl.c): on by default
@@ -165,6 +169,7 @@ void d3d11_report(FILE *out);
 int  d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w, int h);
 void d3d11_set_scale(int s);
 const uint32_t *d3d11_present_hires(int *w, int *h);
+const uint32_t *d3d11_present_eye(int eye, int *w, int *h);
 #endif
 #include "gl_ge.h"
 
@@ -834,12 +839,28 @@ static int      g_sdl_on;
 static uint32_t g_pad_bits;
 static uint8_t  g_pad_ax = 128, g_pad_ay = 128;
 
+/* Game units per metre: a first estimate (the orbit camera sits ~55-60 units
+ * behind the player, about 5.5 m at this scale); vr_world_scale= adjusts it. */
+#define VR_WORLD_SCALE_DEFAULT 10.0f
+
 /* VR (vr/vr.h): the theater screen and the motion controllers as a pad.
  * Saved in psp2i_display.ini (vr=, vr_distance=, vr_width=); --vr / --no-vr
  * for one run. The controllers add to the SDL pad: buttons OR together, and
  * the VR sticks win unless only the SDL one is pushed. */
 static int      g_vr_on;                    /* the saved choice (menu VR) */
 static int      g_vr_dist_dm = 25, g_vr_width_dm = 30;
+/* Phase 2, stereo (vr_stereo=, vr_world_scale=): with Direct3D 11 the game is
+ * drawn again for each eye at the GE (psp_gpu_set_stereo, d3d11.c's eye
+ * copies) and the screen becomes a stereo window. The world scale is game
+ * units per metre: it sets the IPD and the convergence distance (the
+ * screen's distance) in game units. */
+static int      g_vr_stereo = 1;
+static float    g_vr_world_scale = VR_WORLD_SCALE_DEFAULT;
+static int      g_stereo_arg;               /* --stereo: the eyes without a headset (dev) */
+static int      g_stereo_on;                /* the eyes are drawn now */
+static const uint32_t *g_eye_px[2];         /* this vblank's eye pictures (d3d11.c), or NULL */
+static int      g_eye_w, g_eye_h;
+static uint32_t *g_eye_rgba[2];             /* ... with the overlay, for the headset */
 static int      g_vr_live;                  /* vr_start ran */
 static uint32_t g_vr_host;                  /* VR_HOST_* held */
 static uint8_t  g_vr_rx = 128, g_vr_ry = 128;
@@ -850,7 +871,8 @@ static int stick_off_centre(uint8_t x, uint8_t y) { return x < 96 || x > 160 || 
 #ifdef PSP2I_VR
 static void vr_apply(void) {
     /* The swapchain matches the render scale, so the headset gets every pixel. */
-    const vr_config cfg = { g_vr_dist_dm / 10.0f, g_vr_width_dm / 10.0f, g_hi_s > 1 ? g_hi_s : VR_SCALE_DEFAULT };
+    const vr_config cfg = { g_vr_dist_dm / 10.0f, g_vr_width_dm / 10.0f, g_hi_s > 1 ? g_hi_s : VR_SCALE_DEFAULT,
+                            g_vr_stereo && g_renderer == REN_D3D11 };
     if (g_vr_on && !g_vr_live && !g_headless) {
         vr_set_swap_circle_cross(g_swap_oc);
         g_vr_live = vr_start(g_exe_dir, &cfg) == 0;
@@ -861,6 +883,43 @@ static void vr_apply(void) {
         g_vr_rx = g_vr_ry = 128;
     } else if (g_vr_live) {
         vr_configure(&cfg);
+    }
+}
+
+/* Once per vblank: the eyes are drawn while the headset shows the game (or
+ * --stereo), with Direct3D 11 only (the backend with eye copies). */
+static void stereo_update(void) {
+    const int on = g_renderer == REN_D3D11 &&
+                   (g_stereo_arg || (g_vr_live && g_vr_stereo && vr_status() == VR_RUNNING));
+    psp_gpu_stereo st = { 0, 0, 0, 0 };
+    if (on) {
+        st.on = 1;
+        st.half_ipd = 0.5f * vr_ipd() * g_vr_world_scale;
+        st.converge = g_vr_dist_dm / 10.0f * g_vr_world_scale;   /* the screen's distance: no disparity there */
+        st.flat_after_clear = 1;                                  /* PSP2i draws its HUD in 3D after a second clear */
+    }
+    if (on != g_stereo_on) fprintf(stderr, "vr: stereo %s\n", on ? "on (each eye drawn at the GE)" : "off");
+    psp_gpu_set_stereo(&st);
+    g_stereo_on = on;
+}
+
+/* The eye pictures with the overlay (menus, FPS) on top, as compose() does
+ * for the S-times picture: each overlay pixel covers its block. */
+static void compose_eyes(void) {
+    const int S = g_eye_w / SCREEN_W, W = g_eye_w;
+    for (int e = 0; e < 2; e++) {
+        if (!g_eye_rgba[e]) g_eye_rgba[e] = (uint32_t *)malloc((size_t)SCREEN_W * 4 * SCREEN_H * 4 * 4);
+        if (!g_eye_rgba[e]) return;
+        for (int y = 0; y < SCREEN_H; y++)
+            for (int x = 0; x < SCREEN_W; x++) {
+                const int i = y * SCREEN_W + x;
+                const int flat = g_rgba[i] != g_frame[i];
+                for (int k = 0; k < S; k++) {
+                    uint32_t *dst = g_eye_rgba[e] + (size_t)(y * S + k) * W + (size_t)x * S;
+                    if (flat) for (int j = 0; j < S; j++) dst[j] = g_rgba[i];
+                    else memcpy(dst, g_eye_px[e] + (size_t)(y * S + k) * W + (size_t)x * S, (size_t)S * 4);
+                }
+            }
     }
 }
 #endif
@@ -935,6 +994,11 @@ static int display_load(void) {
         else if (!strncmp(line, "test_tick_pacing=", 17)) g_test_ticks = !strncmp(line + 17, "on", 2);
         else if (!strncmp(line, "test_30hz_logic=", 16))  g_test_logic = !strncmp(line + 16, "on", 2);
         else if (!strncmp(line, "vr=", 3))             g_vr_on = !strncmp(line + 3, "on", 2);
+        else if (!strncmp(line, "vr_stereo=", 10))     g_vr_stereo = strncmp(line + 10, "off", 3) != 0;
+        else if (!strncmp(line, "vr_world_scale=", 15)) {
+            const float k = (float)atof(line + 15);
+            if (k >= 1.0f && k <= 100.0f) g_vr_world_scale = k;
+        }
         else if (!strncmp(line, "vr_distance=", 12) || !strncmp(line, "vr_width=", 9)) {
             const int dist = line[3] == 'd';
             int dm = (int)(atof(line + (dist ? 12 : 9)) * 10.0 + 0.5);
@@ -985,6 +1049,9 @@ static void display_save(int res) {
     fprintf(f, "; VR (OpenXR): on = the game on a screen in the headset; its distance and width in metres\n");
     fprintf(f, "vr=%s\nvr_distance=%d.%d\nvr_width=%d.%d\n", g_vr_on ? "on" : "off",
             g_vr_dist_dm / 10, g_vr_dist_dm % 10, g_vr_width_dm / 10, g_vr_width_dm % 10);
+    fprintf(f, "; VR stereo (Direct3D 11): on = a 3D window into the game (as wide as its view), off = the flat screen;"
+               " world scale = game units per metre (sets the depth)\n");
+    fprintf(f, "vr_stereo=%s\nvr_world_scale=%.1f\n", g_vr_stereo ? "on" : "off", (double)g_vr_world_scale);
     fprintf(f, "; PPSSPP texture packs: folders holding a textures.ini, ';'-separated, later ones win (relative to the exe); empty = off\n");
     fprintf(f, "texture_packs=%s\n", g_texpacks);
     fclose(f);
@@ -1335,6 +1402,8 @@ static void find_iso(const char *dir, const char *root, char *out, size_t cap) {
 
 /* F12: the displayed frame as dumps/frame_<vblank>.ppm and every draw of the
  * next frame as dumps/draws_<vblank>.txt, next to the exe. */
+static uint64_t g_ge_dump_vb;              /* --ge-dump VBLANK: as F12 at that vblank */
+
 static void take_dump(uint64_t vb) {
     char dir[600], path[700];
     exe_dir(dir, sizeof dir);
@@ -1357,10 +1426,14 @@ static uint64_t g_prof_from, g_prof_to;
 static void on_vblank(void) {
     uint64_t vb = psp_sched_vblank_count();
     g_prof_on = vb >= g_prof_from && (!g_prof_to || vb < g_prof_to);
+    if (g_ge_dump_vb && vb == g_ge_dump_vb) g_dump_key = 1;
     if (g_dump_key) { g_dump_key = 0; take_dump(vb); }
 #ifndef PSP2I_PROD
     rateaudit_vblank();
     vr_probe_vblank();
+#endif
+#ifdef PSP2I_VR
+    stereo_update();
 #endif
     if (g_find_vblank && vb == g_find_vblank) find_word();
     if (g_watch_late_addr && psp_display_flips() >= g_watch_late_flip) {
@@ -1416,6 +1489,16 @@ static void on_vblank(void) {
             if (g_hi_valid) memcpy(g_hi_frame, hi, (size_t)hw * hh * 4);
         }
         if (p == 0) g_hi_valid = 0;                      /* from VRAM: 480x272 only */
+#ifdef PSP2I_VR
+        g_eye_px[0] = g_eye_px[1] = NULL;
+        if (p == 1 && g_stereo_on && g_renderer == REN_D3D11) {
+            int w1, h1, w2, h2;
+            const uint32_t *l = d3d11_present_eye(0, &w1, &h1), *r = d3d11_present_eye(1, &w2, &h2);
+            if (l && r && w1 == w2 && h1 == h2 && w1 % SCREEN_W == 0 && w1 <= SCREEN_W * 4) {
+                g_eye_px[0] = l; g_eye_px[1] = r; g_eye_w = w1; g_eye_h = h1;
+            }
+        }
+#endif
         if (p == 1 && getenv("PSP2I_PRESENT_VERIFY")) {
             /* The asynchronous picture against VRAM made current (the access
              * hook reads the same target back): they must match exactly. */
@@ -1439,7 +1522,11 @@ static void on_vblank(void) {
         if (g_have_frame) {
             compose();
 #ifdef PSP2I_VR
-            if (g_vr_live && have_frame) {                   /* the same picture, in the headset */
+            if (g_vr_live && have_frame && g_eye_px[0]) {    /* stereo: each eye's own picture */
+                compose_eyes();
+                if (g_eye_rgba[0] && g_eye_rgba[1])
+                    vr_submit_stereo(g_eye_rgba[0], g_eye_rgba[1], g_eye_w, g_eye_h, psp_gpu_stereo_tan_half_fov());
+            } else if (g_vr_live && have_frame) {            /* the same picture, in the headset */
                 if (g_hi_s > 1) vr_submit_frame(g_hi_rgba, SCREEN_W * g_hi_s, SCREEN_H * g_hi_s);
                 else vr_submit_frame(g_rgba, SCREEN_W, SCREEN_H);
             }
@@ -1485,6 +1572,20 @@ static void on_vblank(void) {
                 fprintf(stderr, "overlay-shot: vblank %llu -> %s\n", (unsigned long long)vb, path);
             }
         }
+#ifdef PSP2I_VR
+        for (int e = 0; e < 2 && g_eye_px[0] && g_eye_px[1]; e++) {   /* stereo: each eye (no overlay) */
+            snprintf(path, sizeof path, "%s/overlay_%06llu_%c.ppm", g_capture_dir, (unsigned long long)vb, e ? 'R' : 'L');
+            if ((f = fopen(path, "wb")) == NULL) continue;
+            fprintf(f, "P6\n%d %d\n255\n", g_eye_w, g_eye_h);
+            for (int k = 0; k < g_eye_w * g_eye_h; k++) {
+                const uint32_t c = g_eye_px[e][k];
+                const uint8_t rgb[3] = { (uint8_t)(c >> 16), (uint8_t)(c >> 8), (uint8_t)c };
+                fwrite(rgb, 1, 3, f);
+            }
+            fclose(f);
+            fprintf(stderr, "overlay-shot: vblank %llu -> %s\n", (unsigned long long)vb, path);
+        }
+#endif
     }
     if (g_capture_every && vb % g_capture_every == 0) {
         char path[700];
@@ -2308,6 +2409,9 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--vr"))                            vr_arg = 1;
         else if (!strcmp(argv[i], "--no-vr"))                         vr_arg = 0;
+#ifdef PSP2I_VR
+        else if (!strcmp(argv[i], "--stereo"))                        g_stereo_arg = 1;
+#endif
         else if (!strcmp(argv[i], "--audio"))                         want_audio = 1;
         else if (!strcmp(argv[i], "--no-audio"))                      want_audio = 0;
         else if (!strcmp(argv[i], "--log-floats") && i + 3 < argc) {
@@ -2354,6 +2458,7 @@ int main(int argc, char **argv) {
 #endif
         else if (!strcmp(argv[i], "--label-ring"))                    ring_arm();
         else if (!strcmp(argv[i], "--dump-on-bad") && i + 1 < argc)   dump_on_bad_access(argv[++i]);
+        else if (!strcmp(argv[i], "--ge-dump") && i + 1 < argc)      g_ge_dump_vb = strtoull(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--dump-at") && i + 2 < argc)       { dump_addr = (uint32_t)strtoul(argv[i + 1], NULL, 0); dump_path = argv[i + 2]; i += 2; }
         else if (!strcmp(argv[i], "--args-from-flip") && i + 2 < argc) {
             args_addr = (uint32_t)strtoul(argv[i + 1], NULL, 0);

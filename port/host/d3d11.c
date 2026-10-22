@@ -95,6 +95,12 @@ typedef struct {
     uint64_t synced_hash;
     uint64_t check_frame;
     uint64_t last_use;
+    /* Stereo (d3d_draw_eye): the same target as each eye sees it, made on
+     * the first eye draw; eye_frame is the flip of the last one. */
+    ID3D11Texture2D *eye_tex[2];
+    ID3D11RenderTargetView *eye_rtv[2];
+    ID3D11ShaderResourceView *eye_srv[2];
+    uint64_t eye_frame;
 } rt_entry;
 
 typedef struct {
@@ -103,6 +109,8 @@ typedef struct {
     ID3D11Texture2D *tex;
     ID3D11DepthStencilView *dsv;
     uint64_t last_use;
+    ID3D11Texture2D *eye_tex[2];             /* stereo: each eye's depth */
+    ID3D11DepthStencilView *eye_dsv[2];
 } depth_entry;
 
 typedef struct {
@@ -346,6 +354,11 @@ static ID3DBlob *compile(const char *entry, const char *target) { return compile
 /* ---- render targets ---------------------------------------------------------------- */
 
 static void rt_free(rt_entry *t) {
+    for (int e = 0; e < 2; e++) {
+        if (t->eye_srv[e]) ID3D11ShaderResourceView_Release(t->eye_srv[e]);
+        if (t->eye_rtv[e]) ID3D11RenderTargetView_Release(t->eye_rtv[e]);
+        if (t->eye_tex[e]) ID3D11Texture2D_Release(t->eye_tex[e]);
+    }
     if (t->srv) ID3D11ShaderResourceView_Release(t->srv);
     if (t->rtv) ID3D11RenderTargetView_Release(t->rtv);
     if (t->tex) ID3D11Texture2D_Release(t->tex);
@@ -451,6 +464,8 @@ static void rt_upload(rt_entry *t) {
     D3D11_BOX box = { 0, 0, 0, t->stride * (uint32_t)g_scale, t->rows * (uint32_t)g_scale, 1 };
     ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)t->tex, 0, &box, px, t->stride * (uint32_t)g_scale * 4, 0);
     free(px);
+    for (int e = 0; e < 2; e++)                         /* the eyes see the same new bytes */
+        if (t->eye_tex[e]) ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)t->eye_tex[e], (ID3D11Resource *)t->tex);
     uint32_t bytes = t->rows * t->stride * (uint32_t)bpp;
     if (t->off + bytes > VRAM_SIZE) bytes = VRAM_SIZE - t->off;
     t->synced_hash = hash_bytes(v + t->off, bytes);
@@ -532,6 +547,10 @@ static depth_entry *depth_get(uint32_t off, uint32_t w, uint32_t h) {
             for (int i = 1; i < MAX_DEPTH; i++) if (g_depth[i].last_use < d->last_use) d = &g_depth[i];
             if (d->dsv) ID3D11DepthStencilView_Release(d->dsv);
             if (d->tex) ID3D11Texture2D_Release(d->tex);
+            for (int e = 0; e < 2; e++) {
+                if (d->eye_dsv[e]) ID3D11DepthStencilView_Release(d->eye_dsv[e]);
+                if (d->eye_tex[e]) ID3D11Texture2D_Release(d->eye_tex[e]);
+            }
             memset(d, 0, sizeof *d);
         }
         D3D11_TEXTURE2D_DESC td;
@@ -827,7 +846,14 @@ static ID3D11SamplerState *sampler(int linear, int cu, int cv) {
 static int rt_resolve_copy(rt_entry *r);
 static int xfer_enabled(void);
 
+/* What the last texture_view sampled, for the eye draws that follow it: a
+ * render target (sampled directly, or through the scratch copy when it is
+ * also the target), or NULL for an ordinary texture. */
+static rt_entry *g_tv_src;
+static int g_tv_self;
+
 static ID3D11ShaderResourceView *texture_view(const psp_gpu_state *st, rt_entry *target, float scale[2]) {
+    g_tv_src = NULL; g_tv_self = 0;
     const uint32_t toff = vram_off(st->tex_addr);
     const int in_vram = (st->tex_addr & 0x0F000000u) == 0x04000000u;
     if (in_vram) {
@@ -844,6 +870,7 @@ static ID3D11ShaderResourceView *texture_view(const psp_gpu_state *st, rt_entry 
                 n_rt_tex++;
                 scale[0] = 1.0f / (float)r->w;
                 scale[1] = 1.0f / (float)r->h;
+                g_tv_src = r; g_tv_self = r == target;
                 if (r != target) return r->srv;
                 if (!g_scratch || g_scratch_w != r->w || g_scratch_h != r->h) {
                     if (g_scratch_srv) ID3D11ShaderResourceView_Release(g_scratch_srv);
@@ -868,6 +895,7 @@ static ID3D11ShaderResourceView *texture_view(const psp_gpu_state *st, rt_entry 
                 n_rt_tex++;
                 scale[0] = 1.0f / (float)t->w;
                 scale[1] = 1.0f / (float)t->h;
+                g_tv_src = t; g_tv_self = t == target;
                 if (t != target) return t->srv;
                 /* Sampled while being drawn to: sample a copy. */
                 if (!g_scratch || g_scratch_w != t->w || g_scratch_h != t->h) {
@@ -1076,6 +1104,13 @@ static void rt_xfer(rt_entry *t, rt_entry *o, uint32_t a, uint32_t b, int own) {
     ID3D11DeviceContext_PSSetShaderResources(g_ctx, 1, 1, &o->srv);
     ID3D11DeviceContext_Draw(g_ctx, 3, 0);
     ID3D11ShaderResourceView *none = NULL;
+    for (int e = 0; e < 2; e++) {                       /* and the same bytes in each eye's copy */
+        if (!t->eye_rtv[e]) continue;
+        ID3D11DeviceContext_PSSetShaderResources(g_ctx, 1, 1, &none);
+        ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &t->eye_rtv[e], NULL);
+        ID3D11DeviceContext_PSSetShaderResources(g_ctx, 1, 1, o->eye_srv[e] ? &o->eye_srv[e] : &o->srv);
+        ID3D11DeviceContext_Draw(g_ctx, 3, 0);
+    }
     ID3D11DeviceContext_PSSetShaderResources(g_ctx, 1, 1, &none);
     if (xverify()) xverify_xfer(t, o, a, b, y0, y1);
     if (own) rows_mark(t, y0, y1);
@@ -1114,6 +1149,85 @@ static int rt_resolve_copy(rt_entry *r) {
     }
     return newer;
 }
+
+/* One draw into rtv (a target tw x th PSP pixels, at the internal
+ * resolution) with depth dsv and texture srv. -1 if it could not be queued. */
+static int submit_draw(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts, ID3D11RenderTargetView *rtv,
+                       ID3D11DepthStencilView *dsv, ID3D11ShaderResourceView *srv, uint32_t tw, uint32_t th,
+                       const float uvs[2]) {
+    /* Vertices into the ring buffer. */
+    UINT bytes = (UINT)nverts * (UINT)sizeof(psp_gpu_vertex);
+    if (bytes > VB_BYTES) return -1;
+    D3D11_MAP mode = D3D11_MAP_WRITE_NO_OVERWRITE;
+    if (g_vb_pos + bytes > VB_BYTES) { g_vb_pos = 0; mode = D3D11_MAP_WRITE_DISCARD; }
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_vb, 0, mode, 0, &m))) return -1;
+    memcpy((uint8_t *)m.pData + g_vb_pos, v, bytes);
+    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_vb, 0);
+    UINT stride = sizeof(psp_gpu_vertex), vboff = g_vb_pos;
+    g_vb_pos += bytes;
+
+    vs_consts vc = { { (float)tw, (float)th, uvs[0], uvs[1] } };
+    ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)g_vcb, 0, NULL, &vc, 0, 0);
+    ps_consts pc;
+    memset(&pc, 0, sizeof pc);
+    pc.env[0] = (float)(st->env & 0xFF) / 255.0f;
+    pc.env[1] = (float)((st->env >> 8) & 0xFF) / 255.0f;
+    pc.env[2] = (float)((st->env >> 16) & 0xFF) / 255.0f;
+    pc.tf[0] = (uint32_t)(st->tex != 0); pc.tf[1] = (uint32_t)st->tfunc;
+    pc.tf[2] = (uint32_t)st->trgba; pc.tf[3] = (uint32_t)st->tdbl;
+    pc.at[0] = (uint32_t)(st->atest && !st->clear); pc.at[1] = (uint32_t)st->afunc;
+    pc.at[2] = st->aref; pc.at[3] = st->amask;
+    pc.misc[0] = (uint32_t)st->clear;
+    ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)g_pcb, 0, NULL, &pc, 0, 0);
+
+    int approx = 0;
+    float bf[4];
+    ID3D11BlendState *bs = blend_state(st, bf, &approx);
+    if (approx) n_approx++;
+
+    ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &rtv, dsv);
+    /* The vertex shader maps PSP pixels (vc.vp) to the target; the viewport
+     * and scissor are the target's own, S times larger. */
+    const LONG S = g_scale;
+    D3D11_VIEWPORT vp = { 0, 0, (float)(tw * S), (float)(th * S), 0, 1 };
+    ID3D11DeviceContext_RSSetViewports(g_ctx, 1, &vp);
+    D3D11_RECT sc = { st->sx0 * S, st->sy0 * S, (st->sx1 + 1) * S, (st->sy1 + 1) * S };
+    ID3D11DeviceContext_RSSetScissorRects(g_ctx, 1, &sc);
+    ID3D11DeviceContext_RSSetState(g_ctx, g_rs);
+    ID3D11DeviceContext_OMSetBlendState(g_ctx, bs, bf, 0xFFFFFFFFu);
+    ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, depth_state(st), 0);
+    ID3D11DeviceContext_IASetInputLayout(g_ctx, g_layout);
+    ID3D11DeviceContext_IASetPrimitiveTopology(g_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_IASetVertexBuffers(g_ctx, 0, 1, &g_vb, &stride, &vboff);
+    ID3D11DeviceContext_VSSetShader(g_ctx, g_vs, NULL, 0);
+    ID3D11DeviceContext_VSSetConstantBuffers(g_ctx, 0, 1, &g_vcb);
+    ID3D11DeviceContext_PSSetShader(g_ctx, g_ps, NULL, 0);
+    ID3D11DeviceContext_PSSetConstantBuffers(g_ctx, 1, 1, &g_pcb);
+    if (srv) {
+        ID3D11SamplerState *ss = sampler(st->tex_linear, st->tex_clamp_u, st->tex_clamp_v);
+        ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 1, &srv);
+        ID3D11DeviceContext_PSSetSamplers(g_ctx, 0, 1, &ss);
+    }
+    ID3D11DeviceContext_Draw(g_ctx, (UINT)nverts, 0);
+    if (srv) {                                          /* unbind, so the view can become a target */
+        ID3D11ShaderResourceView *none = NULL;
+        ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 1, &none);
+    }
+    return 0;
+}
+
+/* The last draw d3d_draw accepted, for its eye draws (which follow it at
+ * once, with the same state): its target, depth and texture. */
+static struct {
+    rt_entry *t;
+    depth_entry *d;
+    ID3D11ShaderResourceView *srv;
+    rt_entry *src;                       /* the render target sampled, if any */
+    int self;                            /* ... which is also the target */
+    float uvs[2];
+} g_last;
+static uint64_t n_eye_draws;
 
 static int d3d_draw(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts) {
     if ((st->fb_addr & 0x0F000000u) != 0x04000000u || !st->fb_stride || nverts <= 0) return 1;
@@ -1176,9 +1290,11 @@ static int d3d_draw(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts
         }
     }
 
+    g_last.t = NULL;
     ID3D11DepthStencilView *dsv = NULL;
+    depth_entry *d = NULL;
     if (st->zb_stride && (st->ztest || (st->clear && (st->clear_which & 4)))) {
-        depth_entry *d = depth_get(vram_off(st->zb_addr), t->w, t->h);
+        d = depth_get(vram_off(st->zb_addr), t->w, t->h);
         if (d) dsv = d->dsv;
     }
 
@@ -1189,65 +1305,10 @@ static int d3d_draw(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts
         if (!srv) return 1;
     }
 
-    /* Vertices into the ring buffer. */
-    UINT bytes = (UINT)nverts * (UINT)sizeof(psp_gpu_vertex);
-    if (bytes > VB_BYTES) return 1;
-    D3D11_MAP mode = D3D11_MAP_WRITE_NO_OVERWRITE;
-    if (g_vb_pos + bytes > VB_BYTES) { g_vb_pos = 0; mode = D3D11_MAP_WRITE_DISCARD; }
-    D3D11_MAPPED_SUBRESOURCE m;
-    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_vb, 0, mode, 0, &m))) return 1;
-    memcpy((uint8_t *)m.pData + g_vb_pos, v, bytes);
-    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_vb, 0);
-    UINT stride = sizeof(psp_gpu_vertex), vboff = g_vb_pos;
-    g_vb_pos += bytes;
-
-    vs_consts vc = { { (float)t->w, (float)t->h, uvs[0], uvs[1] } };
-    ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)g_vcb, 0, NULL, &vc, 0, 0);
-    ps_consts pc;
-    memset(&pc, 0, sizeof pc);
-    pc.env[0] = (float)(st->env & 0xFF) / 255.0f;
-    pc.env[1] = (float)((st->env >> 8) & 0xFF) / 255.0f;
-    pc.env[2] = (float)((st->env >> 16) & 0xFF) / 255.0f;
-    pc.tf[0] = (uint32_t)(st->tex != 0); pc.tf[1] = (uint32_t)st->tfunc;
-    pc.tf[2] = (uint32_t)st->trgba; pc.tf[3] = (uint32_t)st->tdbl;
-    pc.at[0] = (uint32_t)(st->atest && !st->clear); pc.at[1] = (uint32_t)st->afunc;
-    pc.at[2] = st->aref; pc.at[3] = st->amask;
-    pc.misc[0] = (uint32_t)st->clear;
-    ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)g_pcb, 0, NULL, &pc, 0, 0);
-
-    int approx = 0;
-    float bf[4];
-    ID3D11BlendState *bs = blend_state(st, bf, &approx);
-    if (approx) n_approx++;
-
-    ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &t->rtv, dsv);
-    /* The vertex shader maps PSP pixels (vc.vp) to the target; the viewport
-     * and scissor are the target's own, S times larger. */
-    const LONG S = g_scale;
-    D3D11_VIEWPORT vp = { 0, 0, (float)(t->w * S), (float)(t->h * S), 0, 1 };
-    ID3D11DeviceContext_RSSetViewports(g_ctx, 1, &vp);
-    D3D11_RECT sc = { st->sx0 * S, st->sy0 * S, (st->sx1 + 1) * S, (st->sy1 + 1) * S };
-    ID3D11DeviceContext_RSSetScissorRects(g_ctx, 1, &sc);
-    ID3D11DeviceContext_RSSetState(g_ctx, g_rs);
-    ID3D11DeviceContext_OMSetBlendState(g_ctx, bs, bf, 0xFFFFFFFFu);
-    ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, depth_state(st), 0);
-    ID3D11DeviceContext_IASetInputLayout(g_ctx, g_layout);
-    ID3D11DeviceContext_IASetPrimitiveTopology(g_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ID3D11DeviceContext_IASetVertexBuffers(g_ctx, 0, 1, &g_vb, &stride, &vboff);
-    ID3D11DeviceContext_VSSetShader(g_ctx, g_vs, NULL, 0);
-    ID3D11DeviceContext_VSSetConstantBuffers(g_ctx, 0, 1, &g_vcb);
-    ID3D11DeviceContext_PSSetShader(g_ctx, g_ps, NULL, 0);
-    ID3D11DeviceContext_PSSetConstantBuffers(g_ctx, 1, 1, &g_pcb);
-    if (srv) {
-        ID3D11SamplerState *ss = sampler(st->tex_linear, st->tex_clamp_u, st->tex_clamp_v);
-        ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 1, &srv);
-        ID3D11DeviceContext_PSSetSamplers(g_ctx, 0, 1, &ss);
-    }
-    ID3D11DeviceContext_Draw(g_ctx, (UINT)nverts, 0);
-    if (srv) {                                          /* unbind, so the view can become a target */
-        ID3D11ShaderResourceView *none = NULL;
-        ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 1, &none);
-    }
+    if (submit_draw(st, v, nverts, t->rtv, dsv, srv, t->w, t->h, uvs) != 0) return 1;
+    g_last.t = t; g_last.d = d; g_last.srv = srv;
+    g_last.src = st->tex ? g_tv_src : NULL; g_last.self = st->tex && g_tv_self;
+    g_last.uvs[0] = uvs[0]; g_last.uvs[1] = uvs[1];
 
     /* Rows touched: the scissor, narrowed to the geometry's extent. */
     float ymin = 1e9f, ymax = -1e9f;
@@ -1259,6 +1320,52 @@ static int d3d_draw(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts
     if (xverify()) xverify_owners();
     n_draws++;
     n_tris += (uint64_t)nverts / 3;
+    return 0;
+}
+
+/* Stereo: make t's copy for eye e, starting as the mono picture. */
+static int eye_target(rt_entry *t, int e) {
+    if (t->eye_rtv[e]) return 1;
+    D3D11_TEXTURE2D_DESC d;
+    ID3D11Texture2D_GetDesc(t->tex, &d);
+    if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &d, NULL, &t->eye_tex[e]))) return 0;
+    ID3D11Device_CreateRenderTargetView(g_dev, (ID3D11Resource *)t->eye_tex[e], NULL, &t->eye_rtv[e]);
+    ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)t->eye_tex[e], NULL, &t->eye_srv[e]);
+    if (!t->eye_rtv[e] || !t->eye_srv[e]) return 0;
+    ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)t->eye_tex[e], (ID3D11Resource *)t->tex);
+    return 1;
+}
+
+static ID3D11DepthStencilView *eye_depth(depth_entry *d, int e) {
+    if (d->eye_dsv[e]) return d->eye_dsv[e];
+    D3D11_TEXTURE2D_DESC td;
+    ID3D11Texture2D_GetDesc(d->tex, &td);
+    if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &d->eye_tex[e]))) return NULL;
+    ID3D11Device_CreateDepthStencilView(g_dev, (ID3D11Resource *)d->eye_tex[e], NULL, &d->eye_dsv[e]);
+    if (d->eye_dsv[e]) ID3D11DeviceContext_ClearDepthStencilView(g_ctx, d->eye_dsv[e], D3D11_CLEAR_DEPTH, 0.0f, 0);
+    return d->eye_dsv[e];
+}
+
+/* The draw d3d_draw just made, again into eye e's copies of its target and
+ * depth (psp_gpu_set_stereo). VRAM never sees these: the mono target keeps
+ * coherence, and its uploads and transfers are repeated into the eye copies
+ * (rt_upload, rt_xfer). A render target sampled as a texture is sampled in
+ * the same eye's copy, so bloom and blur stay per eye. */
+static int d3d_draw_eye(int e, const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts) {
+    rt_entry *t = g_last.t;
+    if (!t || e < 0 || e > 1 || nverts <= 0 || !eye_target(t, e)) return 1;
+    ID3D11DepthStencilView *dsv = g_last.d ? eye_depth(g_last.d, e) : NULL;
+    ID3D11ShaderResourceView *srv = g_last.srv;
+    if (g_last.src && g_last.src->eye_srv[e]) {
+        srv = g_last.src->eye_srv[e];
+        if (g_last.self) {                              /* sampled while drawn to: a copy, as for mono */
+            ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)g_scratch, (ID3D11Resource *)t->eye_tex[e]);
+            srv = g_scratch_srv;
+        }
+    }
+    if (submit_draw(st, v, nverts, t->eye_rtv[e], dsv, srv, t->w, t->h, g_last.uvs) != 0) return 1;
+    t->eye_frame = frame_no();
+    n_eye_draws++;
     return 0;
 }
 
@@ -1362,15 +1469,34 @@ const uint32_t *d3d11_present_hires(int *w, int *h) {
     return g_hires;
 }
 
+/* Stereo: each eye's copy of the displayed target, read back with it (same
+ * ring slot, same frame), S-times size even at S = 1. */
+static ID3D11Texture2D *g_eye_present[PRESENT_RING][2];
+static int g_present_eyes[PRESENT_RING];
+static uint32_t *g_eye_px[2];
+static int g_eye_w, g_eye_h, g_eye_fresh;
+static uint64_t n_present_eyes;
+
+const uint32_t *d3d11_present_eye(int eye, int *w, int *h) {
+    if (!g_eye_fresh || eye < 0 || eye > 1 || !g_eye_px[eye]) return NULL;
+    *w = g_eye_w; *h = g_eye_h;
+    return g_eye_px[eye];
+}
+
 int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w, int h) {
     g_hires_fresh = 0;
+    g_eye_fresh = 0;
     if (!g_dev || (addr & 0x0F000000u) != 0x04000000u) return 0;
     rt_entry *t = rt_find(vram_off(addr), stride, fmt);
     const int ahead = t && t->dirty && t->stride == stride && t->fmt == fmt && t->w >= (uint32_t)w;
     if (ahead) {                                       /* queue a copy of this frame */
         const int k = g_present_head;
         g_present_head = (g_present_head + 1) % PRESENT_RING;
-        if (g_present[k] && g_present_w[k] != t->w) { ID3D11Texture2D_Release(g_present[k]); g_present[k] = NULL; }
+        if (g_present[k] && g_present_w[k] != t->w) {
+            ID3D11Texture2D_Release(g_present[k]); g_present[k] = NULL;
+            for (int e = 0; e < 2; e++)
+                if (g_eye_present[k][e]) { ID3D11Texture2D_Release(g_eye_present[k][e]); g_eye_present[k][e] = NULL; }
+        }
         if (!g_present[k]) {
             D3D11_TEXTURE2D_DESC d;
             ID3D11Texture2D_GetDesc(t->tex, &d);
@@ -1381,6 +1507,18 @@ int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w,
         D3D11_BOX box = { 0, 0, 0, (UINT)(w * g_scale), (UINT)(h * g_scale), 1 };
         ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)g_present[k], 0, 0, 0, 0,
                                                   (ID3D11Resource *)t->tex, 0, &box);
+        /* Stereo: the eye copies too, when this frame was drawn for the eyes. */
+        g_present_eyes[k] = t->eye_tex[0] && t->eye_tex[1] && t->eye_frame + 2 >= frame_no();
+        for (int e = 0; e < 2 && g_present_eyes[k]; e++) {
+            if (!g_eye_present[k][e]) {
+                D3D11_TEXTURE2D_DESC d;
+                ID3D11Texture2D_GetDesc(t->tex, &d);
+                d.Usage = D3D11_USAGE_STAGING; d.BindFlags = 0; d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &d, NULL, &g_eye_present[k][e]))) { g_present_eyes[k] = 0; break; }
+            }
+            ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)g_eye_present[k][e], 0, 0, 0, 0,
+                                                      (ID3D11Resource *)t->eye_tex[e], 0, &box);
+        }
         ID3D11DeviceContext_Flush(g_ctx);              /* start it now, not at the next stall */
         g_present_fmt[k] = fmt;
         g_present_pending[k] = 1;
@@ -1453,6 +1591,30 @@ int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w,
             g_hires_fresh = 1;
         }
         ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_present[best], 0);
+        if (g_present_eyes[best]) {                       /* copied just after: done or nearly */
+            const int W = w * S, H = h * S;
+            int ok = 1;
+            for (int e = 0; e < 2 && ok; e++) {
+                if (!g_eye_px[e] || g_eye_w != W || g_eye_h != H) {
+                    free(g_eye_px[e]);
+                    g_eye_px[e] = (uint32_t *)malloc((size_t)W * H * 4);
+                }
+                D3D11_MAPPED_SUBRESOURCE em;
+                if (!g_eye_px[e] || FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_eye_present[best][e], 0, D3D11_MAP_READ, 0, &em))) { ok = 0; break; }
+                for (int y = 0; y < H; y++) {
+                    const uint32_t *src = (const uint32_t *)((const uint8_t *)em.pData + (size_t)y * em.RowPitch);
+                    uint32_t *dst = g_eye_px[e] + (size_t)y * W;
+                    for (int x = 0; x < W; x++) {
+                        const uint32_t c = src[x];
+                        dst[x] = L[0][c & 0xFF] | L[1][(c >> 8) & 0xFF] | L[2][(c >> 16) & 0xFF];
+                    }
+                }
+                ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_eye_present[best][e], 0);
+            }
+            g_eye_w = W; g_eye_h = H;
+            g_eye_fresh = ok;
+            if (ok) n_present_eyes++;
+        }
         /* This copy and every older one are done with. */
         const uint64_t s = g_present_seq[best];
         for (int k = 0; k < PRESENT_RING; k++) if (g_present_pending[k] && g_present_seq[k] <= s) g_present_pending[k] = 0;
@@ -1465,7 +1627,7 @@ int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w,
     return shown;
 }
 
-static const psp_gpu_backend D3D11_BACKEND = { "d3d11", d3d_draw, d3d_sync_vram, d3d_vram_written, 1 };
+static const psp_gpu_backend D3D11_BACKEND = { "d3d11", d3d_draw, d3d_sync_vram, d3d_vram_written, 1, d3d_draw_eye };
 
 /* ---- setup ------------------------------------------------------------------------------ */
 
@@ -1548,6 +1710,9 @@ void d3d11_report(FILE *out) {
         fprintf(out, "  d3d11 xfer-verify   %llu transfers checked, %llu wrong (%llu pixels); %llu ownership overlaps\n",
                 (unsigned long long)n_xv_checked, (unsigned long long)n_xv_bad_xfers,
                 (unsigned long long)n_xv_bad_px, (unsigned long long)n_xv_overlap);
+    if (n_eye_draws)
+        fprintf(out, "  d3d11 stereo        %llu eye draws, %llu frames read back for both eyes\n",
+                (unsigned long long)n_eye_draws, (unsigned long long)n_present_eyes);
     fprintf(out, "  d3d11 present       %llu frames from asynchronous copies, %llu from VRAM, %llu vblanks kept the last picture\n",
             (unsigned long long)n_present_async, (unsigned long long)n_present_vram, (unsigned long long)n_present_kept);
 }

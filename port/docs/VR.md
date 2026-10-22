@@ -2,8 +2,9 @@
 
 The game in a headset through OpenXR (Windows: Direct3D 11). Phase 1 is the
 **theater**: the game's picture on a large screen in front of you, with the
-motion controllers working as a PSP pad. Stereo 3D, first person and motion
-combat come in later phases (see the VR plan).
+motion controllers working as a PSP pad. Phase 2 makes that screen a stereo
+3D window (below). Head tracking, first person and motion combat come in
+later phases (see the VR plan).
 
 ## Turning it on
 
@@ -28,6 +29,24 @@ RUNNING. Without a headset the game keeps running in its window as before.
 
 The screen stays where it was put (world-locked), level and upright. Recenter
 whenever you turn your chair.
+
+## Stereo 3D (phase 2)
+
+With the Direct3D 11 renderer the screen is a **stereo window**: the game is
+drawn once for each eye, and the screen becomes a window into the game world
+(things behind it look far away, close things come out of it). The HUD and
+menus sit on the window itself. The window's width follows the game's field of
+view at the screen distance (SCREEN WIDTH is then not used); move it closer
+for a bigger window.
+
+In `psp2i_display.ini` (no menu items yet):
+
+| Setting | What |
+|---|---|
+| `vr_stereo=on` | `off` = the flat screen of phase 1 |
+| `vr_world_scale=10.0` | Game units per metre. Higher = the world looks smaller and the 3D weaker; lower = bigger and stronger |
+
+The IPD comes from the headset. OpenGL keeps the flat screen.
 
 ## Controls
 

@@ -43,6 +43,11 @@ How the game draws 3D, from 4 scene reports a few steps apart:
   multiplied in.
 - **Projection** (GE PROJ): fovy 45.0°, aspect 1.765 (480/272), the same in
   town and field. 4x4: `1.3684 0 0 0 / 0 2.4149 0 0 / 0 0 -0.0067 -1 / 0 0 -201.34 0`.
+  So clip w = -z (the view distance) and the horizontal half-FOV tangent is
+  1/1.3684 = 0.731. **Used by P2 stereo** (2026-10-22, `psp_gpu_set_stereo` in
+  psprecomp gpu.c): a draw counts as perspective when PROJ[11] ≠ 0, and its
+  vertices move per eye by their distance (w); the stereo window's width is
+  2 · distance · (1/PROJ[0]). Status: known.
 - **The player model** is the skinned model nearest the line of sight: about
   55 GE units ahead of the eye and about 1 below it (`(-0.3, -0.9, -54.9)` in
   eye space). Vertex data at `0x09B3F850`, texture `0x0935A020`, 571 vertices
@@ -169,7 +174,7 @@ about 60 units behind and above the target. Roll +0x114 = 0. +0x118 = 0.6388,
 |---|---|---|
 | The orbit maths (yaw, pitch, distance) in `0x08AFA8E0` / `0x08AFA714` | P3 / P4 | The apply point `0x08AFA598` is found (above); decode its callers, or hook `0x08AFA598` and leave them alone |
 | Frustum / LOD culling (objects pop at the headset's wider FOV) | P2 | Objects vanishing at the screen edges; the cull test reads the camera FOV or planes |
-| Bloom / blur passes (signature to skip or redo per eye) | P2 | F12 dump: through-mode full-screen draws sampling a render target |
+| Bloom / blur passes (signature to skip or redo per eye) | P2 | Redone per eye without a signature: P2 replays every draw per eye, and a render target sampled as a texture is sampled in the same eye's copy (d3d11.c `d3d_draw_eye`). A signature is still needed to switch bloom off |
 | Local player yaw | P4 | Position found (player +0x4B0, above). Yaw: an angle or rotation near +0x4B0 that follows turning |
 | Player skeleton: bone indices for head, neck, spine, hands, feet | P4 / P6 | Skinned draws of the local player: bone palette per batch; hide one bone's triangles at a time |
 | Weapon attach (hand) bones and weapon model draws | P5 | Draws that follow the hand bone; the item / equipment code |
