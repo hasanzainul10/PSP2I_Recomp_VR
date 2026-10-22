@@ -13,7 +13,7 @@ _Last updated: 2026-10-22 (P2 stereo window)._
 |---|---|
 | P0 RE tooling | **Done, run in town and field:** the GE gets identity view matrices (camera folded into bones / world on the CPU). View matrix found in RAM at `0x08FA98A0`, player world position at player object +0x4B0 (2 reports each; writer not yet watched) |
 | P1 PCVR theater | **Done, checked in the headset** by the user (2026-10-22): screen size, sharpness, colours, recenter and the button mapping in VR.md all right. Nothing to fix |
-| P2 stereo third person | **First step built (2026-10-22): the stereo window.** Each GE draw is replayed per eye; the headset shows the two pictures on one world-locked screen. Checked in town from the eye pictures (disparity as computed, HUD at screen depth). **Not yet seen in the headset** |
+| P2 stereo third person | **First step built (2026-10-22): the stereo window.** Each GE draw is replayed per eye; the headset shows the two pictures on one world-locked screen. Checked in town from the eye pictures (disparity as computed, HUD at screen depth). **Seen in the PS VR2 by the user (2026-10-22): "looks pretty good", and smooth after the readback fix.** The game itself ran at 19.4 fps average (min 12) at 3x in that run, under its 30 target |
 | P3 to P8 | Not started |
 
 ## Branches and PR
@@ -108,7 +108,17 @@ _Last updated: 2026-10-22 (P2 stereo window)._
   - Checked (windowed, scripted to town, 2x): both eyes complete (lighting,
     bloom, textures, HUD); the player (~55 units) is 9 px apart at 960 wide,
     as the formula gives (9.2), far walls 13-14 px; HUD identical in both
-    eyes. 2x stereo averaged 29.8 fps over 150 s (min 20); 3x not measured.
+    eyes. 2x stereo averaged 29.8 fps over 150 s (min 20).
+  - **Performance (headset, 3x):** the first headset run gave 2-12 fps: each
+    vblank copied and converted three 1440x816 pictures on the game thread
+    even without a new frame. Fixed (2171e61): one copy per game frame
+    (`rt_entry.gen`), 8888 without tables, and no mono 3x picture in stereo
+    (the window shows 480x272). Then: windowed 3x stereo 29.6 fps; in the
+    headset the user found it smooth, the game log said 19.4 fps average
+    (frames mostly 33-50+ ms busy, 16% idle). Next: hand the eye textures to
+    the VR device on the GPU (shared textures) instead of read back +
+    convert + upload, and replay only the eyes (skip the mono draws while the
+    window isn't needed).
   - Not done: the window doesn't follow the head (P3: head tracking +
     projection layer); objects nearer than the screen distance come out of
     the window and may cross its edge; world-space name labels in the HUD
