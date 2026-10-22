@@ -5,7 +5,7 @@ this file at the end of every working session: what changed, what was checked,
 what is next. The plan itself is [VR_PLAN.md](VR_PLAN.md); user-facing docs are
 [VR.md](VR.md); reverse-engineering results go in [ADDRESS_MAP.md](ADDRESS_MAP.md).
 
-_Last updated: 2026-10-22 (P3 head tracking built, not yet seen in the headset)._
+_Last updated: 2026-10-22 (P3 head tracking works in the headset; next: a wider view and the HUD)._
 
 ## Handoff: start here (2026-10-22)
 
@@ -31,30 +31,42 @@ the PS VR2 at 3x and at 60 fps in town ("3D looks right and it's steadier"):
 59.7 fps average, min 55.9. Eye pictures go to the headset on the GPU
 (shared texture); the overlay is its own layer; the mono draw is the left eye.
 
-**P3 head tracking (2026-10-22, second session): built, NOT yet seen in the
-headset.** It's applied at the GE, not by hooking the camera (the reasons
-are in VR_PLAN.md "P3 approach"). `vr_head=on` and `vr_level=on` are the
-defaults. Checked so far: the build has no warnings, `test_menu` passes 445
-of 445, and a 30 s headless `--stereo` run with `PSP2I_VR_FAKE_HEAD=30,0`
-logged head tracking on and replayed 2000 eye draws with no crash. That run
-only reached the intro movie, so no 3D frame was drawn with a head pose.
+**P3 head tracking (2026-10-22, second session): works in the PS VR2.**
+It's applied at the GE, not by hooking the camera (the reasons are in
+VR_PLAN.md "P3 approach"). `vr_head=on` and `vr_level=on` are the defaults.
+- **The user, in the headset:** the world stays still while the head turns;
+  leaning moves the view; recenter works.
+- **The log** (`port/testwork/p3/vr_head1.log`, about 5 min, 30 fps cap): a
+  steady 30 fps (each minute after the first averaged 30.0). 8493 eye
+  pictures were shared on the GPU and none went through the CPU.
+- **The black border around the game's FOV is the main complaint.** The
+  user wants the view wider than the game's (more immersion).
+- **Not judged yet:** the HUD at infinity, and objects missing to the
+  side. The layer switched between projection and quad a few times; the
+  user saw no flicker, but they took the headset off a few times. Check
+  whether a frame without a pose sneaks in during play.
+
+Without a headset, `--stereo` with `PSP2I_VR_FAKE_HEAD=yaw,pitch` (degrees)
+draws the eyes from a turned head, for `--overlay-shot` captures. That needs
+a windowed run that reaches town (the press script isn't recorded: write one
+down when found).
+
+**What the user wants next (2026-10-22), as in PSUEx-VR:**
+- **The HUD body-locked:** the HUD, the avatar portrait when talking to
+  NPCs, and similar 2D UI on a panel where today's border is (the game's
+  FOV in front of the body). The panel moves with the body, not the eyes.
+- **The 3D view wider than that panel:** expand beyond the game's FOV where
+  possible.
+- **World-space UI in the 3D world:** floating shop labels, chat boxes and
+  character names stay at their place in the world (today they are in the
+  HUD pass, flat).
 
 **Next (in order):**
-1. **Check P3 in the headset** (run it for the user, as above). Look for:
-   - `vr: head tracking on (horizon levelled)` and `vr: pictures at the head
-     pose they were drawn with (projection layer)` in the log;
-   - the world staying put while the head turns (no swimming): if it swims,
-     a sign or axis is wrong in `head_frame` / `level_axes` (main.c);
-   - objects missing when looking to the side (the game's frustum cull);
-   - the HUD sitting at infinity (it's in the picture, flat in both eyes).
-
-   Without a headset, `--stereo` with `PSP2I_VR_FAKE_HEAD=yaw,pitch` (degrees)
-   draws the eyes from a turned head, for `--overlay-shot` captures. That
-   needs a windowed run that reaches town (the press script isn't recorded:
-   write one down when found).
-2. Wider culling, then a wider eye FOV than the game's (find the frustum
-   cull; see VR_PLAN.md "P3 approach"). The HUD pass goes to its own layer at
-   a comfortable depth.
+1. **A wider view:** a wider PROJ for the eyes (the eye FOV, or a setting)
+   and the game's frustum cull found and widened, or what's culled shows as
+   gaps. See VR_PLAN.md "P3 approach".
+2. **The HUD pass on its own body-locked layer**, and world-space labels
+   drawn at their depth.
 3. Engine-menu items for `vr_stereo` and `vr_world_scale` (the menu has 31
    items and a 32-bit hidden mask: widen it first, see Gotchas). The world
    scale 10 units/m is a guess the user hasn't judged yet.
@@ -72,7 +84,7 @@ unless the user asks.
 | P0 RE tooling | **Done, run in town and field:** the GE gets identity view matrices (camera folded into bones / world on the CPU). View matrix found in RAM at `0x08FA98A0`, player world position at player object +0x4B0 (2 reports each; writer not yet watched) |
 | P1 PCVR theater | **Done, checked in the headset** by the user (2026-10-22): screen size, sharpness, colours, recenter and the button mapping in VR.md all right. Nothing to fix |
 | P2 stereo third person | **Stereo window done and checked in the PS VR2 (2026-10-22):** each GE draw replayed per eye, both pictures on one world-locked screen, HUD at screen depth. User: "looks pretty good", "3D looks right and it's steadier". 3x at 60 fps in town: 59.7 fps average (min 55.9). Still open for P2: world-scale tuning, wider culling, menu items, cutscene handling |
-| P3 head-rate decoupling | **Head tracking built (2026-10-22), not yet seen in the headset:** each eye drawn from the head at the GE (`psp_gpu_stereo.eye_views`, one pose per frame by tag), a projection layer at that pose with the game's FOV, the horizon levelled. Still open: the headset check, wider culling and FOV, the HUD on its own layer, the FramePacket replay at headset rate |
+| P3 head-rate decoupling | **Head tracking works in the PS VR2 (2026-10-22):** each eye drawn from the head at the GE (`psp_gpu_stereo.eye_views`, one pose per frame by tag), a projection layer at that pose with the game's FOV, the horizon levelled. User: the world stays still, leaning and recenter work; 30 fps steady. Still open: a view wider than the game's FOV (the border), wider culling, the HUD on a body-locked layer, world-space labels at depth, the FramePacket replay at headset rate |
 | P4 to P8 | Not started |
 
 ## Branches and PR
