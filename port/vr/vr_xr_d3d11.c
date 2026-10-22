@@ -57,7 +57,8 @@
     X(xrStringToPath) X(xrCreateActionSet) X(xrDestroyActionSet) X(xrCreateAction) \
     X(xrSuggestInteractionProfileBindings) X(xrAttachSessionActionSets) X(xrSyncActions) \
     X(xrGetActionStateBoolean) X(xrGetActionStateFloat) X(xrGetActionStateVector2f) X(xrResultToString) \
-    X(xrLocateViews)
+    X(xrLocateViews) X(xrGetCurrentInteractionProfile) X(xrPathToString) X(xrEnumerateBoundSourcesForAction) \
+    X(xrGetInputSourceLocalizedName)
 
 #define DECL(f) static PFN_##f p_##f;
 XR_GLOBAL_FUNCS(DECL)
@@ -150,7 +151,7 @@ enum { A_LSTICK, A_RSTICK, A_CROSS, A_CIRCLE, A_SQUARE, A_TRIANGLE, A_LTRIG, A_R
        A_LGRIP, A_RGRIP, A_START, A_LCLICK, A_RCLICK, A_COUNT };
 static XrAction g_act[A_COUNT];
 static int g_ltrig_on, g_rtrig_on;           /* trigger hysteresis */
-static int g_lclick_prev;
+static int g_lclick_prev, g_rclick_prev;
 
 static const char *res_name(XrResult r) {
     static char buf[XR_MAX_RESULT_STRING_SIZE];
@@ -444,7 +445,10 @@ static void input_update(int focused) {
         if (trigger(get_float(A_RTRIG), &g_rtrig_on)) p.buttons |= P_R;
         if (get_float(A_RGRIP) > 0.5f) p.buttons |= P_SELECT;
         if (get_bool(A_START)) p.buttons |= P_START;
-        if (get_bool(A_RCLICK)) p.host |= VR_HOST_MENU;
+        const int rc = get_bool(A_RCLICK);
+        if (rc) p.host |= VR_HOST_MENU;
+        if (rc && !g_rclick_prev) fprintf(stderr, "vr: right stick click: engine menu\n");
+        g_rclick_prev = rc;
         /* Left stick click recenters; with the left grip held it asks for a
          * VR capture instead (F11 doesn't reach the game window while the
          * headset is on). Latched, so the game's slower poll can't miss it. */
@@ -456,7 +460,7 @@ static void input_update(int focused) {
         }
         g_lclick_prev = lc;
     } else {
-        g_ltrig_on = g_rtrig_on = g_lclick_prev = 0;
+        g_ltrig_on = g_rtrig_on = g_lclick_prev = g_rclick_prev = 0;
     }
     AcquireSRWLockExclusive(&g_pad_lock);
     g_pad = p;
@@ -632,6 +636,39 @@ static void instance_destroy(void) {
     g_sys = XR_NULL_SYSTEM_ID;
 }
 
+/* What the runtime bound, once it has picked the controllers' profile: the
+ * profile per hand and the sources behind the stick clicks (recenter, the
+ * engine menu) and Cross (one that works, to compare). The user's stick
+ * clicks never arrived though SteamVR's generated binding lists them. */
+static void log_bindings(void) {
+    static const char *const HANDS[2] = { "/user/hand/left", "/user/hand/right" };
+    for (int i = 0; i < 2; i++) {
+        XrInteractionProfileState ps = { XR_TYPE_INTERACTION_PROFILE_STATE };
+        char name[XR_MAX_PATH_LENGTH] = "none";
+        uint32_t n = 0;
+        if (XR_SUCCEEDED(p_xrGetCurrentInteractionProfile(g_sess, path_of(HANDS[i]), &ps)) && ps.interactionProfile)
+            p_xrPathToString(g_inst, ps.interactionProfile, sizeof name, &n, name);
+        fprintf(stderr, "vr: %s profile %s\n", HANDS[i], name);
+    }
+    static const struct { int a; const char *name; } SHOW[] = {
+        { A_LCLICK, "recenter (left stick click)" }, { A_RCLICK, "engine menu (right stick click)" }, { A_CROSS, "cross" } };
+    for (int i = 0; i < (int)(sizeof SHOW / sizeof SHOW[0]); i++) {
+        XrBoundSourcesForActionEnumerateInfo bi = { XR_TYPE_BOUND_SOURCES_FOR_ACTION_ENUMERATE_INFO };
+        bi.action = g_act[SHOW[i].a];
+        XrPath src[8];
+        uint32_t n = 0;
+        if (XR_FAILED(p_xrEnumerateBoundSourcesForAction(g_sess, &bi, 8, &n, src))) n = 0;
+        fprintf(stderr, "vr: bound to %s: %s", SHOW[i].name, n ? "" : "nothing");
+        for (uint32_t k = 0; k < n && k < 8; k++) {
+            char s[XR_MAX_PATH_LENGTH] = "?";
+            uint32_t len = 0;
+            p_xrPathToString(g_inst, src[k], sizeof s, &len, s);
+            fprintf(stderr, "%s%s", k ? ", " : "", s);
+        }
+        fprintf(stderr, "\n");
+    }
+}
+
 static void poll_events(void) {
     XrEventDataBuffer ev;
     for (;;) {
@@ -642,6 +679,8 @@ static void poll_events(void) {
             fprintf(stderr, "vr: the runtime is going away\n");
             g_instance_lost = 1;
             g_session_over = 1;
+        } else if (ev.type == XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED) {
+            if (g_sess) log_bindings();
         } else if (ev.type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
             /* The runtime's own recenter (SteamVR's "Reset view") moves LOCAL:
              * the head's reference from the old LOCAL would then offset the
