@@ -1266,6 +1266,10 @@ static uint64_t n_cull_wide;
  * (nothing behind a camera is in any view through it). Only what this
  * game draws changes; the GPU clips what is behind the eyes. */
 static int      g_vr_cull_all = 1;
+/* vr_two_sided=on (head tracking): the 3D scene drawn without back-face
+ * culling (psp_gpu_stereo.two_sided): "angles not viewable in the original
+ * game are not rendered" (user): one-sided walls and roofs seen from behind. */
+static int      g_vr_two_sided = 1;
 static uint64_t n_cull_all;
 static void hook_cull_test(void (*original)(void)) {
     if (!g_head_on || !g_vr_cull_all) { original(); return; }
@@ -1349,6 +1353,7 @@ static void stereo_update(void) {
         st.flat_after_clear = 1;                                  /* PSP2i draws its HUD in 3D after a second clear */
         st.mono_is_left = 1;                                      /* two pictures, not three: the window shows the left eye */
         st.eye_views = head;                                      /* head tracking: head_frame sets each eye per frame */
+        st.two_sided = head && g_vr_two_sided;
         st.on_frame = head ? head_frame : NULL;
         st.fov_scale = head ? g_vr_fov : 1.0f;
         st.fov_scale_y = head ? g_vr_fov_y : 1.0f;
@@ -1585,6 +1590,7 @@ static int display_load(void) {
             if (k >= 1.0f && k <= 20.0f) g_vr_fp_eye = k;
         }
         else if (!strncmp(line, "vr_cull_all=", 12)) g_vr_cull_all = strncmp(line + 12, "off", 3) != 0;
+        else if (!strncmp(line, "vr_two_sided=", 13)) g_vr_two_sided = strncmp(line + 13, "off", 3) != 0;
         else if (!strncmp(line, "vr_aniso=", 9)) {
             const int k = atoi(line + 9);
             if (k >= 0 && k <= 16) g_vr_aniso = k;
@@ -1668,6 +1674,9 @@ static void display_save(int res) {
     fprintf(f, "; with head tracking: cull all = on: every object the game has loaded is drawn (nothing missing behind you"
                " or far away; costs some speed), off = the game's own culling (widened by cull scale)\n");
     fprintf(f, "vr_cull_all=%s\n", g_vr_cull_all ? "on" : "off");
+    fprintf(f, "; with head tracking: two sided = on: both sides of the 3D scene's faces drawn (walls and roofs the PSP camera"
+               " never saw from behind stay solid), off = the game's back-face culling\n");
+    fprintf(f, "vr_two_sided=%s\n", g_vr_two_sided ? "on" : "off");
     fprintf(f, "; with head tracking: the HUD and menus on a panel this many metres away, this size of the game's view (0.2..1.0);"
                " follow = how many degrees you can look away before it glides back in front of you (0 = it stays where recenter put it)\n");
     fprintf(f, "vr_hud_distance=%.1f\nvr_hud_size=%.2f\nvr_hud_follow=%.0f\n", (double)g_vr_hud_dist, (double)g_vr_hud_size,
