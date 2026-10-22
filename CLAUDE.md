@@ -13,6 +13,9 @@ its feature set and lessons are the reference.
    - `psp2i-build-run`: regenerate, build and run.
    - `vr-probe`: reverse engineering with F8.
    - `vr-headset-test`: OpenXR checks.
+   - `psp2i-static-re`: read the recompiled code, GE dumps and VR captures.
+   - `psp2i-hook-re`: hook game functions to count, compare and override
+     their decisions at run time.
 
 ## Layout
 
@@ -42,6 +45,11 @@ its feature set and lessons are the reference.
   `psp2i_display.ini` with a comment line written by `display_save`.
 - **Menu tests:** after changing `menu.c` / `menu.h`, run `test_menu` (all
   checks must pass) and keep the main page within 272 px.
+- **Find the decision, don't guess:** when something is missing or wrong in
+  VR, first find the code that decides it (`psp2i-static-re`,
+  `psp2i-hook-re`): capture it, hook the candidates, count per reason,
+  compare the two cases. Fix it there, not by trying causes one run at a
+  time.
 - **Record what you find:** addresses go in `port/docs/ADDRESS_MAP.md` with
   their source and status. Progress goes in `port/docs/VR_PROGRESS.md` at the
   end of each session.

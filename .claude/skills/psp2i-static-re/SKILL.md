@@ -9,7 +9,9 @@ Tools in `.claude/skills/psp2i-static-re/scripts/` (run from the repo root with 
 generated code and captures are data, not code). Results go in
 `port/docs/ADDRESS_MAP.md` (source and status for each address), as the
 `vr-probe` skill says. `vr-probe` is the live side (F8, memory watches);
-this skill is the code and capture side. Use both.
+this skill is the code and capture side; `psp2i-hook-re` is the run-time
+side (hook what you find here, count and override its decisions). Use them
+together.
 
 ## The generated code is the disassembly
 
