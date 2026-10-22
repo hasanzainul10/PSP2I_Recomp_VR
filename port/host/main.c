@@ -929,6 +929,10 @@ static int psp2i_hud_panel(float w, float frac) {
  * the scene pass) are placed this far along the camera's ray: about where
  * the player and what they hit are (the orbit camera is 55-60 units back). */
 #define PSP2I_FX_DIST           55.0f
+/* First person: the effects that far beyond the player instead (game units,
+ * ~1.8 m): at the player's own distance they were at the eyes and cut away
+ * (user: "some techniques become invisible" since first person). */
+#define PSP2I_FP_FX_AHEAD       6.0f
 /* vr_menu_screen=on: PSP2i's menu scenes (the continue page, mission select,
  * loading screens: small 3D dioramas with their own camera) are shown as
  * the game draws them on the flat screen, not from the head. They are told
@@ -1100,6 +1104,7 @@ static void head_frame(psp_gpu_stereo *s) {
     static float prev_v[16];
     static int   head_ok;
     float base[3] = { 0, 0, 0 };
+    float fx_dist = PSP2I_FX_DIST;
     int first = 0;
     if (g_vr_first) {
         const uint32_t pl = gamelog_local_player();
@@ -1134,6 +1139,7 @@ static void head_frame(psp_gpu_stereo *s) {
             for (int r = 0; r < 3; r++) hv[r] = head_ok ? v[r] * head_off[0] + v[8 + r] * head_off[2] : 0.0f;
             for (int r = 0; r < 3; r++)
                 base[r] = c[r] + g_vr_fp_eye * un[r] + hv[r] - g_vr_fp_fwd * q[6 + r];   /* ahead: -z */
+            fx_dist = sqrtf(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]) + PSP2I_FP_FX_AHEAD;
             first = 1;
         }
     }
@@ -1144,6 +1150,7 @@ static void head_frame(psp_gpu_stereo *s) {
     was_first = g_vr_first ? first : -1;
     const float k = first ? g_vr_fp_scale : g_vr_world_scale;
     s->near_w = first ? g_vr_fp_near : 0.0f;                    /* the player's own head, clipped away */
+    s->fx_dist = fx_dist;
     for (int e = 0; e < 2; e++) {
         float p[3];
         for (int r = 0; r < 3; r++)

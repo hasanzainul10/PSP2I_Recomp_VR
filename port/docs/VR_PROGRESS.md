@@ -222,6 +222,16 @@ the world; the user found it overwhelming. Those were removed. Now:
   view with the field's centred projection is a loading transition
   (`g_menu_loading`), held on the last 3D picture up to 5 s (real menus:
   1 s).
+- **User:** "the flat appears while moving" (less often), and "some
+  techniques became invisible" since first person. Found: psprecomp ran
+  `on_frame` on a copy and copied back only the eye views, tag and flat
+  flag, so `near_w` (the first-person near clip) never took effect; fixed
+  (it copies `near_w` and `fx_dist` back). Techniques: screen-space
+  effects are placed `fx_dist` (55) along the game camera's rays, at the
+  player, so in first person at the eyes: now the player's distance + 6
+  units (`PSP2I_FP_FX_AHEAD`). The flat moments: suspected a full-screen
+  HUD-pass effect taken by the panel's size rule (frac > 0.2); dev log
+  `vr: a big HUD-pass sheet on the panel` added to catch it. Built, not run.
 - **Open:** hiding the player's own head (bone weights, or an eye-forward
   offset), body-relative movement (today the stick moves relative to the
   game camera, which trails behind), the cull behind the game camera.
