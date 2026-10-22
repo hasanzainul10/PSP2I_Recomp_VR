@@ -1961,8 +1961,9 @@ static void poll_controllers(void) {
         if (l3 && !held_done && now - down >= 1000) {
             held_done = 1;
 #ifndef PSP2I_PROD
-            fprintf(stderr, "vr: gamepad L3 held: a capture\n");
+            fprintf(stderr, "vr: gamepad L3 held: a capture and a GE dump\n");
             vrshot_request();
+            g_dump_key = 1;                     /* and F12's GE dump: every draw the game submits */
 #endif
         }
         if (!l3 && down) {
