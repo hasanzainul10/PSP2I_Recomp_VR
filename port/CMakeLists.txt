@@ -173,6 +173,17 @@ bzip2-LICENSE.txt: bzip2 1.0.8, compiled in to decompress Cisco's download.
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${PSP2I_BZ2_DIR}/LICENSE $<TARGET_FILE_DIR:psp2i>/licenses/bzip2-LICENSE.txt)
 endif()
 
+# Texture packs in PPSSPP's format (psp2i_display.ini texture_packs=,
+# host/texreplace.c). Their PNGs are decoded with stb_image, fetched at
+# configure time; without it the setting is ignored.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FetchStbImage.cmake)
+psp2i_fetch_stb_image(PSP2I_STB_INC)
+if(PSP2I_STB_INC)
+    target_sources(psp2i PRIVATE host/texreplace.c)
+    target_include_directories(psp2i PRIVATE ${PSP2I_STB_INC})
+    target_compile_definitions(psp2i PRIVATE PSP2I_TEXREPLACE)
+endif()
+
 # Unit tests for the settings menu, the FPS counter and run-time frame-rate
 # switching (no game data needed): ctest -C Release, or run test_menu.
 enable_testing()

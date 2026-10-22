@@ -52,6 +52,8 @@
  *               the exe, else 1920x1080); the settings menu changes and saves
  *               it, Alt+Enter toggles fullscreen. PSP2I_PRESENT=gdi skips the
  *               GPU presenter (present.c) and scales with GDI.
+ *   --texture-packs DIR[;DIR...]  PPSSPP texture packs for this run, instead of
+ *               psp2i_display.ini texture_packs= (texreplace.h); "" = none
  *   --oracle    (trace builds) diff the function at ADDR against an interpreter
  *               the first time it runs; see host/oracle.c
  */
@@ -94,6 +96,9 @@
 #include "vr.h"
 #endif
 #include "vr_probe.h"
+#ifdef PSP2I_TEXREPLACE
+#include "texreplace.h"
+#endif
 
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
@@ -871,6 +876,7 @@ static int g_vol_saved[VOL_N] = { VOL_STEPS, VOL_STEPS, VOL_STEPS };
 static int g_att_saved = ATT_DEFAULT;
 static int g_openh264 = 1;                  /* fetch Cisco's OpenH264 for movies (h264_openh264.c) */
 static char g_font_key[260] = "system";     /* the game's text font (font_win.h): system, psp, or a file in fonts/ */
+static char g_texpacks[1024];               /* texture pack folders, ';'-separated (texreplace.h); empty = off */
 
 /* "80" -> 8 tenths (0..100, rounded to 10%). */
 static int vol_parse(const char *s) {
@@ -881,7 +887,7 @@ static int vol_parse(const char *s) {
 static int display_load(void) {
     FILE *f = g_display_ini[0] ? fopen(g_display_ini, "r") : NULL;
     if (!f) return -1;
-    char line[128];
+    char line[1100];                        /* texture_packs= can be long */
     int res = -1;
     while (fgets(line, sizeof line, f)) {
         if (!strncmp(line, "resolution=", 11)) res = menu_res_parse(line + 11);
@@ -904,6 +910,10 @@ static int display_load(void) {
             const int lo = dist ? VR_DIST_MIN_DM : VR_WIDTH_MIN_DM, hi = dist ? VR_DIST_MAX_DM : VR_WIDTH_MAX_DM;
             dm = dm < lo ? lo : dm > hi ? hi : dm;
             if (dist) g_vr_dist_dm = dm; else g_vr_width_dm = dm;
+        }
+        else if (!strncmp(line, "texture_packs=", 14)) {
+            snprintf(g_texpacks, sizeof g_texpacks, "%s", line + 14);
+            g_texpacks[strcspn(g_texpacks, "\r\n")] = '\0';
         }
         else if (!strncmp(line, "font=", 5)) {
             snprintf(g_font_key, sizeof g_font_key, "%s", line + 5);
@@ -941,6 +951,8 @@ static void display_save(int res) {
     fprintf(f, "; VR (OpenXR): on = the game on a screen in the headset; its distance and width in metres\n");
     fprintf(f, "vr=%s\nvr_distance=%d.%d\nvr_width=%d.%d\n", g_vr_on ? "on" : "off",
             g_vr_dist_dm / 10, g_vr_dist_dm % 10, g_vr_width_dm / 10, g_vr_width_dm % 10);
+    fprintf(f, "; PPSSPP texture packs: folders holding a textures.ini, ';'-separated, later ones win (relative to the exe); empty = off\n");
+    fprintf(f, "texture_packs=%s\n", g_texpacks);
     fclose(f);
 }
 
@@ -1460,6 +1472,9 @@ static void report(void) {
     d3d11_report(stderr);
 #endif
     gl_ge_report(stderr);
+#ifdef PSP2I_TEXREPLACE
+    texreplace_report(stderr);
+#endif
 #ifdef _WIN32
     prof_report();
 #endif
@@ -2170,6 +2185,7 @@ int main(int argc, char **argv) {
     const char *renderer = NULL;            /* --renderer; else psp2i_display.ini */
     int vr_arg = -1;                        /* --vr / --no-vr; else psp2i_display.ini */
     int res_arg = -1;                       /* --resolution; else psp2i_display.ini */
+    const char *texpacks_arg = NULL;        /* --texture-packs; else psp2i_display.ini */
     int oracle_all = 0;
     int want_sdl = -1;                     /* -1: default (with a window) */
     int want_audio = -1;
@@ -2264,6 +2280,7 @@ int main(int argc, char **argv) {
             i += 2;
         }
         else if (!strcmp(argv[i], "--renderer") && i + 1 < argc)      renderer = argv[++i];
+        else if (!strcmp(argv[i], "--texture-packs") && i + 1 < argc) texpacks_arg = argv[++i];
         else if (!strcmp(argv[i], "--resolution") && i + 1 < argc) {
             res_arg = menu_res_parse(argv[++i]);
             if (res_arg < 0) { fprintf(stderr, "bad --resolution %s (want e.g. 1920x1080 or fullscreen)\n", argv[i]); return 1; }
@@ -2393,6 +2410,14 @@ int main(int argc, char **argv) {
     audio_init(want_audio == 1 || (want_audio < 0 && !g_headless));
     atrac_at3_init(dir);           /* ATRAC music (psp2i_atrac.dll); silent without it */
     h264_openh264_init(dir, g_openh264);   /* movies; black (with sound) until it is ready */
+    {
+        const char *packs = texpacks_arg ? texpacks_arg : g_texpacks;
+#ifdef PSP2I_TEXREPLACE
+        texreplace_init(packs, dir);       /* none listed: off, textures drawn as before */
+#else
+        if (*packs) fprintf(stderr, "texreplace: this build has no PNG decoder (stb_image); texture_packs ignored\n");
+#endif
+    }
     if (replay_path) {                         /* a recorded route: its fps unless --fps */
         const int rf = replay_load(replay_path);
         if (rf < 0) return 1;
