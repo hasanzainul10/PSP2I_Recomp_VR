@@ -986,6 +986,9 @@ static int      g_menu_loading;
 static int      g_vr_first;
 static float    g_vr_fp_eye = VR_FP_EYE_DEFAULT, g_vr_fp_scale = VR_FP_SCALE_DEFAULT, g_vr_fp_fwd = VR_FP_FORWARD_DEFAULT;
 static float    g_vr_fp_near = VR_FP_NEAR_DEFAULT;
+static float g_fp_head_off[3];               /* the head's centre across from the feet, world axes (head_frame's probe) */
+static int   g_fp_head_ok;
+static int   g_fp_cam;                       /* the last field camera was applied at the head */
 /* VR image quality (vr_aniso=, vr_sharpen=; d3d11_set_quality, from the
  * next start): anisotropic filtering with mipmaps for the game's textures,
  * and a contrast-adaptive sharpening pass on the eye pictures. Only with VR
@@ -1122,9 +1125,7 @@ static void head_frame(psp_gpu_stereo *s) {
      * throws it forward, user: "still see head"), plus vr_fp_forward along
      * the gaze. The measured height is not used, so the eyes don't bob with
      * the run. Else the head's origin is the game camera itself. */
-    static float head_off[3];                                   /* the head's centre across from the feet, world axes */
     static float prev_v[16];
-    static int   head_ok;
     float base[3] = { 0, 0, 0 };
     float fx_dist = PSP2I_FX_DIST;
     int first = 0;
@@ -1136,7 +1137,7 @@ static void head_frame(psp_gpu_stereo *s) {
         for (int r = 0; r < 3 && pl; r++) c[r] = v[r] * w[0] + v[4 + r] * w[1] + v[8 + r] * w[2] + v[12 + r];
         const float ul = sqrtf(v[4] * v[4] + v[5] * v[5] + v[6] * v[6]);
         /* A sane position: in front of the camera, within the orbit's reach. */
-        if (pl && ul > 0.5f && ul < 2.0f && c[2] < 0.0f && c[0] * c[0] + c[1] * c[1] + c[2] * c[2] < 200.0f * 200.0f) {
+        if (pl && ul > 0.5f && ul < 2.0f && (c[2] < 0.0f || g_fp_cam) && c[0] * c[0] + c[1] * c[1] + c[2] * c[2] < 200.0f * 200.0f) {
             /* The last frame's head, from its own camera into world axes
              * (the view's rotation transposed), level. */
             float pr[6];
@@ -1148,8 +1149,8 @@ static void head_frame(psp_gpu_stereo *s) {
                 if (hw[0] * hw[0] + hw[2] * hw[2] < 3.0f * 3.0f) {
                     /* A fifth of the way each frame (~0.2 s to follow at 30 fps):
                      * half was shaky with the run's sway (user, for comfort). */
-                    for (int cc = 0; cc < 3; cc += 2) head_off[cc] = head_ok ? head_off[cc] + 0.2f * (hw[cc] - head_off[cc]) : hw[cc];
-                    head_ok = 1;
+                    for (int cc = 0; cc < 3; cc += 2) g_fp_head_off[cc] = g_fp_head_ok ? g_fp_head_off[cc] + 0.2f * (hw[cc] - g_fp_head_off[cc]) : hw[cc];
+                    g_fp_head_ok = 1;
                 }
             }
             /* This frame's: within 3 units of the feet's vertical, the head
@@ -1158,14 +1159,14 @@ static void head_frame(psp_gpu_stereo *s) {
             psp_gpu_stereo_probe(c, un, 3.0f, 8.0f, g_vr_fp_eye - 1.0f, 1);
             memcpy(prev_v, v, sizeof prev_v);
             float hv[3];                                        /* the head's offset, in this view */
-            for (int r = 0; r < 3; r++) hv[r] = head_ok ? v[r] * head_off[0] + v[8 + r] * head_off[2] : 0.0f;
+            for (int r = 0; r < 3; r++) hv[r] = g_fp_head_ok ? v[r] * g_fp_head_off[0] + v[8 + r] * g_fp_head_off[2] : 0.0f;
             for (int r = 0; r < 3; r++)
                 base[r] = c[r] + g_vr_fp_eye * un[r] + hv[r] - g_vr_fp_fwd * q[6 + r];   /* ahead: -z */
             fx_dist = sqrtf(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]) + PSP2I_FP_FX_AHEAD;
             first = 1;
         }
     }
-    if (!first) head_ok = 0;
+    if (!first) g_fp_head_ok = 0;
     static int was_first = -1;
     if (g_vr_first && first != was_first)
         fprintf(stderr, "vr: first person %s\n", first ? "on (the eyes in the player's head)" : "waiting for the player");
@@ -1214,7 +1215,7 @@ static void head_frame(psp_gpu_stereo *s) {
     static unsigned n_fp;
     if (first && ++n_fp % 120 == 0)
         fprintf(stderr, "vr: fp head: %s, %.2f / %.2f across from the feet (world x / z)\n",
-                head_ok ? "measured" : "not measured", (double)head_off[0], (double)head_off[2]);
+                g_fp_head_ok ? "measured" : "not measured", (double)g_fp_head_off[0], (double)g_fp_head_off[2]);
 #endif
 }
 
@@ -1270,6 +1271,48 @@ static void hook_cull_test(void (*original)(void)) {
     if (!g_head_on || !g_vr_cull_all) { original(); return; }
     psp_cpu.r[2] = 2;                                           /* inside */
     if (n_cull_all++ == 0) fprintf(stderr, "vr: every object drawn (the game's frustum tests answer inside)\n");
+}
+
+
+/* First person: the game's field camera is applied with its view at the
+ * player's head (ApplyCamera 0x08AFD474: its view matrix, cam+0x10, goes to
+ * the global 0x08FA98A0, then the projection and the cull planes). The game
+ * draws and culls from where the eyes are: the town's shop tops were missing
+ * in first person while the camera stood ~16 m back and above ("unless I move
+ * closer, or in third person lower": the game picks what to draw by the
+ * camera's place). The heading is the game camera's, level; the camera
+ * object's eye, target and movement vectors are left alone (the orbit reads
+ * its eye back each frame, and moving follows the camera's heading). The
+ * field camera is the one with the field's projection (x scale 1.15..2.5). */
+static uint64_t n_fp_cam;
+#define FN_APPLY_CAMERA 0x08AFD474u
+static void hook_apply_camera(void (*original)(void)) {
+    const uint32_t cam = psp_cpu.r[4], pl = gamelog_local_player();
+    const float px = cam ? psp_read_f32(cam + 0x90u) : 0.0f;
+    g_fp_cam = 0;
+    if (g_head_on && g_vr_first && pl && px > 1.15f && px < 2.5f) {
+        float v[16];
+        for (int i = 0; i < 16; i++) v[i] = psp_read_f32(cam + 0x10u + 4u * (uint32_t)i);
+        /* The camera's backward axis (view z) in the world, level. */
+        float z[3] = { v[2], 0.0f, v[10] };
+        const float zl = sqrtf(z[0] * z[0] + z[2] * z[2]);
+        if (zl > 1e-3f) {
+            z[0] /= zl; z[2] /= zl;
+            const float x[3] = { z[2], 0.0f, -z[0] }, y[3] = { 0.0f, 1.0f, 0.0f };   /* x = up cross z */
+            float h[3];
+            for (int i = 0; i < 3; i++) h[i] = psp_read_f32(pl + 0x4B0u + 4u * (uint32_t)i);
+            h[1] += g_vr_fp_eye;
+            if (g_fp_head_ok) { h[0] += g_fp_head_off[0]; h[2] += g_fp_head_off[2]; }
+            const float *rows[3] = { x, y, z };
+            for (int r = 0; r < 3; r++) {
+                for (int c = 0; c < 3; c++) psp_write_f32(cam + 0x10u + 4u * (uint32_t)(c * 4 + r), rows[r][c]);
+                psp_write_f32(cam + 0x10u + 4u * (uint32_t)(12 + r), -(rows[r][0] * h[0] + rows[r][1] * h[1] + rows[r][2] * h[2]));
+            }
+            g_fp_cam = 1;
+            if (n_fp_cam++ == 0) fprintf(stderr, "vr: first person: the game camera at the player's head\n");
+        }
+    }
+    original();
 }
 
 static void hook_frustum_planes(void (*original)(void)) {
@@ -3358,6 +3401,7 @@ int main(int argc, char **argv) {
     g_menu.vr_dist_dm = g_vr_dist_dm;
     g_menu.vr_width_dm = g_vr_width_dm;
     psp_hook_set(FN_FRUSTUM_PLANES, hook_frustum_planes);   /* a no-op unless head tracking is on */
+    psp_hook_set(FN_APPLY_CAMERA, hook_apply_camera);       /* a no-op unless first person is on */
     {
         static const uint32_t CULL_TESTS[] = { 0x08D7C934u, 0x08D7CAECu, 0x08D7CD88u, 0x08D7CE6Cu, 0x08D7CF90u };
         for (int i = 0; i < (int)(sizeof CULL_TESTS / sizeof CULL_TESTS[0]); i++) psp_hook_set(CULL_TESTS[i], hook_cull_test);
