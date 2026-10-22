@@ -5,7 +5,7 @@ this file at the end of every working session: what changed, what was checked,
 what is next. The plan itself is [VR_PLAN.md](VR_PLAN.md); user-facing docs are
 [VR.md](VR.md); reverse-engineering results go in [ADDRESS_MAP.md](ADDRESS_MAP.md).
 
-_Last updated: 2026-10-22 (P3: wider view, wider cull, HUD pass seen from the head; checked in the headset)._
+_Last updated: 2026-10-22 (HUD and menus rebuilt the PSUEx-VR way: HUD panel, menu screen; captures and RE tools)._
 
 ## Handoff: start here (2026-10-22)
 
@@ -78,9 +78,44 @@ in ADDRESS_MAP.md.
   game thread 45-67% idle, 7697 pictures shared on the GPU. At 60 fps (run
   1) about 49 fps average: "not constant 60, but not bad".
 
+**HUD and menus rebuilt the PSUEx-VR way (2026-10-22, late in the session).**
+The earlier attempts (the whole HUD pass re-projected per eye, a head
+follow frame, shrinking menus, levelling the game camera) gave skewed menus,
+a HUD that followed the head up and down, and labels and effects out of
+the world; the user found it overwhelming. Those were removed. Now:
+- **HUD panel:** the HUD pass's HUD and menu layers go, as the game drew
+  them, into their own transparent picture (psprecomp `draw_hud` ->
+  d3d11.c `d3d_draw_hud`, premultiplied), shared with the eyes as the third
+  part of the shared texture (left | right | HUD). The VR thread shows it on
+  a flat quad 2.5 m ahead and 0.1 m below eye level (`vr_hud_distance`,
+  `vr_hud_size` 0.7 of the game's view width), turning only to follow the
+  heading once the head has looked more than 35° away (`vr_hud_follow`),
+  easing in (PSUEx VRCamera's numbers). The desktop mirror has no HUD while
+  head tracking is on.
+- **Which layers go on the panel** (main.c `psp2i_hud_panel`, by the HUD
+  sheet's clip w from dumps and captures): menus < 80, the field HUD
+  84-85.99, the minimap frame 86.85-87.05 and its 3D map > 1000. Everything
+  else stays in the world: labels (86, 88), the lock-on reticle (90).
+- **Effects:** small orthographic scene-pass draws on the 3D target (hit
+  sparks, techniques; w = 1) are placed in the world 55 units along the
+  camera's ray (`ST_FX`). Not yet seen in a capture of this build.
+- **Menu scenes** (continue, mission select, loading): the game's own
+  picture on the flat screen; told apart by the frame's camera (identity
+  view, off-centre projection, or a projection x scale other than the
+  field's 1.3684). The projection is now the GE's of the latched draw (the
+  RAM copy was stale: mission select was missed in the first run).
+- **Dev tools:** F11 / `PSP2I_VR_SHOT_EVERY=N` captures (eyes + the HUD
+  picture + a per-draw trace); `.claude/skills/psp2i-static-re/scripts/` and the `psp2i-static-re`
+  skill.
+- **Checked:** one captured headset run (`testwork/p3/cap4`): town, NPC
+  talk and the mission terminal show the HUD panel in the game's layout and
+  a clean scene; mission select was head-tracked (fixed since, not rerun).
+  The user has not judged this build yet.
+
 **Next (in order):**
-1. **The big HUD menus:** make them comfortable (see the options in the
-   session: smaller or nearer, or turned to face the head).
+1. **The user's verdict on the PSUEx-style HUD**, then the reticle / label /
+   effect check with F11 captures at those moments (lock-on, technique,
+   names), as agreed.
 2. **Sharpness:** try `render_scale=4`; the real fix is eye pictures taller
    than 480:272 (the vertical scale stretches pixels).
 3. Engine-menu items for `vr_stereo` and `vr_world_scale` (the menu has 31

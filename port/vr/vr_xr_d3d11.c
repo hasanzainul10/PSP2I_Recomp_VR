@@ -74,7 +74,8 @@ static HANDLE g_thread;
 static char g_dir[600];
 
 static SRWLOCK  g_cfg_lock = SRWLOCK_INIT;
-static vr_config g_cfg = { VR_DISTANCE_DEFAULT, VR_WIDTH_DEFAULT, VR_SCALE_DEFAULT, 0 };
+static vr_config g_cfg = { VR_DISTANCE_DEFAULT, VR_WIDTH_DEFAULT, VR_SCALE_DEFAULT, 0,
+                           VR_HUD_DISTANCE_DEFAULT, VR_HUD_DROP_DEFAULT, 2.4f, VR_HUD_FOLLOW_DEFAULT };
 static float     g_ipd = VR_IPD_DEFAULT;    /* under g_cfg_lock */
 static float     g_tan_fov = 0.7311f;       /* the pictures' horizontal half-FOV tangent (the game's: fovy 45, 480:272) */
 static float     g_tan_fov_y;               /* ... and vertical; 0 = from the picture's shape */
@@ -125,6 +126,10 @@ static int   g_placed;                       /* the screen has a pose */
 static XrPosef g_screen_pose;
 static float g_ref_yaw;                      /* the head's heading and position at recenter (head tracking's origin) */
 static XrVector3f g_ref_pos;
+static float g_head_yaw;                     /* the head's heading now (track_head) */
+static float g_hud_yaw;                      /* the HUD panel's heading (lazy follow, hud_pose) */
+static int   g_hud_following;
+static XrTime g_hud_time;
 static LONG  g_uploaded_seq = -1;
 static uint32_t *g_upload;                   /* the converted, scaled picture */
 
@@ -463,7 +468,7 @@ static int swapchain_create(int scale) {
     if (pick < 0) { fprintf(stderr, "vr: no 8-bit RGBA swapchain format\n"); return -1; }
     if (!PREF[pick].srgb) fprintf(stderr, "vr: no sRGB swapchain format; colours will look washed out\n");
     g_chain_bgra = PREF[pick].bgra;
-    g_chain_w = GAME_W * scale * 2;                     /* left eye | right eye */
+    g_chain_w = GAME_W * scale * 3;                     /* left eye | right eye | HUD */
     g_chain_h = GAME_H * scale;
     XrSwapchainCreateInfo ci = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
     ci.usageFlags = XR_SWAPCHAIN_USAGE_SAMPLED_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT | XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
@@ -485,7 +490,7 @@ static int swapchain_create(int scale) {
     g_upload = (uint32_t *)malloc((size_t)g_chain_w * g_chain_h * 4);
     g_chain_filled = 0;
     g_uploaded_seq = -1;
-    fprintf(stderr, "vr: screen swapchain %dx%d (one picture per eye), %d images\n", g_chain_w, g_chain_h, (int)g_nimages);
+    fprintf(stderr, "vr: screen swapchain %dx%d (one picture per eye, then the HUD), %d images\n", g_chain_w, g_chain_h, (int)g_nimages);
     /* The overlay's: the same scale, so its pixels stay sharp. */
     g_ochain_s = scale;
     ci.width = (uint32_t)(GAME_W * scale);
@@ -679,6 +684,8 @@ static int place_screen(XrTime t) {
     const float yaw = atan2f(-f.x, -f.z);
     g_ref_yaw = yaw;
     g_ref_pos = head;
+    g_hud_yaw = yaw;                                             /* the HUD panel straight ahead again */
+    g_hud_following = 0;
     g_screen_pose.orientation.x = 0;
     g_screen_pose.orientation.y = sinf(yaw * 0.5f);
     g_screen_pose.orientation.z = 0;
@@ -699,8 +706,10 @@ static void upload(void) {
     ReleaseSRWLockShared(&g_frame_lock);
     if (shared) { g_uploaded_seq = seq; upload_shared(shared); return; }
     AcquireSRWLockShared(&g_frame_lock);
-    const int fw = g_frame_w, fh = g_frame_h, half = g_chain_w / 2;
+    const int fw = g_frame_w, fh = g_frame_h, half = g_chain_w / 3;   /* one eye's part */
     const int s = half / fw;                                     /* swapchain pixels per picture pixel */
+    if (s >= 1)                                                  /* no HUD picture on this path */
+        for (int y = 0; y < g_chain_h; y++) memset(&g_upload[(size_t)y * g_chain_w + 2 * (size_t)half], 0, (size_t)half * 4);
     if (s < 1 || g_chain_h / fh != s) { ReleaseSRWLockShared(&g_frame_lock); g_uploaded_seq = seq; return; }
     for (int eye = 0; eye < 2; eye++) {                          /* mono: the same picture twice */
         const uint32_t *pic = eye && g_frame_stereo ? g_frame_r : g_frame;
@@ -780,6 +789,11 @@ static void track_head(XrTime t) {
     const XrVector3f d = { loc.pose.position.x - g_ref_pos.x, loc.pose.position.y - g_ref_pos.y,
                            loc.pose.position.z - g_ref_pos.z };
     const XrVector3f p = qrot(unyaw, d);
+    {
+        const XrVector3f fwd0 = { 0, 0, -1 };
+        const XrVector3f f = qrot(loc.pose.orientation, fwd0);
+        if (f.x * f.x + f.z * f.z > 1e-6f) g_head_yaw = atan2f(-f.x, -f.z);
+    }
     AcquireSRWLockExclusive(&g_head_lock);
     if (++g_head_next == 0) g_head_next = 1;                     /* 0 means none */
     g_heads[g_head_next % HEAD_RING].id = g_head_next;
@@ -791,6 +805,38 @@ static void track_head(XrTime t) {
         g_head.eye[e][0] = g_eye_off[e].x; g_head.eye[e][1] = g_eye_off[e].y; g_head.eye[e][2] = g_eye_off[e].z;
     }
     ReleaseSRWLockExclusive(&g_head_lock);
+}
+
+/* The HUD panel's pose (as PSUEx-VR's VRCamera does it): the heading eases
+ * toward the head's once the head has looked more than hud_follow_deg away,
+ * and stops when it is within 5 degrees; never up or down. The panel sits
+ * hud_distance ahead of the recentred head along that heading, hud_drop below
+ * eye level, its top tilted back a little so it faces the eyes. */
+static float wrap_angle(float a) {
+    while (a > 3.14159265f) a -= 6.2831853f;
+    while (a < -3.14159265f) a += 6.2831853f;
+    return a;
+}
+static XrPosef hud_pose(XrTime t, float dist, float drop, float follow_deg) {
+    float dt = g_hud_time ? (float)((double)(t - g_hud_time) * 1e-9) : 0.0f;
+    g_hud_time = t;
+    if (dt < 0) dt = 0;
+    if (dt > 0.1f) dt = 0.1f;
+    const float delta = wrap_angle(g_head_yaw - g_hud_yaw);
+    if (follow_deg > 0 && fabsf(delta) > follow_deg * 0.01745329f) g_hud_following = 1;
+    if (g_hud_following) {
+        g_hud_yaw = wrap_angle(g_hud_yaw + delta * (1.0f - expf(-4.0f * dt)));
+        if (fabsf(wrap_angle(g_head_yaw - g_hud_yaw)) < 5.0f * 0.01745329f) g_hud_following = 0;
+    }
+    const float tilt = atan2f(drop, dist);
+    const XrQuaternionf yaw = { 0, sinf(g_hud_yaw * 0.5f), 0, cosf(g_hud_yaw * 0.5f) };
+    const XrQuaternionf pitch = { -sinf(tilt * 0.5f), 0, 0, cosf(tilt * 0.5f) };
+    XrPosef pose;
+    pose.orientation = qmul(yaw, pitch);
+    pose.position.x = g_ref_pos.x - sinf(g_hud_yaw) * dist;
+    pose.position.y = g_ref_pos.y - drop;
+    pose.position.z = g_ref_pos.z - cosf(g_hud_yaw) * dist;
+    return pose;
 }
 
 /* The LOCAL pose a picture was drawn with, if it is still kept. */
@@ -843,15 +889,19 @@ static void frame(void) {
     if (XR_FAILED(r)) { fprintf(stderr, "vr: xrBeginFrame failed: %s\n", res_name(r)); g_session_over = 1; return; }
 
     input_update(g_state == XR_SESSION_STATE_FOCUSED);
-    XrCompositionLayerQuad quad[3] = { { XR_TYPE_COMPOSITION_LAYER_QUAD }, { XR_TYPE_COMPOSITION_LAYER_QUAD },
-                                       { XR_TYPE_COMPOSITION_LAYER_QUAD } };
+    XrCompositionLayerQuad quad[4] = { { XR_TYPE_COMPOSITION_LAYER_QUAD }, { XR_TYPE_COMPOSITION_LAYER_QUAD },
+                                       { XR_TYPE_COMPOSITION_LAYER_QUAD }, { XR_TYPE_COMPOSITION_LAYER_QUAD } };
     XrCompositionLayerProjection proj = { XR_TYPE_COMPOSITION_LAYER_PROJECTION };
     XrCompositionLayerProjectionView pv[2] = { { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW },
                                                { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW } };
-    const XrCompositionLayerBaseHeader *layers[3];
+    const XrCompositionLayerBaseHeader *layers[4];
     uint32_t nl = 0;
     if (fs.shouldRender) {
-        if (InterlockedExchange(&g_recenter, 0) || !g_placed) place_screen(fs.predictedDisplayTime);
+        if (InterlockedExchange(&g_recenter, 0) || !g_placed) {
+            if (place_screen(fs.predictedDisplayTime) == 0)
+                fprintf(stderr, "vr: recentered (head at %.2f, %.2f, %.2f m, heading %.0f degrees)\n", (double)g_ref_pos.x,
+                        (double)g_ref_pos.y, (double)g_ref_pos.z, (double)(g_ref_yaw * 57.29578f));
+        }
         update_ipd(fs.predictedDisplayTime);
         if (g_placed) track_head(fs.predictedDisplayTime);
         upload();
@@ -888,14 +938,30 @@ static void frame(void) {
                 v->fov.angleLeft = -ax; v->fov.angleRight = ax;
                 v->fov.angleUp = ay;    v->fov.angleDown = -ay;
                 v->subImage.swapchain = g_chain;
-                v->subImage.imageRect.offset.x = eye * (g_chain_w / 2);
-                v->subImage.imageRect.extent.width = g_chain_w / 2;
+                v->subImage.imageRect.offset.x = eye * (g_chain_w / 3);
+                v->subImage.imageRect.extent.width = g_chain_w / 3;
                 v->subImage.imageRect.extent.height = g_chain_h;
             }
             proj.space = g_local;
             proj.viewCount = 2;
             proj.views = pv;
             layers[nl++] = (const XrCompositionLayerBaseHeader *)&proj;
+            /* The HUD panel: the game's HUD picture (premultiplied alpha). */
+            AcquireSRWLockShared(&g_cfg_lock);
+            const float hd = g_cfg.hud_distance_m, hdrop = g_cfg.hud_drop_m, hw = g_cfg.hud_width_m, hf = g_cfg.hud_follow_deg;
+            ReleaseSRWLockShared(&g_cfg_lock);
+            XrCompositionLayerQuad *q = &quad[3];
+            q->layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+            q->space = g_local;
+            q->eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            q->subImage.swapchain = g_chain;
+            q->subImage.imageRect.offset.x = 2 * (g_chain_w / 3);
+            q->subImage.imageRect.extent.width = g_chain_w / 3;
+            q->subImage.imageRect.extent.height = g_chain_h;
+            q->pose = hud_pose(fs.predictedDisplayTime, hd, hdrop, hf);
+            q->size.width = hw;
+            q->size.height = hw * (float)GAME_H / (float)GAME_W;
+            layers[nl++] = (const XrCompositionLayerBaseHeader *)q;
         } else if (g_placed && g_chain_filled) {
             AcquireSRWLockShared(&g_cfg_lock);
             /* The stereo window is as wide as the game's FOV at its distance:
@@ -907,8 +973,8 @@ static void frame(void) {
                 q->space = g_local;
                 q->eyeVisibility = eye ? XR_EYE_VISIBILITY_RIGHT : XR_EYE_VISIBILITY_LEFT;
                 q->subImage.swapchain = g_chain;
-                q->subImage.imageRect.offset.x = eye * (g_chain_w / 2);
-                q->subImage.imageRect.extent.width = g_chain_w / 2;
+                q->subImage.imageRect.offset.x = eye * (g_chain_w / 3);
+                q->subImage.imageRect.extent.width = g_chain_w / 3;
                 q->subImage.imageRect.extent.height = g_chain_h;
                 q->pose = g_screen_pose;
                 q->size.width = w;
@@ -1032,6 +1098,12 @@ void vr_configure(const vr_config *cfg) {
     g_cfg.distance_m = cfg->distance_m;
     g_cfg.width_m = cfg->width_m;
     g_cfg.stereo = cfg->stereo;
+    if (cfg->hud_distance_m > 0) {
+        g_cfg.hud_distance_m = cfg->hud_distance_m;
+        g_cfg.hud_drop_m = cfg->hud_drop_m;
+        g_cfg.hud_width_m = cfg->hud_width_m;
+        g_cfg.hud_follow_deg = cfg->hud_follow_deg;
+    }
     ReleaseSRWLockExclusive(&g_cfg_lock);
     if (moved) InterlockedExchange(&g_recenter, 1);
 }

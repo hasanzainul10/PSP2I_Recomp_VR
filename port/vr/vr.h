@@ -22,11 +22,20 @@ typedef struct {
     float width_m;      /* the screen's width (the height follows 480:272) */
     int   scale;        /* swapchain pixels per game pixel, 1..4 (nearest: sharp under the compositor's filter) */
     int   stereo;       /* the screen is a stereo window (vr_submit_stereo): its width follows the game's FOV */
+    /* Head tracking: the HUD panel (the game's HUD picture, the third part of
+     * vr_submit_stereo_shared's texture), as PSUEx-VR places it: this far
+     * ahead of the recentred head and this much below eye level, this wide,
+     * turning only to follow the heading once the head has looked more than
+     * hud_follow_deg away (0: it stays where recenter put it). */
+    float hud_distance_m, hud_drop_m, hud_width_m, hud_follow_deg;
 } vr_config;
 
 #define VR_DISTANCE_DEFAULT 2.5f
 #define VR_WIDTH_DEFAULT    3.0f
 #define VR_SCALE_DEFAULT    2
+#define VR_HUD_DISTANCE_DEFAULT 2.5f
+#define VR_HUD_DROP_DEFAULT     0.1f
+#define VR_HUD_FOLLOW_DEFAULT   35.0f
 
 enum {
     VR_OFF,          /* not started */
@@ -66,7 +75,8 @@ void vr_submit_stereo(const uint32_t *left, const uint32_t *right, int w, int h,
                       float tan_half_fov_y, uint32_t head);
 
 /* The same on the GPU: `handle` is a DXGI shared handle (keyed mutex, key 0)
- * of an RGBA8 texture 2w x h holding left | right, at the swapchain's size.
+ * of an RGBA8 texture 3w x h holding left | right | HUD (premultiplied
+ * alpha, transparent where there is no HUD), at the swapchain's size.
  * The VR thread copies it into the swapchain. If it can't (another GPU, a
  * size or format mismatch) vr_share_failed() turns 1 for good: then send
  * pixels with vr_submit_stereo. */

@@ -763,6 +763,12 @@ static D3D11_BLEND map_factor(int f, int is_src, uint32_t fix, uint32_t *blend_f
     }
 }
 
+/* A draw into the HUD picture (d3d_draw_hud): it starts transparent, so
+ * alpha builds up as "over" (the colour then comes out premultiplied, which
+ * the VR layer expects), additive draws (glows) add light without adding
+ * alpha, and alpha is always written. */
+static int g_hud_draw;
+
 static ID3D11BlendState *blend_state(const psp_gpu_state *st, float factor[4], int *approx) {
     D3D11_BLEND_DESC d;
     memset(&d, 0, sizeof d);
@@ -781,6 +787,7 @@ static ID3D11BlendState *blend_state(const psp_gpu_state *st, float factor[4], i
         if (st->mask_a != 0 && st->mask_a != 0xFF) *approx = 1;
     }
     if (st->fb_fmt == 0) wm &= (uint8_t)~D3D11_COLOR_WRITE_ENABLE_ALPHA;   /* 565 has no alpha */
+    if (g_hud_draw && !st->clear) wm |= D3D11_COLOR_WRITE_ENABLE_ALPHA;
     b->RenderTargetWriteMask = wm;
     uint32_t bf = 0xFFFFFFFFu;
     if (st->blend && !st->clear) {
@@ -795,6 +802,11 @@ static ID3D11BlendState *blend_state(const psp_gpu_state *st, float factor[4], i
         b->SrcBlendAlpha = D3D11_BLEND_ONE;               /* the result keeps the source alpha */
         b->DestBlendAlpha = D3D11_BLEND_ZERO;
         b->BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        if (g_hud_draw) {
+            const int additive = b->DestBlend == D3D11_BLEND_ONE;
+            b->SrcBlendAlpha = additive ? D3D11_BLEND_ZERO : D3D11_BLEND_ONE;
+            b->DestBlendAlpha = additive ? D3D11_BLEND_ONE : D3D11_BLEND_INV_SRC_ALPHA;
+        }
     }
     if (bf == 0xFFFFFFFFu) bf = 0;
     factor[0] = (float)(bf & 0xFF) / 255.0f;
@@ -802,7 +814,7 @@ static ID3D11BlendState *blend_state(const psp_gpu_state *st, float factor[4], i
     factor[2] = (float)((bf >> 16) & 0xFF) / 255.0f;
     factor[3] = 1.0f;
     uint64_t key = (uint64_t)wm | (uint64_t)b->BlendEnable << 8 | (uint64_t)b->SrcBlend << 9 |
-                   (uint64_t)b->DestBlend << 14 | (uint64_t)b->BlendOp << 19;
+                   (uint64_t)b->DestBlend << 14 | (uint64_t)b->BlendOp << 19 | (uint64_t)(g_hud_draw != 0) << 24;
     ID3D11BlendState *s = (ID3D11BlendState *)cache_find(g_blend, 256, key);
     if (!s && SUCCEEDED(ID3D11Device_CreateBlendState(g_dev, &d, &s))) cache_put(g_blend, 256, key, s);
     return s;
@@ -1386,6 +1398,88 @@ static int d3d_draw_eye(int e, const psp_gpu_state *st, const psp_gpu_vertex *v,
     return 0;
 }
 
+/* The HUD picture (psp_gpu_backend.draw_hud): the HUD pass's panel draws, as
+ * the game drew them, on a transparent target the size of the 3D target, for
+ * the VR HUD panel (shared with the eyes, share_eyes). Cleared at the first
+ * HUD draw of each frame; g_hud_frame names that frame. */
+static ID3D11Texture2D *g_hud_tex, *g_hud_empty;
+static ID3D11RenderTargetView *g_hud_rtv;
+static UINT g_hud_w, g_hud_h;                   /* PSP pixels */
+static uint64_t g_hud_frame = (uint64_t)-1, n_hud_draws;
+
+static int hud_target(UINT w, UINT h) {
+    if (g_hud_tex && g_hud_w == w && g_hud_h == h) return 1;
+    if (g_hud_rtv) ID3D11RenderTargetView_Release(g_hud_rtv);
+    if (g_hud_tex) ID3D11Texture2D_Release(g_hud_tex);
+    g_hud_rtv = NULL; g_hud_tex = NULL;
+    D3D11_TEXTURE2D_DESC d;
+    memset(&d, 0, sizeof d);
+    d.Width = w * (UINT)g_scale; d.Height = h * (UINT)g_scale; d.MipLevels = 1; d.ArraySize = 1;
+    d.Format = DXGI_FORMAT_R8G8B8A8_UNORM; d.SampleDesc.Count = 1;
+    d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &d, NULL, &g_hud_tex)) ||
+        FAILED(ID3D11Device_CreateRenderTargetView(g_dev, (ID3D11Resource *)g_hud_tex, NULL, &g_hud_rtv))) return 0;
+    g_hud_w = w; g_hud_h = h;
+    g_hud_frame = (uint64_t)-1;
+    return 1;
+}
+
+static int d3d_draw_hud(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts) {
+    if ((st->fb_addr & 0x0F000000u) != 0x04000000u || !st->fb_stride || nverts <= 0) return 1;
+    uint32_t rows = (uint32_t)st->sy1 + 1;
+    if (rows > 512) rows = 512;
+    rt_entry *t = rt_get(vram_off(st->fb_addr), st->fb_stride, st->fb_fmt, rows);
+    if (!t || !hud_target(t->w, t->h)) return 1;
+    if (g_hud_frame != frame_no()) {
+        static const float CLEAR[4] = { 0, 0, 0, 0 };
+        ID3D11DeviceContext_ClearRenderTargetView(g_ctx, g_hud_rtv, CLEAR);
+        g_hud_frame = frame_no();
+    }
+    ID3D11ShaderResourceView *srv = NULL;
+    float uvs[2] = { 1, 1 };
+    if (st->tex && !(srv = texture_view(st, t, uvs))) return 1;
+    g_hud_draw = 1;
+    const int r = submit_draw(st, v, nverts, g_hud_rtv, NULL, srv, t->w, t->h, uvs);
+    g_hud_draw = 0;
+    if (r != 0) return 1;
+    n_hud_draws++;
+    return 0;
+}
+
+/* Dev (VR captures): the HUD picture read back now, over dark grey (it is
+ * premultiplied), 0xAARRGGBB, w x h at the internal resolution; NULL if none.
+ * Stalls the GPU: for captures only. */
+const uint32_t *d3d11_hud_picture(int *w, int *h) {
+    static uint32_t *px;
+    static size_t cap;
+    if (!g_hud_tex) return NULL;
+    D3D11_TEXTURE2D_DESC d;
+    ID3D11Texture2D_GetDesc(g_hud_tex, &d);
+    d.Usage = D3D11_USAGE_STAGING; d.BindFlags = 0; d.CPUAccessFlags = D3D11_CPU_ACCESS_READ; d.MiscFlags = 0;
+    ID3D11Texture2D *st = NULL;
+    if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &d, NULL, &st))) return NULL;
+    ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)st, (ID3D11Resource *)g_hud_tex);
+    D3D11_MAPPED_SUBRESOURCE m;
+    const uint32_t *out = NULL;
+    if ((size_t)d.Width * d.Height > cap) { free(px); cap = (size_t)d.Width * d.Height; px = (uint32_t *)malloc(cap * 4); }
+    if (px && SUCCEEDED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)st, 0, D3D11_MAP_READ, 0, &m))) {
+        for (UINT y = 0; y < d.Height; y++) {
+            const uint8_t *src = (const uint8_t *)m.pData + (size_t)y * m.RowPitch;
+            for (UINT x = 0; x < d.Width; x++) {
+                const uint32_t r = src[x * 4], g = src[x * 4 + 1], b = src[x * 4 + 2], a = src[x * 4 + 3];
+                const uint32_t k = 40 * (255 - a) / 255;   /* premultiplied over grey 40 */
+                px[(size_t)y * d.Width + x] = 0xFF000000u | ((r + k > 255 ? 255 : r + k) << 16) |
+                                              ((g + k > 255 ? 255 : g + k) << 8) | (b + k > 255 ? 255 : b + k);
+            }
+        }
+        ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)st, 0);
+        *w = (int)d.Width; *h = (int)d.Height;
+        out = px;
+    }
+    ID3D11Texture2D_Release(st);
+    return out;
+}
+
 static void d3d_sync_vram(uint32_t addr, uint32_t bytes) {
     if ((addr & 0x0F000000u) != 0x04000000u) return;
     uint32_t a0 = vram_off(addr), a1 = a0 + bytes;
@@ -1513,7 +1607,7 @@ void d3d11_eye_share(int on) { g_share_on = on; }
 
 void *d3d11_present_eye_shared(int *w, int *h, uint32_t *tag) {
     if (!g_share_fresh) return NULL;
-    *w = (int)g_share_w / 2; *h = (int)g_share_h;
+    *w = (int)g_share_w / 3; *h = (int)g_share_h;
     *tag = g_share_tag;
     return g_share_handle;
 }
@@ -1525,13 +1619,15 @@ static void share_free(void) {
 }
 
 /* Copy t's eye pictures (W x H each, at the internal resolution) into the
- * shared texture. 0 if it can't (then the CPU path is used). */
+ * shared texture, and the HUD picture of the same frame (transparent if the
+ * frame drew none) as a third: left | right | HUD. 0 if it can't (then the
+ * CPU path is used, without the HUD panel). */
 static int share_eyes(rt_entry *t, UINT W, UINT H) {
-    if (!g_share || g_share_w != 2 * W || g_share_h != H) {
+    if (!g_share || g_share_w != 3 * W || g_share_h != H) {
         share_free();
         D3D11_TEXTURE2D_DESC d;
         memset(&d, 0, sizeof d);
-        d.Width = 2 * W; d.Height = H; d.MipLevels = 1; d.ArraySize = 1;
+        d.Width = 3 * W; d.Height = H; d.MipLevels = 1; d.ArraySize = 1;
         d.Format = DXGI_FORMAT_R8G8B8A8_UNORM; d.SampleDesc.Count = 1;
         d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
         d.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
@@ -1547,7 +1643,17 @@ static int share_eyes(rt_entry *t, UINT W, UINT H) {
             return 0;
         }
         IDXGIResource_Release(r);
-        g_share_w = 2 * W; g_share_h = H;
+        g_share_w = 3 * W; g_share_h = H;
+        if (g_hud_empty) ID3D11Texture2D_Release(g_hud_empty);
+        g_hud_empty = NULL;
+        D3D11_TEXTURE2D_DESC e;
+        memset(&e, 0, sizeof e);
+        e.Width = W; e.Height = H; e.MipLevels = 1; e.ArraySize = 1;
+        e.Format = DXGI_FORMAT_R8G8B8A8_UNORM; e.SampleDesc.Count = 1; e.Usage = D3D11_USAGE_DEFAULT;
+        uint32_t *zero = (uint32_t *)calloc((size_t)W * H, 4);
+        D3D11_SUBRESOURCE_DATA init = { zero, W * 4, 0 };
+        if (zero) ID3D11Device_CreateTexture2D(g_dev, &e, &init, &g_hud_empty);
+        free(zero);
     }
     /* The VR thread holds it while it copies out: skip this frame then
      * (it keeps showing the previous one). */
@@ -1556,6 +1662,9 @@ static int share_eyes(rt_entry *t, UINT W, UINT H) {
     for (int e = 0; e < 2; e++)
         ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)g_share, 0, (UINT)e * W, 0, 0,
                                                   (ID3D11Resource *)eye_picture(t, e), 0, &box);
+    const int hud = g_hud_tex && g_hud_frame == t->eye_frame;
+    ID3D11Resource *third = hud ? (ID3D11Resource *)g_hud_tex : (ID3D11Resource *)g_hud_empty;
+    if (third) ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)g_share, 0, 2 * W, 0, 0, third, 0, &box);
     IDXGIKeyedMutex_ReleaseSync(g_share_mx, 0);
     ID3D11DeviceContext_Flush(g_ctx);
     g_share_tag = t->eye_tag;
@@ -1734,7 +1843,8 @@ int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w,
     return shown;
 }
 
-static const psp_gpu_backend D3D11_BACKEND = { "d3d11", d3d_draw, d3d_sync_vram, d3d_vram_written, 1, d3d_draw_eye };
+static const psp_gpu_backend D3D11_BACKEND = { "d3d11", d3d_draw, d3d_sync_vram, d3d_vram_written, 1, d3d_draw_eye,
+                                                d3d_draw_hud };
 
 /* ---- setup ------------------------------------------------------------------------------ */
 
@@ -1818,6 +1928,7 @@ void d3d11_report(FILE *out) {
                 (unsigned long long)n_xv_checked, (unsigned long long)n_xv_bad_xfers,
                 (unsigned long long)n_xv_bad_px, (unsigned long long)n_xv_overlap);
     if (n_eye_draws)
+        fprintf(out, "  d3d11 stereo        %llu HUD panel draws\n", (unsigned long long)n_hud_draws);
         fprintf(out, "  d3d11 stereo        %llu eye draws, %llu frames read back for both eyes, %llu shared on the GPU (%llu skipped: busy)\n",
                 (unsigned long long)n_eye_draws, (unsigned long long)n_present_eyes,
                 (unsigned long long)n_share, (unsigned long long)n_share_busy);
