@@ -189,7 +189,12 @@ the world; the user found it overwhelming. Those were removed. Now:
    with a normal gamepad (no motion controls yet), and recenter was only on
    the VR controllers' left stick click. Added: gamepad L3 tapped recenters,
    held 1 s saves a VR capture (`vr: gamepad L3...` log lines); the engine
-   menu was already on R3 / Guide. Built, not yet pressed in the headset.
+   menu was already on R3 / Guide. **Headset run (`vr_pad1.log`, `cap10`):**
+   9 L3 taps each recentered, 4 L3 holds each saved a capture; 24-29 fps;
+   195 frames from VRAM (3325 the run before). Two flat switches near
+   captures: three of those captures were of the same full-screen HUD (a
+   menu, which goes flat anyway), so whether captures still cause a flat
+   moment isn't settled.
    The VR-controller binding log (`vr: bound to ...`, from the profile
    change) stays for when motion controllers are used.
 3. Engine-menu items for `vr_stereo` and `vr_world_scale` (the menu has 31
