@@ -1263,7 +1263,22 @@ static int g_mono_left;
 void d3d11_set_mono_left(int on) { g_mono_left = on; }
 static ID3D11Texture2D *eye_picture(rt_entry *t, int e) { return e == 0 && g_mono_left ? t->tex : t->eye_tex[e]; }
 
+/* Where the renderer's time goes (d3d11_report: milliseconds per presented
+ * frame): the game's draws, the eyes' draws, the HUD picture's, sharing the
+ * eyes with the headset and presenting (the copies for the window). CPU time
+ * on the game thread, including any wait on the GPU inside those calls. */
+static uint64_t t_draw, t_eye, t_hud, t_share, t_present, n_present_calls;
+static inline uint64_t qpc_now(void) { LARGE_INTEGER c; QueryPerformanceCounter(&c); return (uint64_t)c.QuadPart; }
+
+static int d3d_draw_body(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts);
 static int d3d_draw(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts) {
+    const uint64_t t0 = qpc_now();
+    const int r = d3d_draw_body(st, v, nverts);
+    t_draw += qpc_now() - t0;
+    return r;
+}
+
+static int d3d_draw_body(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts) {
     if ((st->fb_addr & 0x0F000000u) != 0x04000000u || !st->fb_stride || nverts <= 0) return 1;
     if (trace_on()) {
         float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
@@ -1386,7 +1401,15 @@ static ID3D11DepthStencilView *eye_depth(depth_entry *d, int e) {
  * coherence, and its uploads and transfers are repeated into the eye copies
  * (rt_upload, rt_xfer). A render target sampled as a texture is sampled in
  * the same eye's copy, so bloom and blur stay per eye. */
+static int d3d_draw_eye_body(int e, const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts);
 static int d3d_draw_eye(int e, const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts) {
+    const uint64_t t0 = qpc_now();
+    const int r = d3d_draw_eye_body(e, st, v, nverts);
+    t_eye += qpc_now() - t0;
+    return r;
+}
+
+static int d3d_draw_eye_body(int e, const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts) {
     rt_entry *t = g_last.t;
     if (!t || e < 0 || e > 1 || nverts <= 0 || !eye_target(t, e)) return 1;
     ID3D11DepthStencilView *dsv = g_last.d ? eye_depth(g_last.d, e) : NULL;
@@ -1448,7 +1471,15 @@ static int hud_slot(uint64_t f) {
     return -1;
 }
 
+static int d3d_draw_hud_body(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts);
 static int d3d_draw_hud(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts) {
+    const uint64_t t0 = qpc_now();
+    const int r = d3d_draw_hud_body(st, v, nverts);
+    t_hud += qpc_now() - t0;
+    return r;
+}
+
+static int d3d_draw_hud_body(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts) {
     if ((st->fb_addr & 0x0F000000u) != 0x04000000u || !st->fb_stride || nverts <= 0) return 1;
     uint32_t rows = (uint32_t)st->sy1 + 1;
     if (rows > 512) rows = 512;
@@ -1658,7 +1689,15 @@ static void share_free(void) {
  * shared texture, and the HUD picture of the same frame (transparent if the
  * frame drew none) as a third: left | right | HUD. 0 if it can't (then the
  * CPU path is used, without the HUD panel). */
+static int share_eyes_body(rt_entry *t, UINT W, UINT H);
 static int share_eyes(rt_entry *t, UINT W, UINT H) {
+    const uint64_t t0 = qpc_now();
+    const int r = share_eyes_body(t, W, H);
+    t_share += qpc_now() - t0;
+    return r;
+}
+
+static int share_eyes_body(rt_entry *t, UINT W, UINT H) {
     if (!g_share || g_share_w != 3 * W || g_share_h != H) {
         share_free();
         D3D11_TEXTURE2D_DESC d;
@@ -1725,7 +1764,16 @@ static inline uint32_t present_px(uint32_t c, int f, const uint32_t (*L)[256]) {
     return L[0][c & 0xFF] | L[1][(c >> 8) & 0xFF] | L[2][(c >> 16) & 0xFF];
 }
 
+static int present_body(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w, int h);
 int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w, int h) {
+    const uint64_t t0 = qpc_now();
+    const int r = present_body(addr, stride, fmt, out, w, h);
+    t_present += qpc_now() - t0;
+    if (r == 1) n_present_calls++;
+    return r;
+}
+
+static int present_body(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w, int h) {
     g_hires_fresh = 0;
     g_eye_fresh = 0;
     g_share_fresh = 0;
@@ -1946,6 +1994,14 @@ int d3d11_init(void) {
 
 void d3d11_report(FILE *out) {
     if (!g_dev) return;
+    {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        const double ms = n_present_calls ? 1000.0 / (double)f.QuadPart / (double)n_present_calls : 0.0;
+        fprintf(out, "  d3d11 time / frame  draws %.2f ms, eye draws %.2f, HUD %.2f, sharing %.2f, present %.2f (%llu frames)\n",
+                (double)t_draw * ms, (double)t_eye * ms, (double)t_hud * ms, (double)t_share * ms, (double)t_present * ms,
+                (unsigned long long)n_present_calls);
+    }
     fprintf(out, "  d3d11               %llu draws, %llu triangles; %llu VRAM uploads, %llu readbacks; "
                  "%llu texture decodes, %llu render-to-texture samples; %llu draws approximated\n",
             (unsigned long long)n_draws, (unsigned long long)n_tris, (unsigned long long)n_uploads,
