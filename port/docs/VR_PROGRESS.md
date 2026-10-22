@@ -162,6 +162,15 @@ the world; the user found it overwhelming. Those were removed. Now:
   the game camera is untouched. Gamepad L3 twice quickly toggles first /
   third (saved). The local player is now tracked in every build
   (gamelog.c `g_local_player`).
+- **First headset run (`vr_fp1.log`): first person not reached.** ~25 s in
+  the engine menu opened and VR was switched off there (`menu: VR off ...
+  (saved)`, so the ini says vr=off: `--vr` overrides it); the game ran flat
+  ~8 min, then crashed in the game's `0x08AC2910` (called from the update
+  `0x08B821B8`, a jump to an untranslated address: `default_miss`), the
+  same function as the 120 fps crash below, here at 30 fps. Not VR code on
+  the stack. The motion controllers' stick clicks are bound after all
+  (`bound to recenter: .../left_stick/click`): the earlier "no" was
+  checked before the runtime's binding.
 - **Open:** hiding the player's own head (bone weights, or an eye-forward
   offset), body-relative movement (today the stick moves relative to the
   game camera, which trails behind), the cull behind the game camera.
