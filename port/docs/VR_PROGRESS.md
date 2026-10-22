@@ -286,6 +286,15 @@ the world; the user found it overwhelming. Those were removed. Now:
   per-function "visible" switch, find the one at a shop. Also fixed: the
   capture folder is made with its parents (`testwork/p4/...` captures
   were all lost before).
+- **Shop tops, then "angles not viewable in the original game are not
+  rendered" (user):** the game camera is now applied at the player's head
+  in first person (`hook_apply_camera`, ApplyCamera `0x08AFD474`; captures
+  `cap18`: the dome, lamp and shop tops drawn), and the 3D scene keeps its
+  back faces (`vr_two_sided`, psprecomp `two_sided`). Node visibility
+  (`0x08D7D270`, counted by `hook_node_vis`, `vr_nodes1.log`): ~5250 nodes
+  per 5 s, all visible in both views (none hidden by flags or tests), so
+  whatever is still missing is dropped elsewhere. The method is now the
+  `psp2i-hook-re` skill.
 - **Open:** hiding the player's own head (bone weights, or an eye-forward
   offset), body-relative movement (today the stick moves relative to the
   game camera, which trails behind), the cull behind the game camera.
