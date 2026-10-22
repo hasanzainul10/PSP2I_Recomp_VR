@@ -25,6 +25,8 @@ RUNNING. Without a headset the game keeps running in its window as before.
 | VR | On or off, and the status |
 | SCREEN DISTANCE | 1.0 to 5.0 m (default 2.5) |
 | SCREEN WIDTH | 1.0 to 10.0 m (default 3.0) |
+| HUD DISTANCE | With head tracking: the HUD panel's distance, 1.0 to 5.0 m (default 2.5) |
+| WORLD SIZE | With head tracking: the world's size as a percentage of life size, 20 to 300%, for the view you're in (1ST / 3RD person; first person starts at 100%, third at 34%) |
 | RECENTER | Put the screen in front of you again |
 
 The screen stays where it was put (world-locked), level and upright. Recenter

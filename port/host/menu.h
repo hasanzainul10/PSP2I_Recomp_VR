@@ -29,10 +29,11 @@ enum { MENU_FRAME_RATE, MENU_FPS_COUNTER, MENU_SEGA_SERVER, MENU_ADHOC_SERVER, M
        MENU_FONT, MENU_CONTROLS, MENU_TESTS, MENU_VR, MENU_CLOSE,
        MENU_RS_ON, MENU_RS_SPEED, MENU_SWAP_OC, MENU_TOUCH_COLOR, MENU_TOUCH_ALPHA, MENU_CONTROLS_BACK,
        MENU_TEST_TICKS, MENU_TEST_LOGIC, MENU_TESTS_BACK,
-       MENU_VR_ON, MENU_VR_DISTANCE, MENU_VR_WIDTH, MENU_VR_RECENTER, MENU_VR_BACK, MENU_ITEMS };
+       MENU_VR_ON, MENU_VR_DISTANCE, MENU_VR_WIDTH, MENU_VR_HUD_DIST, MENU_VR_WORLD, MENU_VR_RECENTER, MENU_VR_BACK,
+       MENU_ITEMS };
 enum { MENU_PAGE_MAIN, MENU_PAGE_CONTROLS, MENU_PAGE_TESTS, MENU_PAGE_VR };
 int menu_page_of(int item);                      /* MENU_PAGE_* */
-#define MENU_BIT(i) (1u << (i))
+#define MENU_BIT(i) (1ull << (i))                 /* 64 bits: there are more than 32 items */
 
 /* Touch controls (the SDL host): colour presets and opacity in tenths. */
 enum { TOUCH_DEFAULT, TOUCH_WHITE, TOUCH_BLACK, TOUCH_YELLOW, TOUCH_CYAN, TOUCH_PINK, TOUCH_COLORS };
@@ -74,6 +75,15 @@ int  menu_ren_parse(const char *s);                  /* "d3d11" / "opengl" / "gl
 #define VR_WIDTH_MIN_DM  10
 #define VR_WIDTH_MAX_DM 100
 #define VR_STEP_DM        5
+/* With head tracking: the HUD panel's distance, 1.0 .. 5.0 m (0.5 m steps),
+ * and the world's size as a percentage of life size (100% = the player's
+ * measured scale, ~3.4 game units per metre; bigger = a bigger world around
+ * you), 20 .. 300% in 10% steps, for the view in use (first or third person). */
+#define VR_HUD_MIN_DM    10
+#define VR_HUD_MAX_DM    50
+#define VR_WORLD_MIN_PCT 20
+#define VR_WORLD_MAX_PCT 300
+#define VR_WORLD_STEP     10
 
 /* What menu_update() changed, for the caller to act on. */
 enum {
@@ -94,7 +104,7 @@ enum {
     MFX_TOUCH       = 1 << 14,  /* touch_color or touch_alpha changed */
     MFX_RS_ON       = 1 << 15,  /* rs_on changed: the right stick turns the camera, or nothing */
     MFX_TESTS       = 1 << 16,  /* test_ticks or test_logic changed (framerate_set_tests) */
-    MFX_VR          = 1 << 17,  /* vr_on, vr_dist_dm or vr_width_dm changed: apply and save */
+    MFX_VR          = 1 << 17,  /* vr_on, vr_dist_dm, vr_width_dm, vr_hud_dm or vr_world_pct changed: apply and save */
     MFX_VR_RECENTER = 1 << 18,  /* VR > RECENTER: the screen in front of the head again */
 };
 
@@ -127,8 +137,11 @@ typedef struct {
     int      vr_on;        /* VR: the headset shows the game (the theater screen) */
     int      vr_dist_dm;   /* the screen's distance, VR_DIST_MIN_DM..VR_DIST_MAX_DM */
     int      vr_width_dm;  /* the screen's width, VR_WIDTH_MIN_DM..VR_WIDTH_MAX_DM */
+    int      vr_hud_dm;    /* the HUD panel's distance, VR_HUD_MIN_DM..VR_HUD_MAX_DM */
+    int      vr_world_pct; /* the world's size, VR_WORLD_MIN_PCT..VR_WORLD_MAX_PCT; set by the caller for its view */
+    int      vr_first;     /* the view vr_world_pct is for: first person (shown); set by the caller */
     char     vr_status[24];/* "RUNNING", "NO HEADSET", ...; set by the caller */
-    uint32_t hidden;       /* MENU_BIT(item)s this host leaves out (not drawn, skipped);
+    uint64_t hidden;       /* MENU_BIT(item)s this host leaves out (not drawn, skipped);
                               menu_init hides the touch items */
     uint32_t prev;         /* MI_* held last update, for press detection */
     int      hold;         /* updates Up/Down has been held, for auto-repeat */

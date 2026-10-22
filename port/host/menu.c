@@ -22,6 +22,8 @@ void menu_init(menu_state *m, int fps, int show_fps) {
     m->rs_on = 1;
     m->vr_dist_dm = 25;
     m->vr_width_dm = 30;
+    m->vr_hud_dm = 25;
+    m->vr_world_pct = 100;
     /* The touch host shows the touch items; a host built with VR shows VR. */
     m->hidden = MENU_BIT(MENU_TOUCH_COLOR) | MENU_BIT(MENU_TOUCH_ALPHA) | MENU_BIT(MENU_VR);
 }
@@ -166,6 +168,16 @@ static int change(menu_state *m, int dir) {
         if (dir < 0)      { if (*v > lo) *v -= VR_STEP_DM; }
         else if (dir > 0) { if (*v < hi) *v += VR_STEP_DM; }
         else              *v = *v >= hi ? lo : *v + VR_STEP_DM;
+        return *v != old ? MFX_VR : 0;
+    }
+    case MENU_VR_HUD_DIST: case MENU_VR_WORLD: {        /* Confirm wraps to the smallest */
+        const int hud = m->sel == MENU_VR_HUD_DIST;
+        int *v = hud ? &m->vr_hud_dm : &m->vr_world_pct;
+        const int lo = hud ? VR_HUD_MIN_DM : VR_WORLD_MIN_PCT, hi = hud ? VR_HUD_MAX_DM : VR_WORLD_MAX_PCT;
+        const int step = hud ? VR_STEP_DM : VR_WORLD_STEP, old = *v;
+        if (dir < 0)      { *v = *v - step < lo ? lo : *v - step; }
+        else if (dir > 0) { *v = *v + step > hi ? hi : *v + step; }
+        else              *v = *v >= hi ? lo : (*v + step > hi ? hi : *v + step);
         return *v != old ? MFX_VR : 0;
     }
     case MENU_VR_RECENTER: return dir == 0 ? MFX_VR_RECENTER : 0;
@@ -451,7 +463,8 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
                                                    "MUSIC VOLUME", "SFX VOLUME", "ATTENUATION", "FONT", "CONTROLS", "TESTS",
                                                    "VR", "CLOSE", "RIGHT STICK", "SENSITIVITY", "CIRCLE/CROSS", "TOUCH COLOR",
                                                    "TOUCH OPACITY", "BACK", "TICK PACING", "30 HZ LOGIC", "BACK",
-                                                   "VR", "SCREEN DISTANCE", "SCREEN WIDTH", "RECENTER", "BACK" };
+                                                   "VR", "SCREEN DISTANCE", "SCREEN WIDTH", "HUD DISTANCE", "WORLD SIZE",
+                                                   "RECENTER", "BACK" };
     static const char *const ADHOC_MODES[3] = { "< PPSSPP DIRECT >", "< PPSSPP RELAY >", "< MODERN >" };
     char adhoc[32];
     snprintf(adhoc, sizeof adhoc, "%.25s", m->adhoc[0] ? m->adhoc : "NOT SET");
@@ -477,12 +490,14 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
     char tcol[24], talpha[24];
     snprintf(tcol, sizeof tcol, "< %s >", menu_touch_color_name(m->touch_color));
     snprintf(talpha, sizeof talpha, "< %d%% >", m->touch_alpha * 10);
-    char vr_main[32], vr_on[40], vr_dist[24], vr_width[24];
+    char vr_main[32], vr_on[40], vr_dist[24], vr_width[24], vr_hud[24], vr_world[32];
     snprintf(vr_main, sizeof vr_main, "> %.22s", m->vr_on ? (m->vr_status[0] ? m->vr_status : "ON") : "OFF");
     snprintf(vr_on, sizeof vr_on, "< %s >%s%.17s", m->vr_on ? "ON" : "OFF", m->vr_on && m->vr_status[0] ? " " : "",
              m->vr_on ? m->vr_status : "");
     snprintf(vr_dist, sizeof vr_dist, "< %d.%d M >", m->vr_dist_dm / 10, m->vr_dist_dm % 10);
     snprintf(vr_width, sizeof vr_width, "< %d.%d M >", m->vr_width_dm / 10, m->vr_width_dm % 10);
+    snprintf(vr_hud, sizeof vr_hud, "< %d.%d M >", m->vr_hud_dm / 10, m->vr_hud_dm % 10);
+    snprintf(vr_world, sizeof vr_world, "< %d%% > %s", m->vr_world_pct, m->vr_first ? "1ST" : "3RD");
     for (int i = 0; i < MENU_ITEMS; i++) {
         if (!shown(m, i)) continue;
         const uint32_t col = i == m->sel ? YELLOW : WHITE;
@@ -502,7 +517,8 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
                       : i == MENU_SWAP_OC ? (m->swap_oc ? "< SWAPPED >" : "< NORMAL >")
                       : i == MENU_TOUCH_COLOR ? tcol : i == MENU_TOUCH_ALPHA ? talpha
                       : i == MENU_VR ? vr_main : i == MENU_VR_ON ? vr_on
-                      : i == MENU_VR_DISTANCE ? vr_dist : i == MENU_VR_WIDTH ? vr_width : "";
+                      : i == MENU_VR_DISTANCE ? vr_dist : i == MENU_VR_WIDTH ? vr_width
+                      : i == MENU_VR_HUD_DIST ? vr_hud : i == MENU_VR_WORLD ? vr_world : "";
         menu_text(img, x0 + VALUE_X, y, v, col);
         y += ROW_H;
     }

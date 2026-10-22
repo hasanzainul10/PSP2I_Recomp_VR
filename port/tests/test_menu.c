@@ -852,6 +852,21 @@ static void test_vr_page(void) {
     for (int i = 0; i < 30; i++) { menu_update(&m, MI_LEFT, 0); menu_update(&m, 0, 0); }
     CHECK(m.vr_width_dm == VR_WIDTH_MIN_DM);                     /* stops at the minimum */
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_VR_HUD_DIST && m.vr_hud_dm == 25);       /* the HUD panel's distance */
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_VR && m.vr_hud_dm == 30);
+    menu_update(&m, 0, 0);
+    for (int i = 0; i < 20; i++) { menu_update(&m, MI_LEFT, 0); menu_update(&m, 0, 0); }
+    CHECK(m.vr_hud_dm == VR_HUD_MIN_DM);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_VR_WORLD && m.vr_world_pct == 100);      /* the world's size */
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_VR && m.vr_world_pct == 110);
+    menu_update(&m, 0, 0);
+    m.vr_world_pct = 34;                                         /* the caller's value need not be on the steps */
+    for (int i = 0; i < 5; i++) { menu_update(&m, MI_LEFT, 0); menu_update(&m, 0, 0); }
+    CHECK(m.vr_world_pct == VR_WORLD_MIN_PCT);                   /* 24, then the minimum */
+    for (int i = 0; i < 40; i++) { menu_update(&m, MI_RIGHT, 0); menu_update(&m, 0, 0); }
+    CHECK(m.vr_world_pct == VR_WORLD_MAX_PCT);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_VR_RECENTER && menu_update(&m, MI_CONFIRM, 0) == MFX_VR_RECENTER);
     menu_update(&m, 0, 0);
     CHECK(menu_update(&m, MI_BACK, 0) == 0 && m.page == MENU_PAGE_MAIN && m.sel == MENU_VR);   /* Cross: back */

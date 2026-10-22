@@ -237,6 +237,10 @@ the world; the user found it overwhelming. Those were removed. Now:
   frame (things moving in the world drawn in the HUD pass), went to the
   panel by the size rule. Fix (built, not run): the size rule only below
   w 89 (the labels' depth, where portraits are).
+- **Engine menu (R3) > VR, asked by the user:** HUD DISTANCE (1.0-5.0 m)
+  and WORLD SIZE (20-300% of life size, 3.4 units/m = 100%, for the view
+  in use: first person sets `vr_fp_scale`, third `vr_world_scale`), live
+  and saved. test_menu: 452 checks, 0 failed. Not yet used in the headset.
 - **Open:** hiding the player's own head (bone weights, or an eye-forward
   offset), body-relative movement (today the stick moves relative to the
   game camera, which trails behind), the cull behind the game camera.
@@ -533,8 +537,8 @@ Build and run steps: the `psp2i-build-run` skill (`.claude/skills/`).
 - **`emit` needs `port/gen`** to exist already ("cannot write gen/recomp_funcs.h").
 - **SteamVR start-up time:** the first OpenXR call can block for a long time
   while SteamVR starts. `vr_stop` waits 5 s and then gives up.
-- **Menu bits:** `MENU_BIT` is 32 bits wide. The menu has 31 items now; adding
-  more needs a wider `hidden` mask.
+- **Menu bits:** `MENU_BIT` and `hidden` are 64 bits wide since the VR
+  page got HUD DISTANCE and WORLD SIZE (33 items; 32 was the old limit).
 - **PSP2i's GE VIEW is always the identity:** the camera is multiplied into
   WORLD and the bone matrices on the CPU. Reading the camera from the GE gives
   nothing; use the RAM matrix at `0x08FA98A0`.

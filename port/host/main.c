@@ -1630,6 +1630,11 @@ static void menu_step(void) {
 #ifdef PSP2I_VR
     if (g_vr_host & VR_HOST_MENU) held |= MI_TOGGLE;
     snprintf(g_menu.vr_status, sizeof g_menu.vr_status, "%s", g_vr_live ? vr_status_name(vr_status()) : "");
+    /* WORLD SIZE: the scale of the view in use, as a percentage of life
+     * size (VR_FP_SCALE_DEFAULT game units per metre = 100%). */
+    g_menu.vr_first = g_vr_first;
+    g_menu.vr_world_pct = (int)lroundf(VR_FP_SCALE_DEFAULT * 100.0f / (g_vr_first ? g_vr_fp_scale : g_vr_world_scale));
+    g_menu.vr_hud_dm = (int)lroundf(g_vr_hud_dist * 10.0f);
 #endif
 
     snprintf(g_menu.sega, sizeof g_menu.sega, "%s", online_sega_redirect());
@@ -1717,10 +1722,16 @@ static void menu_step(void) {
         g_vr_on = g_menu.vr_on;
         g_vr_dist_dm = g_menu.vr_dist_dm;
         g_vr_width_dm = g_menu.vr_width_dm;
+        g_vr_hud_dist = (float)g_menu.vr_hud_dm / 10.0f;
+        if (g_menu.vr_world_pct > 0) {                   /* the view in use: life size * 100 / percent */
+            const float k = VR_FP_SCALE_DEFAULT * 100.0f / (float)g_menu.vr_world_pct;
+            if (g_vr_first) g_vr_fp_scale = k; else g_vr_world_scale = k;
+        }
         vr_apply();
         if (!g_headless) display_save(g_res_saved);
-        fprintf(stderr, "menu: VR %s, screen %d.%d m away, %d.%d m wide (saved)\n", g_vr_on ? "on" : "off",
-                g_vr_dist_dm / 10, g_vr_dist_dm % 10, g_vr_width_dm / 10, g_vr_width_dm % 10);
+        fprintf(stderr, "menu: VR %s, screen %d.%d m away, %d.%d m wide, HUD %.1f m, world %d%% (%s person) (saved)\n",
+                g_vr_on ? "on" : "off", g_vr_dist_dm / 10, g_vr_dist_dm % 10, g_vr_width_dm / 10, g_vr_width_dm % 10,
+                (double)g_vr_hud_dist, g_menu.vr_world_pct, g_vr_first ? "first" : "third");
     }
     if (fx & MFX_VR_RECENTER) vr_recenter();
 #endif
