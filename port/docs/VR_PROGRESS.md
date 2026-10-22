@@ -197,6 +197,15 @@ the world; the user found it overwhelming. Those were removed. Now:
   not run): the head follow moves a fifth of the way per frame (was half);
   a picture without the head (tag 0) goes to the flat screen only after
   a second of them, until then the headset keeps the last 3D picture.
+- **Seventh run:** user: smoother, "a bit better"; asked for performance.
+- **Profile at 60 fps (`vr_perf1.log`, ~24 min, town and a mission, first
+  person, 1440x1360 eyes):** 57-59.8 fps per 30 s after the first minute
+  (loading, PNG decodes: 33.7). d3d11 per frame: draws 1.03 ms, eye draws
+  0.52, HUD 0.11, sharing 0.21, present 0.48 (~2.4 ms in all). GE 25-41%
+  of the time (the GE emulation on the CPU plus that), idle 22-45%, so the
+  game logic ~30-40%. The renderer isn't the limit; the dips (min 36-44
+  fps) are spikes: mission scenes (GE 40%, idle 22%) and texture-pack PNG
+  loads on the game thread.
 - **Open:** hiding the player's own head (bone weights, or an eye-forward
   offset), body-relative movement (today the stick moves relative to the
   game camera, which trails behind), the cull behind the game camera.
