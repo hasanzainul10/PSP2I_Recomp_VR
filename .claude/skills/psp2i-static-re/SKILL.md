@@ -57,9 +57,10 @@ and `frame_<vblank>.ppm`.
 
 ## VR captures (what the headset got)
 
-In a development build with VR stereo on: **left grip + left stick click**
-on the VR controllers (use this in the headset: F11 rarely reaches the game
-window then), **F11** in the game window, or
+In a development build with VR stereo on: **gamepad L3 held a second**
+or **left grip + left stick click** on the VR controllers (use these in the
+headset: F11 rarely reaches the game window then), **F11** in the game
+window, or
 `PSP2I_VR_SHOT_EVERY=N` (seconds) in the environment, writes to the capture
 dir (`--capture-dir`, default `captures/`):
 - `vrshot_<vblank>_L.ppm` / `_R.ppm`: both eye pictures, exactly as sent

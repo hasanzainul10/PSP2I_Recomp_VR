@@ -21,6 +21,7 @@ int  input_sdl_poll(uint32_t *buttons, uint8_t *ax, uint8_t *ay);
  * menu): the state as of the last input_sdl_poll. */
 #define INPUT_HOST_GUIDE  0x1u
 #define INPUT_HOST_RSTICK 0x2u
+#define INPUT_HOST_LSTICK 0x4u     /* VR: recenter (tap), a VR capture (hold) */
 uint32_t input_sdl_host_buttons(void);
 
 /* Circle and Cross exchanged on every controller (the settings menu's

@@ -1634,6 +1634,27 @@ static void poll_controllers(void) {
         if (vp.host & VR_HOST_SHOT) vrshot_request();   /* left grip + left stick click: like F11 */
 #endif
     }
+    /* A gamepad in VR (no motion controllers needed): L3 tapped recenters,
+     * L3 held a second saves a VR capture (dev builds) instead. L3 is no
+     * PSP button, so the game never sees it. */
+    if (g_vr_live && g_sdl_on) {
+        static ULONGLONG down;                  /* when L3 went down; 0 = up */
+        static int held_done;
+        const int l3 = (input_sdl_host_buttons() & INPUT_HOST_LSTICK) != 0;
+        const ULONGLONG now = GetTickCount64();
+        if (l3 && !down) { down = now; held_done = 0; }
+        if (l3 && !held_done && now - down >= 1000) {
+            held_done = 1;
+#ifndef PSP2I_PROD
+            fprintf(stderr, "vr: gamepad L3 held: a capture\n");
+            vrshot_request();
+#endif
+        }
+        if (!l3 && down) {
+            if (!held_done) { fprintf(stderr, "vr: gamepad L3: recenter\n"); vr_recenter(); }
+            down = 0;
+        }
+    }
 #endif
     if (b != g_pad_bits || ax != g_pad_ax || ay != g_pad_ay) {
         g_pad_bits = b; g_pad_ax = ax; g_pad_ay = ay;

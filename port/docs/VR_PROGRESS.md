@@ -185,7 +185,13 @@ the world; the user found it overwhelming. Those were removed. Now:
    VRAM (8 the run before): not explained yet (the intro movie?).
    **Stick clicks:** at focus SteamVR reported both stick-click actions
    unbound (`stick clicks bound: ... no, ... no`), and no click arrived,
-   though the generated binding maps them. The binding is the next fix.
+   though the generated binding maps them. **Explained:** the user plays
+   with a normal gamepad (no motion controls yet), and recenter was only on
+   the VR controllers' left stick click. Added: gamepad L3 tapped recenters,
+   held 1 s saves a VR capture (`vr: gamepad L3...` log lines); the engine
+   menu was already on R3 / Guide. Built, not yet pressed in the headset.
+   The VR-controller binding log (`vr: bound to ...`, from the profile
+   change) stays for when motion controllers are used.
 3. Engine-menu items for `vr_stereo` and `vr_world_scale` (the menu has 31
    items and a 32-bit hidden mask: widen it first, see Gotchas). The world
    scale 10 units/m is a guess the user hasn't judged yet.

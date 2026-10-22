@@ -98,7 +98,9 @@ trackpad. Vive wands have no face buttons: the trackpads are the sticks, and the
 right trackpad click is Cross. Pico 4 uses the Touch layout.
 
 A gamepad (SDL) still works next to the controllers: buttons from both count,
-and the VR sticks win unless only the pad's stick is pushed.
+and the VR sticks win unless only the pad's stick is pushed. With a gamepad
+alone in VR: R3 or the Guide / PS button opens the engine menu, L3 tapped
+recenters, and L3 held for a second saves a VR capture (dev builds only).
 
 ## Testing without the game
 
