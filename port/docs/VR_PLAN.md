@@ -169,6 +169,42 @@ the next optimisation.
 
 **P3: Head-rate decoupling.** FramePacket replay at headset rate on the render thread. Game logic stays at 30/60 (`framerate.c`).
 
+### P3 approach (decided 2026-10-22)
+
+Head tracking is applied at the GE, in the same per-eye replay as P2's
+stereo, not by writing the game's camera (`0x08AFA598` / LookAt /
+SetViewMatrix were the other options):
+
+- **Render-only for sure:** no game memory is written. The orbit controller
+  saves the camera's current eye each frame (ctrl +0xB4), so a head offset
+  written there would feed back into the game's camera. The camera object's
+  inverse and direction vectors (+0x50, +0xD0) may steer movement too.
+- **Only the 3D scene turns:** the HUD pass stays flat (`flat_after_clear`),
+  and the sky and every other perspective draw before it turn with the head.
+  At SetViewMatrix the three calls per frame (scene, scene, the `6.31`
+  camera) would have to be told apart.
+- **One pose per frame, known exactly:** psprecomp `psp_gpu_stereo.eye_views`.
+  At the first moved draw after a flip the host's `on_frame` (main.c
+  `head_frame`) builds both eyes' view matrices from the newest
+  `vr_head_get` pose and names it with a tag. The whole frame uses them, and
+  d3d11.c keeps the tag with its eye pictures (`rt_entry.eye_tag`). The VR
+  thread shows each picture as a projection layer at the pose it was drawn
+  with, so the compositor's reprojection turns it with the head between game
+  frames. That is the cheap first form of head-rate decoupling. The
+  FramePacket replay at headset rate is still the later step.
+- **The maths:** the vertices are in the game's clip space, so each eye is
+  `PROJ · E_eye · PROJ⁻¹` per draw (gpu.c `stereo_kmat`). `E_eye` is the
+  inverse of the eye's camera in the game camera's view space: the
+  `vr_level` axes (heading only, from world up in the view matrix
+  `0x08FA98A0`) times the head rotation, at the head's position plus the eye
+  offset, times the world scale.
+
+The cost of this choice: culling stays the game's. Anything outside the game
+camera's frustum is missing when the head turns far, so the frustum cull has
+to be found and widened (it was already needed for P2). The projection layer
+uses the game's own FOV for now. A wider FOV means a wider PROJ for the eyes,
+which also needs that cull.
+
 **P4: First person.** Head-bone camera, head hidden by bone weight, body-relative movement, lock-on in the world, the mirror.
 
 **P5: Motion controls.** Actions and bindings, laser UI, weapon on hand, swing / Just Attack / guns / techniques, haptics, setup wizard.

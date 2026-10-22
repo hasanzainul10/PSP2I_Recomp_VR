@@ -56,15 +56,19 @@ void vr_submit_frame(const uint32_t *argb, int w, int h);
  * the game's horizontal FOV at its distance (tan_half_fov_x: the game's
  * horizontal half-FOV tangent; 0 = keep the last one), so the screen is a
  * window into the game world. Copied. A later vr_submit_frame shows a mono
- * picture again. */
-void vr_submit_stereo(const uint32_t *left, const uint32_t *right, int w, int h, float tan_half_fov_x);
+ * picture again.
+ * Phase 3, head tracking: `head` is the id of the vr_head the eyes were drawn
+ * with (0 = none). Then the pictures go to the headset as a projection layer
+ * at that pose, with the game's FOV, instead of the window: the compositor
+ * turns them with the head between game frames. */
+void vr_submit_stereo(const uint32_t *left, const uint32_t *right, int w, int h, float tan_half_fov_x, uint32_t head);
 
 /* The same on the GPU: `handle` is a DXGI shared handle (keyed mutex, key 0)
  * of an RGBA8 texture 2w x h holding left | right, at the swapchain's size.
  * The VR thread copies it into the swapchain. If it can't (another GPU, a
  * size or format mismatch) vr_share_failed() turns 1 for good: then send
  * pixels with vr_submit_stereo. */
-void vr_submit_stereo_shared(void *handle, int w, int h, float tan_half_fov_x);
+void vr_submit_stereo_shared(void *handle, int w, int h, float tan_half_fov_x, uint32_t head);
 int  vr_share_failed(void);
 
 /* The port's overlay (engine menu, FPS counter: what it draws over the game)
@@ -77,6 +81,20 @@ void vr_submit_overlay(const uint32_t *argb);
  * VR_IPD_DEFAULT until the session reports it. */
 #define VR_IPD_DEFAULT 0.064f
 float vr_ipd(void);
+
+/* Phase 3, head tracking: the newest predicted head pose, relative to the
+ * recentred one (vr_recenter: its position, and its heading with the floor
+ * level), in the OpenXR convention (+x right, +y up, -z forward, metres).
+ * The VR thread keeps the last few by id, so a picture drawn with one can be
+ * shown at that pose (vr_submit_stereo*'s `head`). Returns 1 with a tracked
+ * pose, 0 (and id 0) before the first one. */
+typedef struct {
+    uint32_t id;
+    float    q[4];          /* orientation x, y, z, w */
+    float    p[3];          /* position */
+    float    eye[2][3];     /* the left and right eye in the head's space */
+} vr_head;
+int vr_head_get(vr_head *out);
 
 /* The controllers as a PSP pad. buttons: PSP_CTRL_* bits; sticks 0..255, 128
  * centre (left: the analog stick, right: the camera). host: VR_HOST_* actions

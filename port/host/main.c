@@ -68,6 +68,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include <psprecomp/cpu.h>
 #include <psprecomp/mem.h>
@@ -172,7 +173,8 @@ const uint32_t *d3d11_present_hires(int *w, int *h);
 const uint32_t *d3d11_present_eye(int eye, int *w, int *h);
 void d3d11_eye_share(int on);
 void d3d11_set_mono_left(int on);
-void *d3d11_present_eye_shared(int *w, int *h);
+void *d3d11_present_eye_shared(int *w, int *h, uint32_t *tag);
+uint32_t d3d11_present_eye_tag(void);
 #endif
 #include "gl_ge.h"
 
@@ -859,6 +861,15 @@ static int      g_vr_dist_dm = 25, g_vr_width_dm = 30;
  * screen's distance) in game units. */
 static int      g_vr_stereo = 1;
 static float    g_vr_world_scale = VR_WORLD_SCALE_DEFAULT;
+/* Phase 3, head tracking (vr_head=, vr_level=): with stereo, each eye is
+ * drawn from the head (the game camera plus the head's pose since recenter)
+ * and the headset shows the pictures as a projection layer at the game's
+ * FOV, instead of the window. vr_level takes the game camera's pitch and
+ * roll out, so the horizon stays level with the real floor. */
+static int      g_vr_head = 1, g_vr_level = 1;
+static int      g_head_on;                  /* the eyes follow the head now */
+static int      g_fake_head;                /* PSP2I_VR_FAKE_HEAD=yaw,pitch (dev): a fixed head turn without a headset */
+static float    g_fake_yaw, g_fake_pitch;   /* degrees */
 static int      g_stereo_arg;               /* --stereo: the eyes without a headset (dev) */
 static int      g_stereo_on;                /* the eyes are drawn now */
 static const uint32_t *g_eye_px[2];         /* the latest eye pictures (d3d11.c), or NULL */
@@ -871,6 +882,7 @@ static uint32_t g_ovl_px[SCREEN_W * SCREEN_H], g_ovl_sent[SCREEN_W * SCREEN_H];
 static int      g_ovl_sent_valid;
 static void    *g_eye_shared;               /* this vblank's shared eye texture, or NULL */
 static int      g_eye_shared_w, g_eye_shared_h;
+static uint32_t g_eye_shared_tag, g_eye_px_tag;   /* the head pose (vr_head.id) the eyes were drawn with, 0 = none */
 static uint64_t g_eye_shared_vb;            /* the last vblank one was sent */
 static uint32_t *g_eye_rgba[2];             /* ... with the overlay, for the headset */
 static int      g_vr_live;                  /* vr_start ran */
@@ -898,6 +910,79 @@ static void vr_apply(void) {
     }
 }
 
+/* Column-major 3x3 (m[c * 3 + r]) of the rotation q (x, y, z, w). */
+static void quat_mat3(const float *q, float *m) {
+    const float x = q[0], y = q[1], z = q[2], w = q[3];
+    m[0] = 1 - 2 * (y * y + z * z); m[1] = 2 * (x * y + z * w);     m[2] = 2 * (x * z - y * w);
+    m[3] = 2 * (x * y - z * w);     m[4] = 1 - 2 * (x * x + z * z); m[5] = 2 * (y * z + x * w);
+    m[6] = 2 * (x * z + y * w);     m[7] = 2 * (y * z - x * w);     m[8] = 1 - 2 * (x * x + y * y);
+}
+
+static void mat3_mul(const float *a, const float *b, float *out) {   /* out = a * b */
+    for (int c = 0; c < 3; c++)
+        for (int r = 0; r < 3; r++) out[c * 3 + r] = a[r] * b[c * 3] + a[3 + r] * b[c * 3 + 1] + a[6 + r] * b[c * 3 + 2];
+}
+
+/* vr_level: the game camera with only its heading, as axes in the game
+ * camera's own view space (columns x, y, z). World up seen from the camera
+ * is the view matrix's second column (0x08FA98A0, the view the frame is
+ * drawn with: ADDRESS_MAP.md). Identity when that is not a usable view. */
+#define PSP2I_VIEW_MATRIX 0x08FA98A0u
+static void level_axes(float *m) {
+    static const float ID[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    memcpy(m, ID, sizeof ID);
+    float u[3] = { psp_read_f32(PSP2I_VIEW_MATRIX + 16), psp_read_f32(PSP2I_VIEW_MATRIX + 20),
+                   psp_read_f32(PSP2I_VIEW_MATRIX + 24) };
+    const float ul = sqrtf(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+    if (!(ul > 0.5f && ul < 2.0f)) return;
+    for (int k = 0; k < 3; k++) u[k] /= ul;
+    /* Forward (-z) with the up part taken out: the heading. */
+    float f[3] = { u[2] * u[0], u[2] * u[1], -1.0f + u[2] * u[2] };
+    const float fl = sqrtf(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+    if (fl < 1e-3f) return;                                     /* looking straight up or down */
+    const float z[3] = { -f[0] / fl, -f[1] / fl, -f[2] / fl };
+    const float x[3] = { u[1] * z[2] - u[2] * z[1], u[2] * z[0] - u[0] * z[2], u[0] * z[1] - u[1] * z[0] };
+    for (int k = 0; k < 3; k++) { m[k] = x[k]; m[3 + k] = u[k]; m[6 + k] = z[k]; }
+}
+
+/* psp_gpu_stereo.on_frame: at the first 3D draw of each game frame, each
+ * eye's view from the newest head pose. The game camera stays where the game
+ * put it (nothing in the game changes); each eye is a camera on top of it at
+ * the head's orientation and position since recenter, in game units (the
+ * world scale), so every draw of the frame is seen from the head. */
+static void head_frame(psp_gpu_stereo *s) {
+    vr_head h;
+    memset(&h, 0, sizeof h);
+    h.q[3] = 1.0f;
+    h.eye[0][0] = -0.5f * VR_IPD_DEFAULT; h.eye[1][0] = 0.5f * VR_IPD_DEFAULT;
+    const int live = g_vr_live && vr_head_get(&h);
+#ifndef PSP2I_PROD
+    if (!live && g_fake_head) {                                 /* yaw about y, then pitch about x */
+        const float y = g_fake_yaw * 0.00872665f, x = g_fake_pitch * 0.00872665f;   /* half angles, radians */
+        h.q[0] = cosf(y) * sinf(x); h.q[1] = sinf(y) * cosf(x); h.q[2] = -sinf(y) * sinf(x); h.q[3] = cosf(y) * cosf(x);
+    }
+#endif
+    float lev[9], hr[9], q[9];
+    if (g_vr_level) level_axes(lev);
+    else { static const float ID[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 }; memcpy(lev, ID, sizeof ID); }
+    quat_mat3(h.q, hr);
+    mat3_mul(lev, hr, q);                                       /* the head's axes in the game camera's view space */
+    const float k = g_vr_world_scale;
+    for (int e = 0; e < 2; e++) {
+        float p[3];
+        for (int r = 0; r < 3; r++)
+            p[r] = k * (lev[r] * h.p[0] + lev[3 + r] * h.p[1] + lev[6 + r] * h.p[2] +
+                        q[r] * h.eye[e][0] + q[3 + r] * h.eye[e][1] + q[6 + r] * h.eye[e][2]);
+        float *m = s->eye_view[e];                              /* the inverse of [q | p] */
+        for (int c = 0; c < 3; c++)
+            for (int r = 0; r < 3; r++) m[c * 4 + r] = q[r * 3 + c];
+        for (int r = 0; r < 3; r++) m[12 + r] = -(q[r * 3] * p[0] + q[r * 3 + 1] * p[1] + q[r * 3 + 2] * p[2]);
+        m[3] = m[7] = m[11] = 0.0f;
+        m[15] = 1.0f;
+    }
+    s->tag = live ? h.id : 0;
+}
+
 /* Once per vblank: the eyes are drawn while the headset shows the game (or
  * --stereo), with Direct3D 11 only (the backend with eye copies). */
 static void stereo_update(void) {
@@ -910,15 +995,22 @@ static void stereo_update(void) {
     const int recent = running_vb && vb - running_vb < 180;
     const int on = g_renderer == REN_D3D11 &&
                    (g_stereo_arg || (g_vr_live && g_vr_stereo && recent));
-    psp_gpu_stereo st = { 0, 0, 0, 0, 0 };
+    const int head = on && ((g_vr_live && g_vr_head) || g_fake_head);
+    psp_gpu_stereo st;
+    memset(&st, 0, sizeof st);
     if (on) {
         st.on = 1;
         st.half_ipd = 0.5f * vr_ipd() * g_vr_world_scale;
         st.converge = g_vr_dist_dm / 10.0f * g_vr_world_scale;   /* the screen's distance: no disparity there */
         st.flat_after_clear = 1;                                  /* PSP2i draws its HUD in 3D after a second clear */
         st.mono_is_left = 1;                                      /* two pictures, not three: the window shows the left eye */
+        st.eye_views = head;                                      /* head tracking: head_frame sets each eye per frame */
+        st.on_frame = head ? head_frame : NULL;
     }
     if (on != g_stereo_on) fprintf(stderr, "vr: stereo %s\n", on ? "on (each eye drawn at the GE)" : "off");
+    if (head != g_head_on)
+        fprintf(stderr, "vr: head tracking %s\n", head ? (g_vr_level ? "on (horizon levelled)" : "on") : "off");
+    g_head_on = head;
     psp_gpu_set_stereo(&st);
     d3d11_set_mono_left(st.mono_is_left);
     d3d11_eye_share(on && g_vr_live && !vr_share_failed());
@@ -1017,6 +1109,8 @@ static int display_load(void) {
         else if (!strncmp(line, "test_30hz_logic=", 16))  g_test_logic = !strncmp(line + 16, "on", 2);
         else if (!strncmp(line, "vr=", 3))             g_vr_on = !strncmp(line + 3, "on", 2);
         else if (!strncmp(line, "vr_stereo=", 10))     g_vr_stereo = strncmp(line + 10, "off", 3) != 0;
+        else if (!strncmp(line, "vr_head=", 8))        g_vr_head = strncmp(line + 8, "off", 3) != 0;
+        else if (!strncmp(line, "vr_level=", 9))       g_vr_level = strncmp(line + 9, "off", 3) != 0;
         else if (!strncmp(line, "vr_world_scale=", 15)) {
             const float k = (float)atof(line + 15);
             if (k >= 1.0f && k <= 100.0f) g_vr_world_scale = k;
@@ -1074,6 +1168,9 @@ static void display_save(int res) {
     fprintf(f, "; VR stereo (Direct3D 11): on = a 3D window into the game (as wide as its view), off = the flat screen;"
                " world scale = game units per metre (sets the depth)\n");
     fprintf(f, "vr_stereo=%s\nvr_world_scale=%.1f\n", g_vr_stereo ? "on" : "off", (double)g_vr_world_scale);
+    fprintf(f, "; VR head tracking (with stereo): on = you see the game from your head (at the game's field of view), off = the 3D window;"
+               " level: on = the horizon stays level (the game camera's tilt taken out)\n");
+    fprintf(f, "vr_head=%s\nvr_level=%s\n", g_vr_head ? "on" : "off", g_vr_level ? "on" : "off");
     fprintf(f, "; PPSSPP texture packs: folders holding a textures.ini, ';'-separated, later ones win (relative to the exe); empty = off\n");
     fprintf(f, "texture_packs=%s\n", g_texpacks);
     fclose(f);
@@ -1516,7 +1613,8 @@ static void on_vblank(void) {
          * frame shows for 2+ vblanks; d3d11_present then returns 2). A
          * picture from VRAM (p 0: movies) has no eyes. */
         g_eye_new = 0;
-        g_eye_shared = g_stereo_on && g_renderer == REN_D3D11 ? d3d11_present_eye_shared(&g_eye_shared_w, &g_eye_shared_h) : NULL;
+        g_eye_shared = g_stereo_on && g_renderer == REN_D3D11
+                     ? d3d11_present_eye_shared(&g_eye_shared_w, &g_eye_shared_h, &g_eye_shared_tag) : NULL;
         if (!g_stereo_on || p == 0) g_eye_px[0] = g_eye_px[1] = NULL;
         if (p == 1 && g_stereo_on && g_renderer == REN_D3D11) {
             int w1, h1, w2, h2;
@@ -1524,6 +1622,7 @@ static void on_vblank(void) {
             g_eye_px[0] = g_eye_px[1] = NULL;
             if (l && r && w1 == w2 && h1 == h2 && w1 % SCREEN_W == 0 && w1 <= SCREEN_W * 4) {
                 g_eye_px[0] = l; g_eye_px[1] = r; g_eye_w = w1; g_eye_h = h1;
+                g_eye_px_tag = d3d11_present_eye_tag();
                 g_eye_new = 1;
             }
         }
@@ -1556,7 +1655,8 @@ static void on_vblank(void) {
              * every vblank while the overlay (engine menu) is up so it stays
              * live. On the GPU when it can be (no overlay). */
             if (g_vr_live && g_eye_shared) {
-                vr_submit_stereo_shared(g_eye_shared, g_eye_shared_w, g_eye_shared_h, psp_gpu_stereo_tan_half_fov());
+                vr_submit_stereo_shared(g_eye_shared, g_eye_shared_w, g_eye_shared_h, psp_gpu_stereo_tan_half_fov(),
+                                        g_eye_shared_tag);
                 g_eye_shared_vb = vb;
             }
             if (g_vr_live && g_stereo_on && vb - g_eye_shared_vb < 8) {
@@ -1576,7 +1676,8 @@ static void on_vblank(void) {
                 if (g_eye_new || g_overlay_up) {
                     compose_eyes();
                     if (g_eye_rgba[0] && g_eye_rgba[1])
-                        vr_submit_stereo(g_eye_rgba[0], g_eye_rgba[1], g_eye_w, g_eye_h, psp_gpu_stereo_tan_half_fov());
+                        vr_submit_stereo(g_eye_rgba[0], g_eye_rgba[1], g_eye_w, g_eye_h, psp_gpu_stereo_tan_half_fov(),
+                                         g_eye_px_tag);
                 }
             } else if (g_vr_live && have_frame && !(g_stereo_on && vb - g_eye_shared_vb < 8)) {
                 /* the same picture, in the headset (not between shared stereo frames) */
@@ -2694,6 +2795,15 @@ int main(int argc, char **argv) {
     g_menu.vr_on = g_vr_on;
     g_menu.vr_dist_dm = g_vr_dist_dm;
     g_menu.vr_width_dm = g_vr_width_dm;
+#ifndef PSP2I_PROD
+    {   /* PSP2I_VR_FAKE_HEAD=yaw,pitch (degrees; with --stereo): the eyes drawn from a turned head, no headset */
+        const char *e = getenv("PSP2I_VR_FAKE_HEAD");
+        if (e && sscanf(e, "%f,%f", &g_fake_yaw, &g_fake_pitch) >= 1) {
+            g_fake_head = 1;
+            fprintf(stderr, "vr: fake head turn: yaw %.1f, pitch %.1f degrees\n", (double)g_fake_yaw, (double)g_fake_pitch);
+        }
+    }
+#endif
     vr_apply();
 #else
     (void)vr_arg;

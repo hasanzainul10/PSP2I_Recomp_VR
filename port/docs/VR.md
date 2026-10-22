@@ -45,8 +45,29 @@ In `psp2i_display.ini` (no menu items yet):
 |---|---|
 | `vr_stereo=on` | `off` = the flat screen of phase 1 |
 | `vr_world_scale=10.0` | Game units per metre. Higher = the world looks smaller and the 3D weaker; lower = bigger and stronger |
+| `vr_head=on` | Head tracking (phase 3, below). `off` = the stereo window |
+| `vr_level=on` | With head tracking: the horizon stays level with your floor (the game camera's up/down tilt is taken out). `off` = the game's tilt stays |
 
 The IPD comes from the headset. OpenGL keeps the flat screen.
+
+## Head tracking (phase 3)
+
+With `vr_head=on` (the default) you see the game from your own head: the game
+camera stays where the game puts it (the right stick still turns it), and your
+head turns and moves on top of it, at the world scale. Recenter (left stick
+click) makes the direction you face the game camera's again.
+
+For now:
+
+- You see the game's own field of view (about 72 x 45 degrees) in front of
+  you. Around it the view is black, and it follows your head.
+- Between game frames the headset turns the last picture with your head, so
+  head turns stay smooth at 30 fps.
+- The game only draws what its camera sees. Things outside its view are
+  missing when you look far to the side.
+- The HUD is drawn into the picture, so it stays in front of your eyes and
+  looks far away.
+- The engine menu stays on a screen in front of you.
 
 ## Controls
 

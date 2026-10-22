@@ -102,6 +102,7 @@ typedef struct {
     ID3D11RenderTargetView *eye_rtv[2];
     ID3D11ShaderResourceView *eye_srv[2];
     uint64_t eye_frame;
+    uint32_t eye_tag;                    /* head tracking: the pose its eye pictures were drawn with (psp_gpu_stereo_tag) */
     uint64_t gen;                        /* bumped whenever its GPU pixels change (d3d11_present) */
 } rt_entry;
 
@@ -1376,6 +1377,9 @@ static int d3d_draw_eye(int e, const psp_gpu_state *st, const psp_gpu_vertex *v,
         }
     }
     if (submit_draw(st, v, nverts, t->eye_rtv[e], dsv, srv, t->w, t->h, g_last.uvs) != 0) return 1;
+    const uint32_t tag = psp_gpu_stereo_tag();
+    if (t->eye_frame != frame_no()) t->eye_tag = 0;
+    if (tag) t->eye_tag = tag;
     t->eye_frame = frame_no();
     t->gen++;
     n_eye_draws++;
@@ -1488,6 +1492,7 @@ static ID3D11Texture2D *g_eye_present[PRESENT_RING][2];
 static int g_present_eyes[PRESENT_RING];
 static uint32_t *g_eye_px[2];
 static int g_eye_w, g_eye_h, g_eye_fresh;
+static uint32_t g_present_tag[PRESENT_RING], g_eye_tag;   /* the eye pictures' head pose (rt_entry.eye_tag) */
 static uint64_t n_present_eyes;
 static int g_present_stereo[PRESENT_RING];   /* the frame had eyes: no mono S-times picture */
 
@@ -1501,13 +1506,15 @@ static ID3D11Texture2D *g_share;
 static IDXGIKeyedMutex *g_share_mx;
 static HANDLE g_share_handle;
 static UINT g_share_w, g_share_h;
+static uint32_t g_share_tag;
 static uint64_t n_share, n_share_busy;
 
 void d3d11_eye_share(int on) { g_share_on = on; }
 
-void *d3d11_present_eye_shared(int *w, int *h) {
+void *d3d11_present_eye_shared(int *w, int *h, uint32_t *tag) {
     if (!g_share_fresh) return NULL;
     *w = (int)g_share_w / 2; *h = (int)g_share_h;
+    *tag = g_share_tag;
     return g_share_handle;
 }
 
@@ -1551,6 +1558,7 @@ static int share_eyes(rt_entry *t, UINT W, UINT H) {
                                                   (ID3D11Resource *)eye_picture(t, e), 0, &box);
     IDXGIKeyedMutex_ReleaseSync(g_share_mx, 0);
     ID3D11DeviceContext_Flush(g_ctx);
+    g_share_tag = t->eye_tag;
     g_share_fresh = 1;
     n_share++;
     return 1;
@@ -1561,6 +1569,8 @@ const uint32_t *d3d11_present_eye(int eye, int *w, int *h) {
     *w = g_eye_w; *h = g_eye_h;
     return g_eye_px[eye];
 }
+
+uint32_t d3d11_present_eye_tag(void) { return g_eye_tag; }
 
 /* One GPU pixel (RGBA8) as the window shows it: 0xAARRGGBB, quantized to
  * the framebuffer format through the lookup tables; 8888 needs no table. */
@@ -1606,6 +1616,7 @@ int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w,
         /* Stereo: the eye copies too, when this frame was drawn for the eyes. */
         g_present_eyes[k] = eye_picture(t, 0) && eye_picture(t, 1) && t->eye_frame + 2 >= frame_no();
         g_present_stereo[k] = g_present_eyes[k];
+        g_present_tag[k] = t->eye_tag;
         if (g_present_eyes[k] && g_share_on && share_eyes(t, (UINT)(w * g_scale), (UINT)(h * g_scale)))
             g_present_eyes[k] = 0;                     /* the headset has them already */
         for (int e = 0; e < 2 && g_present_eyes[k]; e++) {
@@ -1708,6 +1719,7 @@ int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w,
             }
             g_eye_w = W; g_eye_h = H;
             g_eye_fresh = ok;
+            g_eye_tag = g_present_tag[best];
             if (ok) n_present_eyes++;
         }
         /* This copy and every older one are done with. */

@@ -87,6 +87,16 @@ static int      g_frame_w = GAME_W, g_frame_h = GAME_H;
 static int      g_frame_stereo;             /* g_frame is the left eye and g_frame_r the right */
 static LONG     g_frame_seq;                /* bumped per vr_submit_frame / vr_submit_stereo(_shared) */
 static void    *g_frame_shared;             /* the game's shared texture holds the newest frame (vr_submit_stereo_shared) */
+static uint32_t g_frame_head;               /* the head pose the newest stereo frame was drawn with (0: the window) */
+
+/* Head tracking (vr_head_get): the poses handed to the game, by id, in the
+ * LOCAL space, so a picture is shown at the pose it was drawn with. */
+#define HEAD_RING 128
+static SRWLOCK  g_head_lock = SRWLOCK_INIT;
+static struct { uint32_t id; XrPosef pose; } g_heads[HEAD_RING];
+static vr_head  g_head;                     /* the newest, relative to the reference */
+static uint32_t g_head_next;
+static XrVector3f g_eye_off[2] = { { -0.032f, 0, 0 }, { 0.032f, 0, 0 } };   /* the eyes in the head's space */
 static volatile LONG g_share_failed;        /* it can't be used here: the game sends pixels instead */
 
 static SRWLOCK  g_pad_lock = SRWLOCK_INIT;
@@ -112,6 +122,8 @@ static int   g_session_over;                 /* the runtime ended the session (s
 static int   g_instance_lost;
 static int   g_placed;                       /* the screen has a pose */
 static XrPosef g_screen_pose;
+static float g_ref_yaw;                      /* the head's heading and position at recenter (head tracking's origin) */
+static XrVector3f g_ref_pos;
 static LONG  g_uploaded_seq = -1;
 static uint32_t *g_upload;                   /* the converted, scaled picture */
 
@@ -531,6 +543,9 @@ static void session_destroy(void) {
     if (g_local) { p_xrDestroySpace(g_local); g_local = XR_NULL_HANDLE; }
     if (g_sess) { p_xrDestroySession(g_sess); g_sess = XR_NULL_HANDLE; }
     g_running = 0;
+    AcquireSRWLockExclusive(&g_head_lock);
+    g_head.id = 0;                                  /* no pose until the next session tracks one */
+    ReleaseSRWLockExclusive(&g_head_lock);
 }
 
 /* The game's shared eye texture, opened on this thread's device. */
@@ -661,6 +676,8 @@ static int place_screen(XrTime t) {
     const float d = g_cfg.distance_m;
     ReleaseSRWLockShared(&g_cfg_lock);
     const float yaw = atan2f(-f.x, -f.z);
+    g_ref_yaw = yaw;
+    g_ref_pos = head;
     g_screen_pose.orientation.x = 0;
     g_screen_pose.orientation.y = sinf(yaw * 0.5f);
     g_screen_pose.orientation.z = 0;
@@ -729,12 +746,59 @@ static void update_ipd(XrTime t) {
                 dz = v[1].pose.position.z - v[0].pose.position.z;
     const float ipd = sqrtf(dx * dx + dy * dy + dz * dz);
     if (ipd < 0.04f || ipd > 0.09f) return;                      /* not a plausible IPD */
+    AcquireSRWLockExclusive(&g_head_lock);
+    g_eye_off[0] = v[0].pose.position;
+    g_eye_off[1] = v[1].pose.position;
+    ReleaseSRWLockExclusive(&g_head_lock);
     AcquireSRWLockExclusive(&g_cfg_lock);
     if (fabsf(ipd - g_ipd) > 0.0005f) {
         g_ipd = ipd;
         fprintf(stderr, "vr: IPD %.1f mm\n", ipd * 1000.0f);
     }
     ReleaseSRWLockExclusive(&g_cfg_lock);
+}
+
+static XrQuaternionf qmul(XrQuaternionf a, XrQuaternionf b) {   /* a then b, as one rotation: a * b */
+    XrQuaternionf r = { a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+                        a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+                        a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+                        a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z };
+    return r;
+}
+
+/* Head tracking: the head's predicted pose for this headset frame, kept by
+ * id (the pictures drawn with it come back with the id) and handed to the
+ * game relative to the reference (place_screen). */
+static void track_head(XrTime t) {
+    XrSpaceLocation loc = { XR_TYPE_SPACE_LOCATION };
+    if (XR_FAILED(p_xrLocateSpace(g_view, g_local, t, &loc))) return;
+    if (!(loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) return;
+    if (!(loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) loc.pose.position = g_ref_pos;
+    const XrQuaternionf unyaw = { 0, -sinf(g_ref_yaw * 0.5f), 0, cosf(g_ref_yaw * 0.5f) };
+    const XrQuaternionf q = qmul(unyaw, loc.pose.orientation);
+    const XrVector3f d = { loc.pose.position.x - g_ref_pos.x, loc.pose.position.y - g_ref_pos.y,
+                           loc.pose.position.z - g_ref_pos.z };
+    const XrVector3f p = qrot(unyaw, d);
+    AcquireSRWLockExclusive(&g_head_lock);
+    if (++g_head_next == 0) g_head_next = 1;                     /* 0 means none */
+    g_heads[g_head_next % HEAD_RING].id = g_head_next;
+    g_heads[g_head_next % HEAD_RING].pose = loc.pose;
+    g_head.id = g_head_next;
+    g_head.q[0] = q.x; g_head.q[1] = q.y; g_head.q[2] = q.z; g_head.q[3] = q.w;
+    g_head.p[0] = p.x; g_head.p[1] = p.y; g_head.p[2] = p.z;
+    for (int e = 0; e < 2; e++) {
+        g_head.eye[e][0] = g_eye_off[e].x; g_head.eye[e][1] = g_eye_off[e].y; g_head.eye[e][2] = g_eye_off[e].z;
+    }
+    ReleaseSRWLockExclusive(&g_head_lock);
+}
+
+/* The LOCAL pose a picture was drawn with, if it is still kept. */
+static int head_find(uint32_t id, XrPosef *out) {
+    int ok = 0;
+    AcquireSRWLockShared(&g_head_lock);
+    if (id && g_heads[id % HEAD_RING].id == id) { *out = g_heads[id % HEAD_RING].pose; ok = 1; }
+    ReleaseSRWLockShared(&g_head_lock);
+    return ok;
 }
 
 /* The latest overlay into its swapchain, when it changed. */
@@ -780,14 +844,57 @@ static void frame(void) {
     input_update(g_state == XR_SESSION_STATE_FOCUSED);
     XrCompositionLayerQuad quad[3] = { { XR_TYPE_COMPOSITION_LAYER_QUAD }, { XR_TYPE_COMPOSITION_LAYER_QUAD },
                                        { XR_TYPE_COMPOSITION_LAYER_QUAD } };
+    XrCompositionLayerProjection proj = { XR_TYPE_COMPOSITION_LAYER_PROJECTION };
+    XrCompositionLayerProjectionView pv[2] = { { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW },
+                                               { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW } };
     const XrCompositionLayerBaseHeader *layers[3];
     uint32_t nl = 0;
     if (fs.shouldRender) {
         if (InterlockedExchange(&g_recenter, 0) || !g_placed) place_screen(fs.predictedDisplayTime);
         update_ipd(fs.predictedDisplayTime);
+        if (g_placed) track_head(fs.predictedDisplayTime);
         upload();
         upload_overlay();
-        if (g_placed && g_chain_filled) {
+        AcquireSRWLockShared(&g_frame_lock);
+        const uint32_t head = g_frame_stereo ? g_frame_head : 0;
+        ReleaseSRWLockShared(&g_frame_lock);
+        XrPosef hp;
+        const int tracked = g_placed && g_chain_filled && head_find(head, &hp);
+        static int was_tracked = -1;
+        if (g_chain_filled && tracked != was_tracked) {
+            fprintf(stderr, "vr: %s\n", tracked ? "pictures at the head pose they were drawn with (projection layer)"
+                                                : "pictures on the screen (quad layers)");
+            was_tracked = tracked;
+        }
+        if (tracked) {
+            /* Head tracking: the eyes were drawn from the head at pose hp, with
+             * the game's FOV; the compositor turns them with the head until
+             * the next game frame. Around the game's FOV the view is black. */
+            AcquireSRWLockShared(&g_cfg_lock);
+            const float ax = atanf(g_tan_fov), ay = atanf(g_tan_fov * (float)GAME_H / (float)GAME_W);
+            ReleaseSRWLockShared(&g_cfg_lock);
+            AcquireSRWLockShared(&g_head_lock);
+            const XrVector3f off[2] = { g_eye_off[0], g_eye_off[1] };
+            ReleaseSRWLockShared(&g_head_lock);
+            for (int eye = 0; eye < 2; eye++) {
+                XrCompositionLayerProjectionView *v = &pv[eye];
+                const XrVector3f o = qrot(hp.orientation, off[eye]);
+                v->pose.orientation = hp.orientation;
+                v->pose.position.x = hp.position.x + o.x;
+                v->pose.position.y = hp.position.y + o.y;
+                v->pose.position.z = hp.position.z + o.z;
+                v->fov.angleLeft = -ax; v->fov.angleRight = ax;
+                v->fov.angleUp = ay;    v->fov.angleDown = -ay;
+                v->subImage.swapchain = g_chain;
+                v->subImage.imageRect.offset.x = eye * (g_chain_w / 2);
+                v->subImage.imageRect.extent.width = g_chain_w / 2;
+                v->subImage.imageRect.extent.height = g_chain_h;
+            }
+            proj.space = g_local;
+            proj.viewCount = 2;
+            proj.views = pv;
+            layers[nl++] = (const XrCompositionLayerBaseHeader *)&proj;
+        } else if (g_placed && g_chain_filled) {
             AcquireSRWLockShared(&g_cfg_lock);
             /* The stereo window is as wide as the game's FOV at its distance:
              * then it shows the game world at its own angular size. */
@@ -806,21 +913,26 @@ static void frame(void) {
                 q->size.height = w * (float)GAME_H / (float)GAME_W;
                 layers[nl++] = (const XrCompositionLayerBaseHeader *)q;
             }
-            AcquireSRWLockShared(&g_frame_lock);
-            const int ovl = g_ovl_on;
-            ReleaseSRWLockShared(&g_frame_lock);
-            if (ovl && g_ochain_filled) {                /* the overlay on top, both eyes, at screen depth */
-                XrCompositionLayerQuad *q = &quad[2];
-                *q = quad[0];
-                q->layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
-                                XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
-                q->eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-                q->subImage.swapchain = g_ochain;
-                q->subImage.imageRect.offset.x = 0;
-                q->subImage.imageRect.extent.width = GAME_W * g_ochain_s;
-                q->subImage.imageRect.extent.height = GAME_H * g_ochain_s;
-                layers[nl++] = (const XrCompositionLayerBaseHeader *)q;
-            }
+        }
+        AcquireSRWLockShared(&g_frame_lock);
+        const int ovl = g_ovl_on;
+        ReleaseSRWLockShared(&g_frame_lock);
+        if (nl && ovl && g_ochain_filled) {              /* the overlay on top, both eyes, at screen depth */
+            AcquireSRWLockShared(&g_cfg_lock);
+            const float w = g_cfg.stereo ? 2.0f * g_cfg.distance_m * g_tan_fov : g_cfg.width_m;
+            ReleaseSRWLockShared(&g_cfg_lock);
+            XrCompositionLayerQuad *q = &quad[2];
+            q->layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
+                            XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+            q->space = g_local;
+            q->eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            q->subImage.swapchain = g_ochain;
+            q->subImage.imageRect.extent.width = GAME_W * g_ochain_s;
+            q->subImage.imageRect.extent.height = GAME_H * g_ochain_s;
+            q->pose = g_screen_pose;
+            q->size.width = w;
+            q->size.height = w * (float)GAME_H / (float)GAME_W;
+            layers[nl++] = (const XrCompositionLayerBaseHeader *)q;
         }
     }
     XrFrameEndInfo ei = { XR_TYPE_FRAME_END_INFO };
@@ -928,11 +1040,12 @@ void vr_submit_frame(const uint32_t *argb, int w, int h) {
     g_frame_w = w; g_frame_h = h;
     g_frame_stereo = 0;
     g_frame_shared = NULL;
+    g_frame_head = 0;
     ReleaseSRWLockExclusive(&g_frame_lock);
     InterlockedIncrement(&g_frame_seq);
 }
 
-void vr_submit_stereo(const uint32_t *left, const uint32_t *right, int w, int h, float tan_half_fov_x) {
+void vr_submit_stereo(const uint32_t *left, const uint32_t *right, int w, int h, float tan_half_fov_x, uint32_t head) {
     if (!g_thread || w < GAME_W || w % GAME_W || h * GAME_W != w * GAME_H || w > GAME_W * 4) return;
     AcquireSRWLockExclusive(&g_frame_lock);
     memcpy(g_frame, left, (size_t)w * h * 4);
@@ -940,6 +1053,7 @@ void vr_submit_stereo(const uint32_t *left, const uint32_t *right, int w, int h,
     g_frame_w = w; g_frame_h = h;
     g_frame_stereo = 1;
     g_frame_shared = NULL;
+    g_frame_head = head;
     ReleaseSRWLockExclusive(&g_frame_lock);
     if (tan_half_fov_x > 0.1f && tan_half_fov_x < 10.0f) {
         AcquireSRWLockExclusive(&g_cfg_lock);
@@ -949,12 +1063,13 @@ void vr_submit_stereo(const uint32_t *left, const uint32_t *right, int w, int h,
     InterlockedIncrement(&g_frame_seq);
 }
 
-void vr_submit_stereo_shared(void *handle, int w, int h, float tan_half_fov_x) {
+void vr_submit_stereo_shared(void *handle, int w, int h, float tan_half_fov_x, uint32_t head) {
     if (!g_thread || !handle || g_share_failed) return;
     AcquireSRWLockExclusive(&g_frame_lock);
     g_frame_shared = handle;
     g_frame_w = w; g_frame_h = h;
     g_frame_stereo = 1;
+    g_frame_head = head;
     ReleaseSRWLockExclusive(&g_frame_lock);
     if (tan_half_fov_x > 0.1f && tan_half_fov_x < 10.0f) {
         AcquireSRWLockExclusive(&g_cfg_lock);
@@ -982,6 +1097,13 @@ float vr_ipd(void) {
     const float ipd = g_ipd;
     ReleaseSRWLockShared(&g_cfg_lock);
     return ipd;
+}
+
+int vr_head_get(vr_head *out) {
+    AcquireSRWLockShared(&g_head_lock);
+    *out = g_head;
+    ReleaseSRWLockShared(&g_head_lock);
+    return out->id != 0;
 }
 
 int vr_pad_get(vr_pad *out) {

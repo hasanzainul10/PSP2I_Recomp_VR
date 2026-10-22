@@ -5,7 +5,7 @@ this file at the end of every working session: what changed, what was checked,
 what is next. The plan itself is [VR_PLAN.md](VR_PLAN.md); user-facing docs are
 [VR.md](VR.md); reverse-engineering results go in [ADDRESS_MAP.md](ADDRESS_MAP.md).
 
-_Last updated: 2026-10-22 (P2 stereo window at 60 fps; handoff for a new account)._
+_Last updated: 2026-10-22 (P3 head tracking built, not yet seen in the headset)._
 
 ## Handoff: start here (2026-10-22)
 
@@ -31,18 +31,36 @@ the PS VR2 at 3x and at 60 fps in town ("3D looks right and it's steadier"):
 59.7 fps average, min 55.9. Eye pictures go to the headset on the GPU
 (shared texture); the overlay is its own layer; the mono draw is the left eye.
 
+**P3 head tracking (2026-10-22, second session): built, NOT yet seen in the
+headset.** It's applied at the GE, not by hooking the camera (the reasons
+are in VR_PLAN.md "P3 approach"). `vr_head=on` and `vr_level=on` are the
+defaults. Checked so far: the build has no warnings, `test_menu` passes 445
+of 445, and a 30 s headless `--stereo` run with `PSP2I_VR_FAKE_HEAD=30,0`
+logged head tracking on and replayed 2000 eye draws with no crash. That run
+only reached the intro movie, so no 3D frame was drawn with a head pose.
+
 **Next (in order):**
-1. **P3 head tracking:** today the window is world-locked; the game camera
-   doesn't follow the head. Hook OrbitCamera_Apply `0x08AFA598` (or LookAt
-   `0x08D8969C`) to add the head pose to the game camera, then move from the
-   stereo window to a projection layer with the eyes' FOV. Mind CLAUDE.md:
-   camera changes are local only.
-2. Engine-menu items for `vr_stereo` and `vr_world_scale` (the menu has 31
+1. **Check P3 in the headset** (run it for the user, as above). Look for:
+   - `vr: head tracking on (horizon levelled)` and `vr: pictures at the head
+     pose they were drawn with (projection layer)` in the log;
+   - the world staying put while the head turns (no swimming): if it swims,
+     a sign or axis is wrong in `head_frame` / `level_axes` (main.c);
+   - objects missing when looking to the side (the game's frustum cull);
+   - the HUD sitting at infinity (it's in the picture, flat in both eyes).
+
+   Without a headset, `--stereo` with `PSP2I_VR_FAKE_HEAD=yaw,pitch` (degrees)
+   draws the eyes from a turned head, for `--overlay-shot` captures. That
+   needs a windowed run that reaches town (the press script isn't recorded:
+   write one down when found).
+2. Wider culling, then a wider eye FOV than the game's (find the frustum
+   cull; see VR_PLAN.md "P3 approach"). The HUD pass goes to its own layer at
+   a comfortable depth.
+3. Engine-menu items for `vr_stereo` and `vr_world_scale` (the menu has 31
    items and a 32-bit hidden mask: widen it first, see Gotchas). The world
    scale 10 units/m is a guess the user hasn't judged yet.
-3. Wider culling (objects popping at the window edges), a cutscene /
-   camera-cut fade, and the open items under "What exists" > stereo window.
-4. Not VR: the 120 fps crash and the headless intro-movie stall.
+4. A cutscene / camera-cut fade, and the open items under "What exists" >
+   stereo window.
+5. Not VR: the 120 fps crash and the headless intro-movie stall.
 
 **The `3ds_port` branch** is a placeholder (see Gotchas); don't work on it
 unless the user asks.
@@ -54,7 +72,8 @@ unless the user asks.
 | P0 RE tooling | **Done, run in town and field:** the GE gets identity view matrices (camera folded into bones / world on the CPU). View matrix found in RAM at `0x08FA98A0`, player world position at player object +0x4B0 (2 reports each; writer not yet watched) |
 | P1 PCVR theater | **Done, checked in the headset** by the user (2026-10-22): screen size, sharpness, colours, recenter and the button mapping in VR.md all right. Nothing to fix |
 | P2 stereo third person | **Stereo window done and checked in the PS VR2 (2026-10-22):** each GE draw replayed per eye, both pictures on one world-locked screen, HUD at screen depth. User: "looks pretty good", "3D looks right and it's steadier". 3x at 60 fps in town: 59.7 fps average (min 55.9). Still open for P2: world-scale tuning, wider culling, menu items, cutscene handling |
-| P3 to P8 | Not started |
+| P3 head-rate decoupling | **Head tracking built (2026-10-22), not yet seen in the headset:** each eye drawn from the head at the GE (`psp_gpu_stereo.eye_views`, one pose per frame by tag), a projection layer at that pose with the game's FOV, the horizon levelled. Still open: the headset check, wider culling and FOV, the HUD on its own layer, the FramePacket replay at headset rate |
+| P4 to P8 | Not started |
 
 ## Branches and PR
 
@@ -65,9 +84,11 @@ unless the user asks.
   (remote `fork` in the submodule; its `origin` is zmbkilla/psprecomp).
   `.gitmodules` points at the fork. Commit `12430e8` adds
   `psp_gpu_set_draw_observer` (render.h, gpu.c); `09e9ba3` and `288a1c4` add
-  the GE stereo replay (`psp_gpu_set_stereo`, `draw_eye`, `mono_is_left`).
-- At handoff: main repo `vr-theater` at the commit that adds this handoff
-  section (after `11f644d`); psprecomp `vr-draw-observer` at `288a1c4`.
+  the GE stereo replay (`psp_gpu_set_stereo`, `draw_eye`, `mono_is_left`);
+  `088e6cf` the per-eye view matrices for head tracking (`eye_views`,
+  `on_frame`, `psp_gpu_stereo_tag`).
+- Now: main repo `vr-theater` at the P3 head-tracking commit (after
+  `5df9c1e`); psprecomp `vr-draw-observer` at `088e6cf`.
 - `3ds_port` (main repo, origin): a placeholder branch from `fd149a1`.
 
 ## What exists
