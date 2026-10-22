@@ -989,6 +989,7 @@ static float    g_vr_fp_near = VR_FP_NEAR_DEFAULT;
 static float g_fp_head_off[3];               /* the head's centre across from the feet, world axes (head_frame's probe) */
 static int   g_fp_head_ok;
 static int   g_fp_cam;                       /* the last field camera was applied at the head */
+static float g_fp_cam_hr[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };   /* ... turned as the head was then (level frame) */
 /* VR image quality (vr_aniso=, vr_sharpen=; d3d11_set_quality, from the
  * next start): anisotropic filtering with mipmaps for the game's textures,
  * and a contrast-adaptive sharpening pass on the eye pictures. Only with VR
@@ -1114,7 +1115,14 @@ static void head_frame(psp_gpu_stereo *s) {
     }
 #endif
     float lev[9], hr[9], q[9];
-    if (g_vr_level) level_axes(lev);
+    if (g_vr_first && g_fp_cam) {
+        /* The game camera already looks as the head did when it was applied
+         * (hook_apply_camera): the level frame in its view is that turn
+         * undone, so only the head's movement since then is added. */
+        for (int c = 0; c < 3; c++)
+            for (int r = 0; r < 3; r++) lev[c * 3 + r] = g_fp_cam_hr[r * 3 + c];
+    }
+    else if (g_vr_level) level_axes(lev);
     else { static const float ID[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 }; memcpy(lev, ID, sizeof ID); }
     quat_mat3(h.q, hr);
     mat3_mul(lev, hr, q);                                       /* the head's axes in the game camera's view space */
@@ -1302,7 +1310,25 @@ static void hook_apply_camera(void (*original)(void)) {
         const float zl = sqrtf(z[0] * z[0] + z[2] * z[2]);
         if (zl > 1e-3f) {
             z[0] /= zl; z[2] /= zl;
-            const float x[3] = { z[2], 0.0f, -z[0] }, y[3] = { 0.0f, 1.0f, 0.0f };   /* x = up cross z */
+            const float lx[3] = { z[2], 0.0f, -z[0] }, ly[3] = { 0.0f, 1.0f, 0.0f }, lz[3] = { z[0], 0.0f, z[2] };   /* x = up cross z */
+            /* Turned as the head is (yaw, pitch, roll on the level heading),
+             * so what the eyes look at is in front of the game camera: in
+             * first person the game left out pieces behind a level camera
+             * (the town's centre roof hub overhead: 27 draws of one texture
+             * in third person, none in first; GE dumps 2026-10-23). */
+            float hr[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+#ifdef PSP2I_VR
+            vr_head hd;
+            memset(&hd, 0, sizeof hd);
+            if (g_vr_live && vr_head_get(&hd)) quat_mat3(hd.q, hr);
+#endif
+            memcpy(g_fp_cam_hr, hr, sizeof hr);
+            float x[3], y[3];
+            for (int i = 0; i < 3; i++) {                   /* the head's axes in the world: L * hr */
+                x[i] = lx[i] * hr[0] + ly[i] * hr[1] + lz[i] * hr[2];
+                y[i] = lx[i] * hr[3] + ly[i] * hr[4] + lz[i] * hr[5];
+                z[i] = lx[i] * hr[6] + ly[i] * hr[7] + lz[i] * hr[8];
+            }
             float h[3];
             for (int i = 0; i < 3; i++) h[i] = psp_read_f32(pl + 0x4B0u + 4u * (uint32_t)i);
             h[1] += g_vr_fp_eye;
