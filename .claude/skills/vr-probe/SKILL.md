@@ -24,6 +24,19 @@ every 60 frames, which is useful to confirm that the camera follows play.
 
 ## Reading a report
 
+**PSP2i's GE view matrix is always the identity**: the camera is folded into
+the bone and world matrices on the CPU. So `view i (scene)` shows eye (0,0,0),
+and the camera-position and view-matrix RAM hits are noise. Use instead:
+
+- **`camera matrix search`:** rigid 4x4 matrices in RAM that map a float triple
+  of the local player object to the player model's eye-space position. The
+  view matrix is `0x08FA98A0`, with the player position at player +0x4B0
+  (ADDRESS_MAP.md). Keep the addresses that come back in two reports.
+- **`unskinned draws` / `world of the largest unskinned draw`:** their WORLD
+  is the model-view.
+
+The generic fields (for games that do use the GE view):
+
 - **`view i (scene)`:** the view matrix with the most vertices, taken as the
   scene camera. Others are sky, shadows or the HUD's 3D parts.
 - **`camera position at 0x...`:** RAM holding the eye as 3 floats. The camera

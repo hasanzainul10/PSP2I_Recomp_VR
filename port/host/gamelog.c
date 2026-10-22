@@ -458,6 +458,14 @@ static void hook_is_local(void (*original)(void)) {
     logf_line("[party] player 0x%08X (+0x28 = %u) local? -> %d", pl, pl ? psp_read32(pl + 40) : 0, (int32_t)r);
 }
 
+uint32_t gamelog_local_player(void) {
+#ifndef PSP2I_PROD
+    return g_pl_local;
+#else
+    return 0;
+#endif
+}
+
 /* 0x08CB611C = "this room is an infra lobby" (room size == lobby size, or the
  * lobby controller exists). Forcing it in a session turns the session into a
  * lobby (tested 2026-10-05), so it is correctly false there. */

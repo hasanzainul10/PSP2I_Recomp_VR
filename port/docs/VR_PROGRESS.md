@@ -11,8 +11,8 @@ _Last updated: 2026-10-22._
 
 | Phase | State |
 |---|---|
-| P0 RE tooling | **Done:** probe (F8) and ADDRESS_MAP.md. **Not run yet** in a 3D scene: no camera or player address found so far |
-| P1 PCVR theater | **Done, partly checked:** session RUNNING on PS VR2 / SteamVR while the game plays. Picture in the headset and button mapping not yet checked by eye |
+| P0 RE tooling | **Done, run in town and field:** the GE gets identity view matrices (camera folded into bones / world on the CPU). View matrix found in RAM at `0x08FA98A0`, player world position at player object +0x4B0 (2 reports each; writer not yet watched) |
+| P1 PCVR theater | **Done, checked in the headset** by the user (2026-10-22): screen size, sharpness, colours, recenter and the button mapping in VR.md all right. Nothing to fix |
 | P2 stereo third person | Not started |
 | P3 to P8 | Not started |
 
@@ -37,7 +37,10 @@ _Last updated: 2026-10-22._
   `--vr` / `--no-vr`. Engine menu VR page (`menu.h` MENU_VR*, MFX_VR*).
 - `port/cmake/FetchOpenXR.cmake`: loader 1.1.63, headers only, DLL copied.
   Compiled only when headers are fetched (`PSP2I_VR`).
-- `port/vr/vr_probe.c`: F8 (dev builds) writes `logs/vr_probe.txt`.
+- `port/vr/vr_probe.c`: F8 (dev builds) writes `logs/vr_probe.txt`. Since
+  2026-10-22 it also searches RAM for the camera matrix: rigid 4x4 matrices
+  that map a float triple of the local player object (`gamelog_local_player`)
+  to the player model's eye-space position.
   `PSP2I_VR_PROBE_EVERY=N` logs the camera to the console.
 - `port/tests/vr_test.c`: the theater with a test picture, without the game.
 - Menu tests: `test_menu` (445 checks), including `test_vr_page`.
@@ -55,8 +58,10 @@ Everything is under `FinalBuild\` (git-ignored):
   - `flash\font`: the firmware fonts.
   - `ms\PSP\SAVEDATA\NPJH50332DL`: the DLC.
   - `ms\PSP\GAME\NPJH50332`: the extra Infinity Missions.
-- **No save yet:** the user was in character creation. Saves will land in
-  `GameData\ms\PSP\SAVEDATA\NPJH50332`.
+- **Save:** a character exists (saved 2026-10-22) in
+  `GameData\ms\PSP\SAVEDATA\NPJH50332`. The game autosaves
+  (for example after a quest). Start in the field is the game's own screenshot (JPGs in
+  `ms\PICTURE\NPJH50332SS`), not a port bug.
 - **Headset:** the user's is a PS VR2 on SteamVR (the OpenXR runtime). Its Sense
   controllers also appear as SDL joysticks.
 
@@ -64,22 +69,27 @@ Build and run steps: the `psp2i-build-run` skill (`.claude/skills/`).
 
 ## Next steps
 
-1. **Check P1 in the headset with the user:**
-   - screen size and sharpness, colours (sRGB);
-   - recenter; button mapping: Cross, Circle, D-pad mode, engine menu;
-   - Circle/Cross swap.
-
-   Fix what's off.
-2. **P0 runs:** get into town and a field, F8 twice a few steps apart. Analyse
-   `logs/vr_probe.txt` (skill `vr-probe`). Record the camera object and the
-   player position in ADDRESS_MAP.md.
-3. **Find the rest of what P2 needs:** the view-matrix builder (`PSP2I_GE_MATRIX_FLIP`), the
-   frustum cull, and the bloom/blur pass signature (F12 dump).
-4. **Start P2:**
-   - extend the psprecomp backend contract (view-space vertices, through flag);
+1. **Confirm the camera writer:** run in a field with `--watch 0x08FA98A0`
+   (or `--watch-from-flip`). The writer stack gives the view-matrix builder:
+   the place P2 puts the per-eye view in. Note its inputs (eye, target, the
+   camera object). Also check `0x09049170` (heap copy) and whether the
+   `0x09406xxx` copies are a matrix stack fed from it.
+2. **Player yaw:** near player +0x4B0 (position), find the angle or rotation
+   that follows turning (two F8 reports with a turn, or `--log-floats`).
+3. **The 120 fps crash:** at the 120 fps target the game read a bad object
+   pointer (`0x41920BD8`, a float) in `0x08AC2910` (from the main update
+   `0x08B821B8`), about 40 s after entering an area (2026-10-22, first run). Not
+   seen at `--fps 30`. Not VR code; not investigated.
+4. **Find the rest of what P2 needs:** the frustum cull and the bloom/blur pass
+   signature (F12 dump).
+5. **Start P2:** every 3D draw reaches the GE in eye space (identity VIEW;
+   WORLD and bones are already model-view). So stereo means swapping the view
+   in `0x08FA98A0`'s builder per eye (two game-side renders), or a per-eye
+   offset applied in eye space at the GE (cheap, but only right for an IPD
+   shift). See VR_PLAN.md "Architecture":
+   - extend the psprecomp backend contract (through flag);
    - per-eye targets separate from VRAM;
-   - HUD split to a quad;
-   - see VR_PLAN.md "Architecture".
+   - HUD split to a quad.
 
 ## Gotchas learned
 
@@ -90,5 +100,8 @@ Build and run steps: the `psp2i-build-run` skill (`.claude/skills/`).
   while SteamVR starts. `vr_stop` waits 5 s and then gives up.
 - **Menu bits:** `MENU_BIT` is 32 bits wide. The menu has 31 items now; adding
   more needs a wider `hidden` mask.
+- **PSP2i's GE VIEW is always the identity:** the camera is multiplied into
+  WORLD and the bone matrices on the CPU. Reading the camera from the GE gives
+  nothing; use the RAM matrix at `0x08FA98A0`.
 - **Through-mode draws aren't tagged** to the backends yet. P2 needs that
   (gpu.c `g_through`).
