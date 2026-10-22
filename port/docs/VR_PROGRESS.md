@@ -107,6 +107,12 @@ the world; the user found it overwhelming. Those were removed. Now:
 - **Dev tools:** F11 / `PSP2I_VR_SHOT_EVERY=N` captures (eyes + the HUD
   picture + a per-draw trace); `.claude/skills/psp2i-static-re/scripts/` and the `psp2i-static-re`
   skill.
+- **Second captured run** (`testwork/p3/cap5`): technique and hit effects
+  sit on the character in both eyes (60k effect draws placed); the
+  lock-on target box ("Evil Shark LV1") and the minimap with its map are on
+  the panel; menu scenes switched to the flat screen. The "Abandon
+  mission?" dialog's white background sheet was in the world: it is a HUD
+  layer at w 92, now on the panel (not rerun yet). No F11 captures came.
 - **Checked:** one captured headset run (`testwork/p3/cap4`): town, NPC
   talk and the mission terminal show the HUD panel in the game's layout and
   a clean scene; mission select was head-tracked (fixed since, not rerun).

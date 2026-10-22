@@ -894,11 +894,14 @@ static float    g_vr_fov = VR_FOV_SCALE_DEFAULT, g_vr_fov_y = VR_FOV_SCALE_Y_DEF
  * HUD-pass sheet at a fixed depth per layer: GE dumps and VR captures,
  * ADDRESS_MAP.md "The HUD pass"): menus 3-71 (start menu, shops, mission
  * banners, the top-left panel), the field HUD 84-85.99 (HP panel, palette,
- * prompts), the minimap's frame 86.85-87.05 and its 3D map (2300 and more).
- * Everything else stays in the world: the place and enemy labels (86, 88),
- * the lock-on reticle (90). Unknown layers stay in the world. */
+ * prompts), the minimap's frame 86.85-87.05 and its 3D map (2300 and more),
+ * and the menu background layer 92 (the white sheet behind dialogs such as
+ * "Abandon mission?": VR capture 2026-10-22). Everything else stays in the
+ * world: the place and enemy labels (86, 88), the lock-on reticle (90).
+ * Unknown layers stay in the world. */
 static int psp2i_hud_panel(float w) {
-    return w < 80.0f || (w >= 84.0f && w < 85.995f) || (w >= 86.85f && w <= 87.05f) || w > 1000.0f;
+    return w < 80.0f || (w >= 84.0f && w < 85.995f) || (w >= 86.85f && w <= 87.05f) || (w >= 91.5f && w <= 92.5f) ||
+           w > 1000.0f;
 }
 /* Screen-space effects (hit sparks, techniques: small orthographic draws in
  * the scene pass) are placed this far along the camera's ray: about where
