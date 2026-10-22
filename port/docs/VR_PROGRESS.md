@@ -47,10 +47,41 @@ _Last updated: 2026-10-22._
   `game_log.txt`). F8 also dumps the active camera object.
 - Texture packs (merged from `texture-packs`, 2026-10-22): `port/host/texreplace.c`,
   `texture_packs=` in `psp2i_display.ini`. The user's packs are extracted in
-  `FinalBuild/texture_packs/{base,extra}`. Headless check: both load (2934 keys);
-  the brand logo is replaced. Not yet looked at in a window or the headset. The
-  extra pack's `textures.ini` names `HighRes-UI/*.png` files the archive doesn't
-  contain (a separate download), so those stay original.
+  `FinalBuild/texture_packs/{base,extra}`. The extra pack's `textures.ini` names
+  `HighRes-UI/*.png` files the archive doesn't contain (a separate download),
+  so those stay original.
+  - **Keys checked against PPSSPP 1.17 itself (2026-10-22):** PPSSPP with
+    "Save new textures" on the same ISO and save. The port's keys are
+    PPSSPP's (title: 11 of 11 non-text textures; town and field: 181 of the
+    port's misses have exactly PPSSPP's key). The packs cover only about 27% of
+    what's on screen in town and the field (204 of 749 textures in PPSSPP too),
+    mostly environments, so many models stay original in PPSSPP as well.
+  - **One fix:** 512-tall swizzled CLUT4 textures (the title background, NPC
+    portraits) were hashed at 512 rows. PPSSPP master does that, but packs
+    from 1.17 and earlier keyed them at maxSeenV (272): psprecomp `gpu.c`
+    now offers both keys.
+  - **Text never matches:** the port draws the game's text with Windows fonts,
+    so text atlases (palette key `48DCABF9`) differ from PPSSPP's.
+  - **Dev tools:** `PSP2I_TEXREPLACE_LOG=1` (every miss);
+    `PSP2I_TEXREPLACE_DUMP=DIR` saves each missed texture once as
+    `<key>.ppm`, plus `<key>.bin` (GE registers, the CLUT, 512 KB of memory
+    from the texture address) to recompute keys offline. Dumps go under
+    `FinalBuild/` (game data; never commit them).
+- **Internal resolution** (`render_scale=` 1..4 in `psp2i_display.ini`,
+  `--render-scale N`; Direct3D 11 only, from the next start; default 1):
+  - Render targets and depth buffers are S times the PSP's size. VRAM, dirty
+    rows and scissors stay in PSP pixels.
+  - Uploads repeat pixels; readbacks take the sample nearest each pixel's
+    centre; GPU transfers between targets keep the sub-pixel position.
+  - `d3d11_present_hires` hands the S-times frame to the window (present.c)
+    and the headset. The VR swapchain gets the same scale, so 3x is
+    1440x816. The overlay is still drawn at 480x272, and each pixel it
+    changes covers its S x S block.
+  - Checked: title capture at 3x is sharp; the same draws, readbacks and
+    flips at 1x and 3x. The user: "much sharper" in the PS VR2 at 3x.
+  - Cost: in a 1-minute town run at 3x, half the frames took 17 to 25 ms
+    (the CPU-access readbacks are 9 times bigger); the average stayed about
+    28 fps at the 30 cap. The user's ini: `render_scale=3`.
 - `port/tests/vr_test.c`: the theater with a test picture, without the game.
 - Menu tests: `test_menu` (445 checks), including `test_vr_page`.
 

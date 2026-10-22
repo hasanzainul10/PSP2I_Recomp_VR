@@ -54,6 +54,8 @@
  *               GPU presenter (present.c) and scales with GDI.
  *   --texture-packs DIR[;DIR...]  PPSSPP texture packs for this run, instead of
  *               psp2i_display.ini texture_packs= (texreplace.h); "" = none
+ *   --render-scale N  internal resolution for this run, 1..4 (Direct3D 11),
+ *               instead of psp2i_display.ini render_scale=
  *   --oracle    (trace builds) diff the function at ADDR against an interpreter
  *               the first time it runs; see host/oracle.c
  */
@@ -161,6 +163,8 @@ void ring_arm(void);
 int  d3d11_init(void);
 void d3d11_report(FILE *out);
 int  d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w, int h);
+void d3d11_set_scale(int s);
+const uint32_t *d3d11_present_hires(int *w, int *h);
 #endif
 #include "gl_ge.h"
 
@@ -283,6 +287,15 @@ static uint32_t g_rgba[SCREEN_W * SCREEN_H];   /* 0xAARRGGBB for GDI: the frame 
 static uint32_t g_frame[SCREEN_W * SCREEN_H];  /* the game's frame alone (grab_frame, d3d11_present) */
 static int      g_have_frame;
 
+/* Internal resolution (psp2i_display.ini render_scale=, --render-scale; D3D11
+ * only, from the next start): the game drawn at S x 480x272. g_frame and
+ * g_rgba stay 480x272 (captures, F12, the overlay, GDI); g_hi_frame is the
+ * renderer's S-times picture and g_hi_rgba that picture with the overlay,
+ * for the window (present.c) and the headset. */
+static int       g_hi_s = 1;                /* the scale in use: 1 = off */
+static uint32_t *g_hi_frame, *g_hi_rgba;
+static int       g_hi_valid;                /* g_hi_frame holds the frame g_frame holds */
+
 /* Convert the current framebuffer. Returns 0 if the game has not set one. */
 static int grab_frame(void) {
     uint32_t addr, stride, fmt;
@@ -352,10 +365,24 @@ static void draw_overlay(void) {
     textedit_draw(&g_sega_edit, &img);
 }
 
-/* What the window shows: the latest game frame with the overlay on top. */
+/* What the window shows: the latest game frame with the overlay on top.
+ * With a render scale, the S-times picture too: the overlay is drawn at
+ * 480x272 as always, and each pixel it changed covers its S x S block. */
 static void compose(void) {
     memcpy(g_rgba, g_frame, sizeof g_rgba);
     draw_overlay();
+    if (g_hi_s <= 1 || !g_hi_rgba) return;
+    const int S = g_hi_s, W = SCREEN_W * S;
+    for (int y = 0; y < SCREEN_H; y++)
+        for (int x = 0; x < SCREEN_W; x++) {
+            const int i = y * SCREEN_W + x;
+            const int flat = !g_hi_valid || g_rgba[i] != g_frame[i];
+            for (int k = 0; k < S; k++) {
+                uint32_t *dst = g_hi_rgba + (size_t)(y * S + k) * W + (size_t)x * S;
+                if (flat) for (int j = 0; j < S; j++) dst[j] = g_rgba[i];
+                else memcpy(dst, g_hi_frame + (size_t)(y * S + k) * W + (size_t)x * S, (size_t)S * 4);
+            }
+        }
 }
 
 #ifdef _WIN32
@@ -577,6 +604,7 @@ static int window_show(void) {
         gl_platform_swap();
         return 0;
     }
+    if (g_hi_s > 1 && g_hi_rgba && present_active()) return present_frame(g_hi_rgba, SCREEN_W * g_hi_s, SCREEN_H * g_hi_s);
     return present_active() ? present_frame(g_rgba, SCREEN_W, SCREEN_H) : -1;
 }
 
@@ -821,7 +849,8 @@ static int stick_off_centre(uint8_t x, uint8_t y) { return x < 96 || x > 160 || 
 
 #ifdef PSP2I_VR
 static void vr_apply(void) {
-    const vr_config cfg = { g_vr_dist_dm / 10.0f, g_vr_width_dm / 10.0f, VR_SCALE_DEFAULT };
+    /* The swapchain matches the render scale, so the headset gets every pixel. */
+    const vr_config cfg = { g_vr_dist_dm / 10.0f, g_vr_width_dm / 10.0f, g_hi_s > 1 ? g_hi_s : VR_SCALE_DEFAULT };
     if (g_vr_on && !g_vr_live && !g_headless) {
         vr_set_swap_circle_cross(g_swap_oc);
         g_vr_live = vr_start(g_exe_dir, &cfg) == 0;
@@ -872,6 +901,8 @@ static int  g_last_windowed = RES_DEFAULT;  /* where Alt+Enter returns from full
 
 static int g_res_saved = RES_DEFAULT;       /* what psp2i_display.ini holds */
 static int g_ren_saved = REN_D3D11;
+static int g_render_scale = 1;              /* render_scale=: internal resolution 1..4 (D3D11) */
+static int g_render_scale_arg;              /* --render-scale for one run; 0 = the saved one */
 static int g_vol_saved[VOL_N] = { VOL_STEPS, VOL_STEPS, VOL_STEPS };
 static int g_att_saved = ATT_DEFAULT;
 static int g_openh264 = 1;                  /* fetch Cisco's OpenH264 for movies (h264_openh264.c) */
@@ -892,6 +923,7 @@ static int display_load(void) {
     while (fgets(line, sizeof line, f)) {
         if (!strncmp(line, "resolution=", 11)) res = menu_res_parse(line + 11);
         else if (!strncmp(line, "renderer=", 9)) { const int r = menu_ren_parse(line + 9); if (r >= 0) g_ren_saved = r; }
+        else if (!strncmp(line, "render_scale=", 13)) { const int r = atoi(line + 13); g_render_scale = r < 1 ? 1 : r > 4 ? 4 : r; }
         else if (!strncmp(line, "master_volume=", 14)) g_vol_saved[VOL_MASTER] = vol_parse(line + 14);
         else if (!strncmp(line, "music_volume=", 13))  g_vol_saved[VOL_MUSIC] = vol_parse(line + 13);
         else if (!strncmp(line, "sfx_volume=", 11))    g_vol_saved[VOL_SFX] = vol_parse(line + 11);
@@ -933,6 +965,8 @@ static void display_save(int res) {
     fprintf(f, "resolution=%s\n", menu_res_name(res));
     fprintf(f, "; renderer: d3d11 or opengl (used from the next start)\n");
     fprintf(f, "renderer=%s\n", menu_ren_key(g_ren_saved));
+    fprintf(f, "; internal resolution, Direct3D 11 only: 1 = the PSP's 480x272, 2..4 = that many times sharper (used from the next start)\n");
+    fprintf(f, "render_scale=%d\n", g_render_scale);
     fprintf(f, "; volumes 0..100 (%%); attenuation while other programs play sound: off, -6db, -12db, -20db\n");
     fprintf(f, "master_volume=%d\nmusic_volume=%d\nsfx_volume=%d\n",
             g_vol_saved[VOL_MASTER] * 10, g_vol_saved[VOL_MUSIC] * 10, g_vol_saved[VOL_SFX] * 10);
@@ -1375,6 +1409,13 @@ static void on_vblank(void) {
 #ifdef _WIN32
         const int p = addr ? gpu_present(addr, stride, (int)fmt, g_frame, SCREEN_W, SCREEN_H) : 0;
         if (p == 1) have_frame = 1;
+        if (p == 1 && g_hi_s > 1) {                      /* the S-times picture of the same frame */
+            int hw, hh;
+            const uint32_t *hi = d3d11_present_hires(&hw, &hh);
+            g_hi_valid = hi && hw == SCREEN_W * g_hi_s && hh == SCREEN_H * g_hi_s;
+            if (g_hi_valid) memcpy(g_hi_frame, hi, (size_t)hw * hh * 4);
+        }
+        if (p == 0) g_hi_valid = 0;                      /* from VRAM: 480x272 only */
         if (p == 1 && getenv("PSP2I_PRESENT_VERIFY")) {
             /* The asynchronous picture against VRAM made current (the access
              * hook reads the same target back): they must match exactly. */
@@ -1398,7 +1439,10 @@ static void on_vblank(void) {
         if (g_have_frame) {
             compose();
 #ifdef PSP2I_VR
-            if (g_vr_live && have_frame) vr_submit_frame(g_rgba, SCREEN_W, SCREEN_H);   /* the same picture, in the headset */
+            if (g_vr_live && have_frame) {                   /* the same picture, in the headset */
+                if (g_hi_s > 1) vr_submit_frame(g_hi_rgba, SCREEN_W * g_hi_s, SCREEN_H * g_hi_s);
+                else vr_submit_frame(g_rgba, SCREEN_W, SCREEN_H);
+            }
 #endif
             if (window_show() != 0) InvalidateRect(g_wnd, NULL, FALSE);
         }
@@ -1427,6 +1471,19 @@ static void on_vblank(void) {
             }
             fclose(f);
             fprintf(stderr, "overlay-shot: vblank %llu -> %s\n", (unsigned long long)vb, path);
+        }
+        if (g_hi_s > 1 && g_hi_valid) {                  /* the renderer's S-times picture (no overlay) */
+            const int W = SCREEN_W * g_hi_s, H = SCREEN_H * g_hi_s;
+            snprintf(path, sizeof path, "%s/overlay_%06llu_x%d.ppm", g_capture_dir, (unsigned long long)vb, g_hi_s);
+            if ((f = fopen(path, "wb")) != NULL) {
+                fprintf(f, "P6\n%d %d\n255\n", W, H);
+                for (int k = 0; k < W * H; k++) {
+                    const uint8_t rgb[3] = { (uint8_t)(g_hi_frame[k] >> 16), (uint8_t)(g_hi_frame[k] >> 8), (uint8_t)g_hi_frame[k] };
+                    fwrite(rgb, 1, 3, f);
+                }
+                fclose(f);
+                fprintf(stderr, "overlay-shot: vblank %llu -> %s\n", (unsigned long long)vb, path);
+            }
         }
     }
     if (g_capture_every && vb % g_capture_every == 0) {
@@ -2280,6 +2337,7 @@ int main(int argc, char **argv) {
             i += 2;
         }
         else if (!strcmp(argv[i], "--renderer") && i + 1 < argc)      renderer = argv[++i];
+        else if (!strcmp(argv[i], "--render-scale") && i + 1 < argc)  g_render_scale_arg = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--texture-packs") && i + 1 < argc) texpacks_arg = argv[++i];
         else if (!strcmp(argv[i], "--resolution") && i + 1 < argc) {
             res_arg = menu_res_parse(argv[++i]);
@@ -2400,9 +2458,19 @@ int main(int argc, char **argv) {
         g_gl_window = gl_platform_attach(g_wnd) == 0;
         if (!g_gl_window) present_init(g_wnd);
     }
-    if (g_renderer == REN_D3D11 && d3d11_init() != 0) {
-        fprintf(stderr, "psp2i: falling back to the software renderer\n");
-        g_renderer = REN_SOFTWARE;
+    if (g_renderer == REN_D3D11) {
+        int sc = g_render_scale_arg ? g_render_scale_arg : g_render_scale;
+        sc = sc < 1 ? 1 : sc > 4 ? 4 : sc;
+        d3d11_set_scale(sc);
+        if (d3d11_init() != 0) {
+            fprintf(stderr, "psp2i: falling back to the software renderer\n");
+            g_renderer = REN_SOFTWARE;
+        } else if (sc > 1) {
+            g_hi_frame = (uint32_t *)calloc((size_t)SCREEN_W * sc * SCREEN_H * sc, 4);
+            g_hi_rgba = (uint32_t *)calloc((size_t)SCREEN_W * sc * SCREEN_H * sc, 4);
+            if (g_hi_frame && g_hi_rgba) g_hi_s = sc;
+            fprintf(stderr, "d3d11: internal resolution %dx (%dx%d)\n", sc, SCREEN_W * sc, SCREEN_H * sc);
+        }
     }
 #endif
     fprintf(stderr, "renderer: %s\n", g_renderer == REN_GL ? "OpenGL" : g_renderer == REN_D3D11 ? "Direct3D 11" : "software");

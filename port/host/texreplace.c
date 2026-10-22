@@ -11,6 +11,7 @@
 
 #include "texreplace.h"
 
+#include <psprecomp/mem.h>
 #include <psprecomp/render.h>
 
 #include <ctype.h>
@@ -51,6 +52,7 @@ static uint32_t g_capkeys, g_nkeys;  /* g_capkeys: a power of two */
 static int32_t *g_path_index;        /* open addressing over g_files by (pack, path) */
 static uint32_t g_cap_path;
 static uint64_t g_cached_bytes, g_use;
+static char     g_last_miss[25];     /* the key of the last miss (texreplace_dump_miss) */
 static int      g_verbose;           /* PSP2I_TEXREPLACE_LOG=1: every load and every miss */
 static int      g_logged;
 
@@ -289,6 +291,7 @@ uint32_t texreplace_find(void) {
     uint32_t addr, clut_key, hashes[2];
     const int nh = psp_gpu_pack_key(&addr, &clut_key, hashes);
     n_find++;
+    g_last_miss[0] = '\0';
     const uint64_t ck = (uint64_t)addr << 32 | clut_key;
     for (int i = 0; i < nh; i++) {
         const pkey *k = lookup(ck, hashes[i]);
@@ -298,9 +301,54 @@ uint32_t texreplace_find(void) {
         return (uint32_t)k->file + 1;
     }
     n_miss++;
-    if (g_verbose) fprintf(stderr, "texreplace: miss %08X%08X%08X\n", g_ignore_addr ? 0u : addr, clut_key, hashes[nh - 1]);
+    snprintf(g_last_miss, sizeof g_last_miss, "%08X%08X%08X", g_ignore_addr ? 0u : addr, clut_key, hashes[nh - 1]);
+    if (g_verbose) fprintf(stderr, "texreplace: miss %s\n", g_last_miss);
     return 0;
 }
+
+#ifndef PSP2I_PROD
+/* PSP2I_TEXREPLACE_DUMP=DIR: each texture no pack replaces, once, as
+ * DIR/<key>.ppm (its colours; alpha dropped), to see what the packs leave
+ * out next to the keys they list. */
+void texreplace_dump_miss(const uint32_t *px, int w, int h) {
+    static const char *dir;
+    static int init, n;
+    static char seen[4096][25];
+    if (!init) { dir = getenv("PSP2I_TEXREPLACE_DUMP"); init = 1; }
+    if (!dir || !g_last_miss[0] || n >= 4096) return;
+    for (int i = 0; i < n; i++) if (!strcmp(seen[i], g_last_miss)) return;
+    memcpy(seen[n++], g_last_miss, 25);
+    char path[700];
+    snprintf(path, sizeof path, "%s/%s.ppm", dir, g_last_miss);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    fprintf(f, "P6\n%d %d\n255\n", w, h);
+    for (int i = 0; i < w * h; i++) {
+        const uint8_t rgb[3] = { (uint8_t)px[i], (uint8_t)(px[i] >> 8), (uint8_t)(px[i] >> 16) };   /* 0xAABBGGRR */
+        fwrite(rgb, 1, 3, f);
+    }
+    fclose(f);
+    /* And what the key was made from, to check it against PPSSPP's offline:
+     * the texture registers, 2 KB at the CLUT address, and up to 512 KB of
+     * memory from the texture's address. */
+    extern uint32_t psp_gpu_reg(uint32_t cmd);
+    static const uint32_t REGS[] = { 0xA0, 0xA8, 0xB8, 0xC3, 0xC2, 0xC5, 0xB0, 0xB1, 0xC4, 0xC6, 0xC7 };
+    uint32_t hdr[16] = { 0x31584554u };                  /* "TEX1" */
+    for (int i = 0; i < 11; i++) hdr[1 + i] = psp_gpu_reg(REGS[i]);
+    const uint32_t ta = (hdr[1] & 0xFFFFF0u) | ((hdr[2] & 0x0F0000u) << 8), ca = (hdr[7] & 0xFFFFF0u) | ((hdr[8] & 0x0F0000u) << 8);
+    snprintf(path, sizeof path, "%s/%s.bin", dir, g_last_miss);
+    if (!(f = fopen(path, "wb"))) return;
+    fwrite(hdr, 4, 16, f);
+    const uint8_t *clut = (const uint8_t *)psp_mem_ptr(ca, 2048);
+    uint8_t zero[2048] = { 0 };
+    fwrite(clut ? clut : zero, 1, 2048, f);
+    for (uint32_t len = 512u << 10; len >= 4096; len >>= 1) {
+        const uint8_t *p = (const uint8_t *)psp_mem_ptr(ta, len);
+        if (p) { fwrite(p, 1, len, f); break; }
+    }
+    fclose(f);
+}
+#endif
 
 /* Drop the least recently used decoded PNGs until `need` more bytes fit. */
 static void cache_trim(uint64_t need, const pfile *keep) {

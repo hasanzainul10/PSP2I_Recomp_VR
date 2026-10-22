@@ -37,6 +37,12 @@ uint32_t texreplace_find(void);
  * next texreplace_ call. NULL if the file can't be read: draw the original. */
 const uint32_t *texreplace_pixels(uint32_t id, int *w, int *h);
 
+#ifndef PSP2I_PROD
+/* Right after a texreplace_find that returned 0: with PSP2I_TEXREPLACE_DUMP
+ * set, save the decoded original under its pack key (once per key). */
+void texreplace_dump_miss(const uint32_t *px, int w, int h);
+#endif
+
 /* One line of counters for the exit report. */
 void texreplace_report(FILE *out);
 

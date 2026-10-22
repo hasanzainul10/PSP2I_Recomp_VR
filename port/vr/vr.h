@@ -44,7 +44,9 @@ int  vr_status(void);                                       /* VR_* */
 void vr_configure(const vr_config *cfg);                    /* distance / width now; scale at the next start */
 void vr_recenter(void);                                     /* the screen in front of the head again */
 
-/* The picture to show: 0xAARRGGBB (alpha ignored), w x h. Copied; cheap. */
+/* The picture to show: 0xAARRGGBB (alpha ignored), w x h: 480x272 or a
+ * whole multiple up to 4x (the internal resolution). Copied. Give the
+ * swapchain the same scale (vr_config.scale) to keep every pixel. */
 void vr_submit_frame(const uint32_t *argb, int w, int h);
 
 /* The controllers as a PSP pad. buttons: PSP_CTRL_* bits; sticks 0..255, 128

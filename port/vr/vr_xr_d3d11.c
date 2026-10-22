@@ -76,7 +76,10 @@ static SRWLOCK  g_cfg_lock = SRWLOCK_INIT;
 static vr_config g_cfg = { VR_DISTANCE_DEFAULT, VR_WIDTH_DEFAULT, VR_SCALE_DEFAULT };
 
 static SRWLOCK  g_frame_lock = SRWLOCK_INIT;
-static uint32_t g_frame[GAME_W * GAME_H];   /* the latest picture (0xAARRGGBB) */
+/* The latest picture (0xAARRGGBB): 480x272, or k times that when the game
+ * renders at a higher internal resolution (up to 4x). */
+static uint32_t g_frame[GAME_W * 4 * GAME_H * 4];
+static int      g_frame_w = GAME_W, g_frame_h = GAME_H;
 static LONG     g_frame_seq;                /* bumped per vr_submit_frame */
 
 static SRWLOCK  g_pad_lock = SRWLOCK_INIT;
@@ -584,12 +587,14 @@ static int place_screen(XrTime t) {
 static void upload(void) {
     const LONG seq = InterlockedCompareExchange(&g_frame_seq, 0, 0);
     if (seq == g_uploaded_seq || !g_upload) return;
-    const int s = g_chain_w / GAME_W;
     AcquireSRWLockShared(&g_frame_lock);
-    for (int y = 0; y < GAME_H; y++) {
-        const uint32_t *src = &g_frame[y * GAME_W];
+    const int fw = g_frame_w, fh = g_frame_h;
+    const int s = g_chain_w / fw;                                /* swapchain pixels per picture pixel */
+    if (s < 1 || g_chain_h / fh != s) { ReleaseSRWLockShared(&g_frame_lock); g_uploaded_seq = seq; return; }
+    for (int y = 0; y < fh; y++) {
+        const uint32_t *src = &g_frame[(size_t)y * fw];
         uint32_t *row = &g_upload[(size_t)y * s * g_chain_w];
-        for (int x = 0; x < GAME_W; x++) {
+        for (int x = 0; x < fw; x++) {
             uint32_t c = src[x] | 0xFF000000u;                   /* 0xAARRGGBB = BGRA bytes */
             if (!g_chain_bgra) c = (c & 0xFF00FF00u) | ((c >> 16) & 0xFFu) | ((c & 0xFFu) << 16);
             for (int k = 0; k < s; k++) row[x * s + k] = c;
@@ -742,9 +747,10 @@ void vr_configure(const vr_config *cfg) {
 void vr_recenter(void) { InterlockedExchange(&g_recenter, 1); }
 
 void vr_submit_frame(const uint32_t *argb, int w, int h) {
-    if (!g_thread || w != GAME_W || h != GAME_H) return;
+    if (!g_thread || w < GAME_W || w % GAME_W || h * GAME_W != w * GAME_H || w > GAME_W * 4) return;
     AcquireSRWLockExclusive(&g_frame_lock);
-    memcpy(g_frame, argb, sizeof g_frame);
+    memcpy(g_frame, argb, (size_t)w * h * 4);
+    g_frame_w = w; g_frame_h = h;
     ReleaseSRWLockExclusive(&g_frame_lock);
     InterlockedIncrement(&g_frame_seq);
 }

@@ -29,6 +29,17 @@
  * difference" equation, two unrelated fixed colours, and partial per-bit write
  * masks have no D3D11 equivalent and are approximated. Depth buffers are not
  * read back to VRAM.
+ *
+ * ## Internal resolution (d3d11_set_scale)
+ *
+ * With a scale S > 1 every render target and depth buffer is S times the
+ * PSP's size in each direction, so the game draws at S x 480x272 (texture
+ * packs then show their detail). Everything keyed to VRAM stays in PSP
+ * pixels (t->w, t->h, dirty rows, scissors): only the GPU side is larger.
+ * Uploads from VRAM repeat each pixel S x S times; readbacks to VRAM take
+ * the sample nearest each PSP pixel's centre; GPU transfers between targets
+ * keep the sub-pixel position. d3d11_present also hands out the S-times
+ * picture (d3d11_present_hires) for the window and the headset.
  */
 #ifdef _WIN32
 
@@ -111,6 +122,10 @@ static ID3D11Texture2D *g_scratch;       /* copy of a target sampled while drawn
 static ID3D11ShaderResourceView *g_scratch_srv;
 static uint32_t g_scratch_w, g_scratch_h;
 static uint64_t g_use;
+static int g_scale = 1;                  /* internal resolution: GPU pixels per PSP pixel (1..4) */
+
+/* Before d3d11_init: the internal resolution scale. */
+void d3d11_set_scale(int s) { g_scale = s < 1 ? 1 : s > 4 ? 4 : s; }
 
 static uint64_t n_draws, n_tris, n_uploads, n_readbacks, n_tex_decodes, n_rt_tex, n_approx;
 
@@ -265,14 +280,15 @@ static const char *SHADER_SRC =
  * reading src back to VRAM and seeding dst from VRAM would produce
  * (pack16/expand16 below are the C ones), without the round trip. */
 static const char *XFER_SRC =
-"cbuffer X : register(b2) { uint4 dst; uint4 src; uint4 rng; };\n"   /* off, stride, fmt, bpp; ...; lo, hi */
+"cbuffer X : register(b2) { uint4 dst; uint4 src; uint4 rng; };\n"   /* off, stride, fmt, bpp; ...; lo, hi, scale */
 "Texture2D<float4> Y : register(t1);\n"
 "float4 vsx(uint id : SV_VertexID) : SV_Position {\n"
 "  float2 p = float2((id << 1) & 2, id & 2);\n"
 "  return float4(p * float2(2, -2) + float2(-1, 1), 0, 1);\n"
 "}\n"
+"static uint2 sub;\n"                                    /* the GPU pixel within its PSP pixel */
 "uint ld(uint i) {\n"
-"  uint4 b = (uint4)round(saturate(Y.Load(int3(i % src.y, i / src.y, 0))) * 255.0);\n"
+"  uint4 b = (uint4)round(saturate(Y.Load(int3((i % src.y) * rng.z + sub.x, (i / src.y) * rng.z + sub.y, 0))) * 255.0);\n"
 "  return b.x | (b.y << 8) | (b.z << 16) | (b.w << 24);\n"
 "}\n"
 "uint pack16(uint f, uint c) {\n"
@@ -292,7 +308,8 @@ static const char *XFER_SRC =
 "}\n"
 "float4 bytes4(uint w) { return float4(w & 255, (w >> 8) & 255, (w >> 16) & 255, w >> 24) / 255.0; }\n"
 "float4 psx(float4 pos : SV_Position) : SV_Target {\n"
-"  uint x = (uint)pos.x, y = (uint)pos.y;\n"
+"  uint x = (uint)pos.x / rng.z, y = (uint)pos.y / rng.z;\n"
+"  sub = uint2((uint)pos.x % rng.z, (uint)pos.y % rng.z);\n"
 "  uint A = dst.x + (y * dst.y + x) * dst.w;\n"
 "  if (A < rng.x || A + dst.w > rng.y) discard;\n"
 "  uint rel = A - src.x;\n"
@@ -362,8 +379,9 @@ static void rt_readback_inner(rt_entry *t) {
         d.Usage = D3D11_USAGE_STAGING; d.BindFlags = 0; d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &d, NULL, &t->staging))) return;
     }
-    D3D11_BOX box = { 0, y0, 0, t->w, y1, 1 };
-    ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)t->staging, 0, 0, y0, 0,
+    const uint32_t S = (uint32_t)g_scale, c = S / 2;     /* the GPU sample nearest a PSP pixel's centre */
+    D3D11_BOX box = { 0, y0 * S, 0, t->w * S, y1 * S, 1 };
+    ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)t->staging, 0, 0, y0 * S, 0,
                                               (ID3D11Resource *)t->tex, 0, &box);
     D3D11_MAPPED_SUBRESOURCE m;
     if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)t->staging, 0, D3D11_MAP_READ, 0, &m))) return;
@@ -372,10 +390,11 @@ static void rt_readback_inner(rt_entry *t) {
         if (!row_dirty(t, y)) continue;                 /* not ours: another target or VRAM has it */
         uint32_t o = t->off + y * t->stride * (uint32_t)bpp;
         if (o + t->stride * (uint32_t)bpp > VRAM_SIZE) break;
-        const uint32_t *src = (const uint32_t *)((const uint8_t *)m.pData + (size_t)y * m.RowPitch);
-        if (bpp == 4) memcpy(v + o, src, t->stride * 4u);
+        const uint32_t *src = (const uint32_t *)((const uint8_t *)m.pData + (size_t)(y * S + c) * m.RowPitch);
+        if (S == 1 && bpp == 4) memcpy(v + o, src, t->stride * 4u);
+        else if (bpp == 4) for (uint32_t x = 0; x < t->stride; x++) memcpy(v + o + x * 4, &src[x * S + c], 4);
         else for (uint32_t x = 0; x < t->stride; x++) {
-            uint16_t p = pack16(t->fmt, src[x]);
+            uint16_t p = pack16(t->fmt, src[x * S + c]);
             memcpy(v + o + x * 2, &p, 2);
         }
     }
@@ -416,8 +435,21 @@ static void rt_upload(rt_entry *t) {
             px[y * t->stride + x] = c;
         }
     }
-    D3D11_BOX box = { 0, 0, 0, t->stride, t->rows, 1 };
-    ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)t->tex, 0, &box, px, t->stride * 4, 0);
+    if (g_scale > 1) {                                  /* each PSP pixel as S x S GPU pixels */
+        const uint32_t S = (uint32_t)g_scale, W = t->stride * S;
+        uint32_t *big = (uint32_t *)malloc((size_t)W * t->rows * S * 4);
+        if (!big) { free(px); return; }
+        for (uint32_t y = 0; y < t->rows; y++) {
+            uint32_t *row = big + (size_t)y * S * W;
+            for (uint32_t x = 0; x < t->stride; x++)
+                for (uint32_t k = 0; k < S; k++) row[x * S + k] = px[y * t->stride + x];
+            for (uint32_t k = 1; k < S; k++) memcpy(row + (size_t)k * W, row, (size_t)W * 4);
+        }
+        free(px);
+        px = big;
+    }
+    D3D11_BOX box = { 0, 0, 0, t->stride * (uint32_t)g_scale, t->rows * (uint32_t)g_scale, 1 };
+    ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)t->tex, 0, &box, px, t->stride * (uint32_t)g_scale * 4, 0);
     free(px);
     uint32_t bytes = t->rows * t->stride * (uint32_t)bpp;
     if (t->off + bytes > VRAM_SIZE) bytes = VRAM_SIZE - t->off;
@@ -450,7 +482,7 @@ static rt_entry *rt_get(uint32_t off, uint32_t stride, int fmt, uint32_t rows) {
         t->w = stride; t->h = 512;
         D3D11_TEXTURE2D_DESC d;
         memset(&d, 0, sizeof d);
-        d.Width = t->w; d.Height = t->h; d.MipLevels = 1; d.ArraySize = 1;
+        d.Width = t->w * (uint32_t)g_scale; d.Height = t->h * (uint32_t)g_scale; d.MipLevels = 1; d.ArraySize = 1;
         d.Format = DXGI_FORMAT_R8G8B8A8_UNORM; d.SampleDesc.Count = 1;
         d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
         if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &d, NULL, &t->tex))) { memset(t, 0, sizeof *t); return NULL; }
@@ -504,7 +536,7 @@ static depth_entry *depth_get(uint32_t off, uint32_t w, uint32_t h) {
         }
         D3D11_TEXTURE2D_DESC td;
         memset(&td, 0, sizeof td);
-        td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1;
+        td.Width = w * (uint32_t)g_scale; td.Height = h * (uint32_t)g_scale; td.MipLevels = 1; td.ArraySize = 1;
         td.Format = DXGI_FORMAT_D16_UNORM; td.SampleDesc.Count = 1;
         td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
         if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &d->tex))) return NULL;
@@ -661,6 +693,9 @@ static tex_entry *tex_get(const psp_gpu_state *st, int allow_rep) {
     uint32_t *px = (uint32_t *)malloc((size_t)st->tex_w * st->tex_h * 4);
     if (!px) return NULL;
     psp_gpu_decode_texture(px);
+#if defined(PSP2I_TEXREPLACE) && !defined(PSP2I_PROD)
+    if (allow_rep && texreplace_on()) texreplace_dump_miss(px, (int)st->tex_w, (int)st->tex_h);
+#endif
     ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)e->tex, 0, NULL, px, st->tex_w * 4, 0);
     free(px);
     e->hash = h; e->check_frame = f; e->last_use = ++g_use;
@@ -932,7 +967,7 @@ static uint64_t n_xv_checked, n_xv_bad_px, n_xv_bad_xfers, n_xv_overlap;
 static int xverify(void) {
     static int on = -1;
     if (on < 0) on = getenv("PSP2I_XFER_VERIFY") != NULL;
-    return on;
+    return on && g_scale == 1;                          /* it compares PSP pixels 1:1 */
 }
 
 static int map_rows(rt_entry *t, uint32_t y0, uint32_t y1, D3D11_MAPPED_SUBRESOURCE *m) {
@@ -1022,12 +1057,13 @@ static void rt_xfer(rt_entry *t, rt_entry *o, uint32_t a, uint32_t b, int own) {
     xfer_consts xc = {
         { t->off, t->stride, (uint32_t)t->fmt, (uint32_t)bpp_of(t->fmt) },
         { o->off, o->stride, (uint32_t)o->fmt, (uint32_t)bpp_of(o->fmt) },
-        { i0, i1, 0, 0 } };
+        { i0, i1, (uint32_t)g_scale, 0 } };
     ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)g_xcb, 0, NULL, &xc, 0, 0);
     ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &t->rtv, NULL);
-    D3D11_VIEWPORT vp = { 0, 0, (float)t->w, (float)t->h, 0, 1 };
+    const LONG S = g_scale;
+    D3D11_VIEWPORT vp = { 0, 0, (float)(t->w * S), (float)(t->h * S), 0, 1 };
     ID3D11DeviceContext_RSSetViewports(g_ctx, 1, &vp);
-    D3D11_RECT sc = { 0, (LONG)y0, (LONG)t->w, (LONG)y1 };
+    D3D11_RECT sc = { 0, (LONG)y0 * S, (LONG)t->w * S, (LONG)y1 * S };
     ID3D11DeviceContext_RSSetScissorRects(g_ctx, 1, &sc);
     ID3D11DeviceContext_RSSetState(g_ctx, g_rs);
     ID3D11DeviceContext_OMSetBlendState(g_ctx, NULL, NULL, 0xFFFFFFFFu);
@@ -1185,9 +1221,12 @@ static int d3d_draw(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts
     if (approx) n_approx++;
 
     ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &t->rtv, dsv);
-    D3D11_VIEWPORT vp = { 0, 0, (float)t->w, (float)t->h, 0, 1 };
+    /* The vertex shader maps PSP pixels (vc.vp) to the target; the viewport
+     * and scissor are the target's own, S times larger. */
+    const LONG S = g_scale;
+    D3D11_VIEWPORT vp = { 0, 0, (float)(t->w * S), (float)(t->h * S), 0, 1 };
     ID3D11DeviceContext_RSSetViewports(g_ctx, 1, &vp);
-    D3D11_RECT sc = { st->sx0, st->sy0, st->sx1 + 1, st->sy1 + 1 };
+    D3D11_RECT sc = { st->sx0 * S, st->sy0 * S, (st->sx1 + 1) * S, (st->sy1 + 1) * S };
     ID3D11DeviceContext_RSSetScissorRects(g_ctx, 1, &sc);
     ID3D11DeviceContext_RSSetState(g_ctx, g_rs);
     ID3D11DeviceContext_OMSetBlendState(g_ctx, bs, bf, 0xFFFFFFFFu);
@@ -1305,7 +1344,26 @@ static uint64_t g_present_seq[PRESENT_RING], g_present_next;
 static int g_present_head;
 static uint64_t n_present_async, n_present_vram, n_present_kept;
 
+/* The S-times picture of the last d3d11_present that returned 1 (scale > 1). */
+static uint32_t *g_hires;
+static int g_hires_w, g_hires_h, g_hires_fresh;
+
+static int hires_buffer(int w, int h) {
+    if (g_hires && g_hires_w == w && g_hires_h == h) return 1;
+    free(g_hires);
+    g_hires = (uint32_t *)malloc((size_t)w * h * 4);
+    g_hires_w = g_hires ? w : 0; g_hires_h = g_hires ? h : 0;
+    return g_hires != NULL;
+}
+
+const uint32_t *d3d11_present_hires(int *w, int *h) {
+    if (!g_hires_fresh) return NULL;
+    *w = g_hires_w; *h = g_hires_h;
+    return g_hires;
+}
+
 int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w, int h) {
+    g_hires_fresh = 0;
     if (!g_dev || (addr & 0x0F000000u) != 0x04000000u) return 0;
     rt_entry *t = rt_find(vram_off(addr), stride, fmt);
     const int ahead = t && t->dirty && t->stride == stride && t->fmt == fmt && t->w >= (uint32_t)w;
@@ -1320,7 +1378,7 @@ int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w,
             if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &d, NULL, &g_present[k]))) return 0;
             g_present_w[k] = t->w;
         }
-        D3D11_BOX box = { 0, 0, 0, (UINT)w, (UINT)h, 1 };
+        D3D11_BOX box = { 0, 0, 0, (UINT)(w * g_scale), (UINT)(h * g_scale), 1 };
         ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)g_present[k], 0, 0, 0, 0,
                                                   (ID3D11Resource *)t->tex, 0, &box);
         ID3D11DeviceContext_Flush(g_ctx);              /* start it now, not at the next stall */
@@ -1374,13 +1432,25 @@ int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w,
             lut_ready = 1;
         }
         const uint32_t (*L)[256] = lut[f & 3];
-        for (int y = 0; y < h; y++) {
-            const uint32_t *src = (const uint32_t *)((const uint8_t *)m.pData + (size_t)y * m.RowPitch);
+        const int S = g_scale, c0 = S / 2;
+        for (int y = 0; y < h; y++) {                   /* PSP pixels: the sample nearest each centre */
+            const uint32_t *src = (const uint32_t *)((const uint8_t *)m.pData + (size_t)(y * S + c0) * m.RowPitch);
             uint32_t *dst = out + (size_t)y * (size_t)w;
             for (int x = 0; x < w; x++) {
-                const uint32_t c = src[x];
+                const uint32_t c = src[x * S + c0];
                 dst[x] = L[0][c & 0xFF] | L[1][(c >> 8) & 0xFF] | L[2][(c >> 16) & 0xFF];
             }
+        }
+        if (S > 1 && hires_buffer(w * S, h * S)) {        /* and the whole S-times picture */
+            for (int y = 0; y < h * S; y++) {
+                const uint32_t *src = (const uint32_t *)((const uint8_t *)m.pData + (size_t)y * m.RowPitch);
+                uint32_t *dst = g_hires + (size_t)y * (size_t)(w * S);
+                for (int x = 0; x < w * S; x++) {
+                    const uint32_t c = src[x];
+                    dst[x] = L[0][c & 0xFF] | L[1][(c >> 8) & 0xFF] | L[2][(c >> 16) & 0xFF];
+                }
+            }
+            g_hires_fresh = 1;
         }
         ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_present[best], 0);
         /* This copy and every older one are done with. */
