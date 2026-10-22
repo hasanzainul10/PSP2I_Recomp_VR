@@ -273,6 +273,19 @@ the world; the user found it overwhelming. Those were removed. Now:
   not yet seen in the headset (frame rate to watch). Texture pop-in: the
   async PNG decode shows the original for a frame or two; with everything
   drawn, textures behind should be requested before they're looked at.
+- **Shop tops missing (user, captures `testwork/p4/cap16`):** in first
+  person the upper parts of the town's shops (roofs, ceilings) are not
+  drawn: "missing since forever in first person, unless I move closer, or
+  in third person move lower". Not the five frustum tests (hooked to
+  "inside", still missing), not psprecomp (BJUMP never taken: the GE
+  draws all it gets). Likely a screen-space check against the game
+  camera's projection: other readers of `0x08FA97A0` are `0x08AFF088`,
+  `0x08D79B08`, `0x08D79CE4` (also `0x08FA9780`), `0x08D8C66C`,
+  `0x08D8D158`, `0x08D8DB5C`, `0x08D9260C`, `0x08D929F0`, `0x08D93DB4`
+  (VFPU-heavy; not decoded). Next: hook them with counters and a
+  per-function "visible" switch, find the one at a shop. Also fixed: the
+  capture folder is made with its parents (`testwork/p4/...` captures
+  were all lost before).
 - **Open:** hiding the player's own head (bone weights, or an eye-forward
   offset), body-relative movement (today the stick moves relative to the
   game camera, which trails behind), the cull behind the game camera.
