@@ -1197,10 +1197,14 @@ static void head_frame(psp_gpu_stereo *s) {
          * every first-person frame for a menu scene) */
         float kx = 1.0f, ky = 1.0f;
         if (first && g_fp_cam && g_fp_p0 > 0 && g_fp_p5 > 0 && fabsf(s->proj[0]) > 1e-3f && fabsf(s->proj[5]) > 1e-3f) {
-            kx = g_fp_p0 / fabsf(s->proj[0]);
-            ky = g_fp_p5 / fabsf(s->proj[5]);
-            if (kx < 1.05f) kx = 1.0f;                          /* the GE's is the game's own */
-            if (ky < 1.05f) ky = 1.0f;
+            /* Only the projection hook_set_projection wrote counts as widened:
+             * mission select's own (x 0.98) was taken for a widened field
+             * projection and shown in 3D (2026-10-23). */
+            const float wx = g_fp_p0 / g_fp_kx, wy = g_fp_p5 / g_fp_ky;
+            if (fabsf(fabsf(s->proj[0]) - wx) < 0.05f * wx && fabsf(fabsf(s->proj[5]) - wy) < 0.05f * wy) {
+                kx = g_fp_kx;
+                ky = g_fp_ky;
+            }
         }
         g_ge_kx = kx;
         const float fx = g_vr_fov > 1.0f ? g_vr_fov : 1.0f, fy = g_vr_fov_y > 1.0f ? g_vr_fov_y : 1.0f;
