@@ -5,7 +5,7 @@ this file at the end of every working session: what changed, what was checked,
 what is next. The plan itself is [VR_PLAN.md](VR_PLAN.md); user-facing docs are
 [VR.md](VR.md); reverse-engineering results go in [ADDRESS_MAP.md](ADDRESS_MAP.md).
 
-_Last updated: 2026-10-22._
+_Last updated: 2026-10-22 (P2 stereo window)._
 
 ## Status by phase
 
@@ -13,7 +13,7 @@ _Last updated: 2026-10-22._
 |---|---|
 | P0 RE tooling | **Done, run in town and field:** the GE gets identity view matrices (camera folded into bones / world on the CPU). View matrix found in RAM at `0x08FA98A0`, player world position at player object +0x4B0 (2 reports each; writer not yet watched) |
 | P1 PCVR theater | **Done, checked in the headset** by the user (2026-10-22): screen size, sharpness, colours, recenter and the button mapping in VR.md all right. Nothing to fix |
-| P2 stereo third person | Not started |
+| P2 stereo third person | **First step built (2026-10-22): the stereo window.** Each GE draw is replayed per eye; the headset shows the two pictures on one world-locked screen. Checked in town from the eye pictures (disparity as computed, HUD at screen depth). **Not yet seen in the headset** |
 | P3 to P8 | Not started |
 
 ## Branches and PR
@@ -82,6 +82,38 @@ _Last updated: 2026-10-22._
   - Cost: in a 1-minute town run at 3x, half the frames took 17 to 25 ms
     (the CPU-access readbacks are 9 times bigger); the average stayed about
     28 fps at the 30 cap. The user's ini: `render_scale=3`.
+- **Stereo window (P2, 2026-10-22)**, approach in VR_PLAN.md "P2 approach":
+  - psprecomp `psp_gpu_set_stereo` (gpu.c `hw_draw_eyes`): after the mono
+    draw, perspective draws (PROJ[11] ≠ 0) move per eye in clip space:
+    `c·(dist/D − 1)` along view x for an eye at x = c, D = convergence. The
+    backend gets them through the new `psp_gpu_backend.draw_eye`.
+    `flat_after_clear`: once the scene target is cleared a second time in a
+    frame, the rest of the frame is flat (PSP2i's HUD pass: perspective quads
+    64-86 units away after that clear, seen in a `--ge-dump`). Bloom/blur
+    passes are orthographic, so they are never moved.
+  - d3d11.c: eye copies of each target and depth buffer that takes an eye
+    draw; uploads and `rt_xfer` are repeated into them; render-to-texture
+    samples the same eye's copy (bloom per eye). `d3d11_present_eye` reads
+    the display target's eye copies back with the mono frame.
+  - vr_xr_d3d11.c: one swapchain, left | right; two quad layers (eye
+    visibility LEFT / RIGHT) at the screen pose. Stereo: width =
+    2 · distance · tan(half FOV x) (the game's 0.731), so the window shows
+    the world at its own angular size. IPD from `xrLocateViews` (logged).
+  - main.c: `vr_stereo=on` (default), `vr_world_scale=10.0` (game units per
+    metre: a first guess; IPD = scale × headset IPD, convergence = scale ×
+    screen distance). Stereo runs while VR is RUNNING with D3D11.
+    The overlay (engine menu) is put on both eyes at screen depth.
+  - Dev: `--stereo` (eyes without a headset), `--overlay-shot` then writes
+    `overlay_N_L/_R.ppm`; `--ge-dump VBLANK` = F12 at that vblank.
+  - Checked (windowed, scripted to town, 2x): both eyes complete (lighting,
+    bloom, textures, HUD); the player (~55 units) is 9 px apart at 960 wide,
+    as the formula gives (9.2), far walls 13-14 px; HUD identical in both
+    eyes. 2x stereo averaged 29.8 fps over 150 s (min 20); 3x not measured.
+  - Not done: the window doesn't follow the head (P3: head tracking +
+    projection layer); objects nearer than the screen distance come out of
+    the window and may cross its edge; world-space name labels in the HUD
+    pass are flat; culling not widened; eye copies go through the CPU (share
+    the textures with the VR device next); no menu items for stereo yet.
 - `port/tests/vr_test.c`: the theater with a test picture, without the game.
 - Menu tests: `test_menu` (445 checks), including `test_vr_page`.
 
@@ -130,7 +162,9 @@ Build and run steps: the `psp2i-build-run` skill (`.claude/skills/`).
    seen at `--fps 30`. Not VR code; not investigated.
 4. **Find the rest of what P2 needs:** the frustum cull and the bloom/blur pass
    signature (F12 dump).
-5. **Start P2:** every 3D draw reaches the GE in eye space (identity VIEW;
+5. **P2 started (stereo window, above).** Next: the user's headset check
+   (comfort, world scale, HUD), then 3x performance, sharing eye textures
+   with the VR device, and head tracking (P3). The original notes: every 3D draw reaches the GE in eye space (identity VIEW;
    WORLD and bones are already model-view). So stereo means swapping the view
    in `0x08FA98A0`'s builder per eye (two game-side renders), or a per-eye
    offset applied in eye space at the GE (cheap, but only right for an IPD
@@ -140,6 +174,11 @@ Build and run steps: the `psp2i-build-run` skill (`.claude/skills/`).
    - HUD split to a quad.
 
 ## Gotchas learned
+
+- **Headless runs stall in the intro movie** (flips stop at 2739, mpeg ring
+  buffer loop), with or without audio (SDL dummy driver). Windowed runs with
+  the same `--press` script reach town (usually; one windowed run stalled
+  too). Use windowed runs (tell the user) for 3D checks.
 
 - **No decryption in allegrexrecomp:** it can't decrypt `~PSP` EBOOTs (its
   `decrypt` command is unfinished). Use a plain ELF EBOOT.
