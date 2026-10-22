@@ -990,6 +990,15 @@ static float g_fp_head_off[3];               /* the head's centre across from th
 static int   g_fp_head_ok;
 static int   g_fp_cam;                       /* the last field camera was applied at the head */
 static float g_fp_cam_hr[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };   /* ... turned as the head was then (level frame) */
+/* ... and its projection that much wider across / up (1 = the game's): the
+ * eyes' view plus VR_FP_VIEW_MARGIN, so the game culls nothing the eyes see,
+ * even as they turn before the next frame (user: "when I look up the bottom
+ * is missing, when I look down the top: make the radius bigger"). */
+#define VR_FP_VIEW_MARGIN 1.25f
+static float g_fp_kx = 1.0f, g_fp_ky = 1.0f;
+/* The eyes' view scales for the frame being drawn (psp_gpu_stereo.fov_scale):
+ * against the GE's projection, which is the widened one in first person. */
+static float g_eye_fs_x = VR_FOV_SCALE_DEFAULT, g_eye_fs_y = VR_FOV_SCALE_Y_DEFAULT, g_eye_kyx = 1.0f;
 /* VR image quality (vr_aniso=, vr_sharpen=; d3d11_set_quality, from the
  * next start): anisotropic filtering with mipmaps for the game's textures,
  * and a contrast-adaptive sharpening pass on the eye pictures. Only with VR
@@ -1180,6 +1189,15 @@ static void head_frame(psp_gpu_stereo *s) {
         fprintf(stderr, "vr: first person %s\n", first ? "on (the eyes in the player's head)" : "waiting for the player");
     was_first = g_vr_first ? first : -1;
     const float k = first ? g_vr_fp_scale : g_vr_world_scale;
+    {   /* the eyes' view against the GE's projection (widened by the camera hook in first person) */
+        const int wide = first && g_fp_cam;
+        const float fx = g_vr_fov > 1.0f ? g_vr_fov : 1.0f, fy = g_vr_fov_y > 1.0f ? g_vr_fov_y : 1.0f;
+        g_eye_fs_x = wide ? fx / g_fp_kx : fx;
+        g_eye_fs_y = wide ? fy / g_fp_ky : fy;
+        g_eye_kyx = wide ? g_fp_ky / g_fp_kx : 1.0f;
+        s->fov_scale = g_eye_fs_x;
+        s->fov_scale_y = g_eye_fs_y;
+    }
     s->near_w = first ? g_vr_fp_near : 0.0f;                    /* the player's own head, clipped away */
     s->fx_dist = fx_dist;
     for (int e = 0; e < 2; e++) {
@@ -1206,7 +1224,8 @@ static void head_frame(psp_gpu_stereo *s) {
          * select is 0.98 (wider), close-up cutscenes 5.67. A boss fight's
          * camera was 1.30-1.34 and the whole fight went flat (user) when
          * this allowed 3%. */
-        const int other_fov = pr[0] < 1.15f || pr[0] > 2.5f;
+        const float px = pr[0] * (g_vr_first && g_fp_cam ? g_fp_kx : 1.0f);   /* the game's own x scale */
+        const int other_fov = px < 1.15f || px > 2.5f;
         menu = unturned || off_centre || other_fov;
         g_menu_loading = menu && unturned && !off_centre && !other_fov;
         if (menu != g_menu_scene)
@@ -1301,8 +1320,11 @@ static uint64_t n_fp_cam;
 static void hook_apply_camera(void (*original)(void)) {
     const uint32_t cam = psp_cpu.r[4], pl = gamelog_local_player();
     const float px = cam ? psp_read_f32(cam + 0x90u) : 0.0f;
+    const int field = px > 1.15f && px < 2.5f;      /* other cameras (3 applies a frame) leave g_fp_cam alone */
+    if (!g_head_on || !g_vr_first) g_fp_cam = 0;
+    if (!field) { original(); return; }
     g_fp_cam = 0;
-    if (g_head_on && g_vr_first && pl && px > 1.15f && px < 2.5f) {
+    if (g_head_on && g_vr_first && pl) {
         float v[16];
         for (int i = 0; i < 16; i++) v[i] = psp_read_f32(cam + 0x10u + 4u * (uint32_t)i);
         /* The camera's backward axis (view z) in the world, level. */
@@ -1342,7 +1364,19 @@ static void hook_apply_camera(void (*original)(void)) {
             if (n_fp_cam++ == 0) fprintf(stderr, "vr: first person: the game camera at the player's head\n");
         }
     }
+    if (!g_fp_cam) { original(); return; }
+    /* Its projection wider for this apply (SetProjection copies it to the
+     * global and builds the cull planes from it), the camera object's own
+     * put back after, so it isn't widened again next frame. */
+    const float fx = g_vr_fov > 1.0f ? g_vr_fov : 1.0f, fy = g_vr_fov_y > 1.0f ? g_vr_fov_y : 1.0f;
+    g_fp_kx = fx * VR_FP_VIEW_MARGIN;
+    g_fp_ky = fy * VR_FP_VIEW_MARGIN;
+    const float p0 = psp_read_f32(cam + 0x90u), p5 = psp_read_f32(cam + 0x90u + 20u);
+    psp_write_f32(cam + 0x90u, p0 / g_fp_kx);
+    psp_write_f32(cam + 0x90u + 20u, p5 / g_fp_ky);
     original();
+    psp_write_f32(cam + 0x90u, p0);
+    psp_write_f32(cam + 0x90u + 20u, p5);
 }
 
 #ifndef PSP2I_PROD
@@ -1514,10 +1548,10 @@ static void vrshot_vblank(uint64_t vb) {
 /* The eye pictures' half-FOV tangents: the game's, times vr_fov_scale(_y)
  * for pictures drawn from the head (tag != 0); vertical 0 = from the shape. */
 static float eye_tan(uint32_t tag) {
-    return psp_gpu_stereo_tan_half_fov() * (tag && g_vr_fov > 1.0f ? g_vr_fov : 1.0f);
+    return psp_gpu_stereo_tan_half_fov() * (tag ? g_eye_fs_x : 1.0f);
 }
-static float eye_tan_y(uint32_t tag) {
-    return tag ? psp_gpu_stereo_tan_half_fov() * (float)SCREEN_H / (float)SCREEN_W * (g_vr_fov_y > 1.0f ? g_vr_fov_y : 1.0f) : 0.0f;
+static float eye_tan_y(uint32_t tag) {   /* the GE's y scale over x is 480:272 times ky/kx (first person's widening) */
+    return tag ? psp_gpu_stereo_tan_half_fov() * (float)SCREEN_H / (float)SCREEN_W * g_eye_kyx * g_eye_fs_y : 0.0f;
 }
 
 /* The eye pictures with the overlay (menus, FPS) on top, as compose() does
