@@ -116,7 +116,7 @@ unless the user asks.
   `088e6cf` the per-eye view matrices for head tracking (`eye_views`,
   `on_frame`, `psp_gpu_stereo_tag`).
 - Now: main repo `vr-theater` at the P3 head-tracking commit (after
-  `5df9c1e`); psprecomp `vr-draw-observer` at `088e6cf`.
+  `5df9c1e`); psprecomp `vr-draw-observer` at `c8ee358` (wider eye views, the HUD pass from the eyes).
 - `3ds_port` (main repo, origin): a placeholder branch from `fd149a1`.
 
 ## What exists
