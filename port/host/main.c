@@ -173,6 +173,7 @@ void d3d11_report(FILE *out);
 int  d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w, int h);
 void d3d11_set_scale(int s);
 void d3d11_set_scale_y(int s);
+void d3d11_set_quality(int aniso, float sharpen);
 const uint32_t *d3d11_present_hires(int *w, int *h);
 const uint32_t *d3d11_present_eye(int eye, int *w, int *h);
 void d3d11_eye_share(int on);
@@ -983,6 +984,14 @@ static int      g_menu_loading;
 static int      g_vr_first;
 static float    g_vr_fp_eye = VR_FP_EYE_DEFAULT, g_vr_fp_scale = VR_FP_SCALE_DEFAULT, g_vr_fp_fwd = VR_FP_FORWARD_DEFAULT;
 static float    g_vr_fp_near = VR_FP_NEAR_DEFAULT;
+/* VR image quality (vr_aniso=, vr_sharpen=; d3d11_set_quality, from the
+ * next start): anisotropic filtering with mipmaps for the game's textures,
+ * and a contrast-adaptive sharpening pass on the eye pictures. Only with VR
+ * on: the window's game is drawn as before otherwise. */
+#define VR_ANISO_DEFAULT   16
+#define VR_SHARPEN_DEFAULT 0.5f
+static int      g_vr_aniso = VR_ANISO_DEFAULT;
+static float    g_vr_sharpen = VR_SHARPEN_DEFAULT;
 #define VR_HUD_DIST_INI_DEFAULT   2.5f          /* = vr.h VR_HUD_DISTANCE_DEFAULT (vr.h is VR builds only) */
 #define VR_HUD_FOLLOW_INI_DEFAULT 35.0f         /* = vr.h VR_HUD_FOLLOW_DEFAULT */
 static float    g_vr_hud_dist = VR_HUD_DIST_INI_DEFAULT, g_vr_hud_size = VR_HUD_SIZE_DEFAULT;
@@ -1499,6 +1508,14 @@ static int display_load(void) {
             const float k = (float)atof(line + 10);
             if (k >= 1.0f && k <= 20.0f) g_vr_fp_eye = k;
         }
+        else if (!strncmp(line, "vr_aniso=", 9)) {
+            const int k = atoi(line + 9);
+            if (k >= 0 && k <= 16) g_vr_aniso = k;
+        }
+        else if (!strncmp(line, "vr_sharpen=", 11)) {
+            const float k = (float)atof(line + 11);
+            if (k >= 0.0f && k <= 1.0f) g_vr_sharpen = k;
+        }
         else if (!strncmp(line, "vr_fp_near=", 11)) {
             const float k = (float)atof(line + 11);
             if (k >= 0.0f && k <= 5.0f) g_vr_fp_near = k;
@@ -1581,6 +1598,9 @@ static void display_save(int res) {
                " (hides your own head when running); fp scale = game units per metre in first person\n");
     fprintf(f, "vr_view=%s\nvr_fp_eye=%.1f\nvr_fp_forward=%.1f\nvr_fp_near=%.1f\nvr_fp_scale=%.1f\n", g_vr_first ? "first" : "third",
             (double)g_vr_fp_eye, (double)g_vr_fp_fwd, (double)g_vr_fp_near, (double)g_vr_fp_scale);
+    fprintf(f, "; VR image quality (from the next start, VR only): aniso = texture filtering 0 (off) or 2..16;"
+               " sharpen = sharpening of the headset's pictures 0.0 (off) .. 1.0\n");
+    fprintf(f, "vr_aniso=%d\nvr_sharpen=%.2f\n", g_vr_aniso, (double)g_vr_sharpen);
     fprintf(f, "; menu screen: on = the game's menu scenes (continue, mission select, loading) on a flat screen instead of in 3D around you\n");
     fprintf(f, "vr_menu_screen=%s\n", g_vr_menu_screen ? "on" : "off");
     fprintf(f, "; PPSSPP texture packs: folders holding a textures.ini, ';'-separated, later ones win (relative to the exe); empty = off\n");
@@ -3206,6 +3226,11 @@ int main(int argc, char **argv) {
             sy = sy < sc ? sc : sy > 8 ? 8 : sy;
             d3d11_set_scale_y(sy);
             g_hi_sy = sy;
+        }
+        if ((vr_arg >= 0 ? vr_arg : g_vr_on) && g_vr_stereo) {
+            d3d11_set_quality(g_vr_aniso, g_vr_sharpen);
+            fprintf(stderr, "d3d11: VR image quality: texture filtering %s, sharpening %.2f\n",
+                    g_vr_aniso ? "anisotropic with mipmaps" : "as the game's", (double)g_vr_sharpen);
         }
 #endif
         if (d3d11_init() != 0) {

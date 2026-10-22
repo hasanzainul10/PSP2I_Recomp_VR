@@ -241,6 +241,15 @@ the world; the user found it overwhelming. Those were removed. Now:
   and WORLD SIZE (20-300% of life size, 3.4 units/m = 100%, for the view
   in use: first person sets `vr_fp_scale`, third `vr_world_scale`), live
   and saved. test_menu: 452 checks, 0 failed. Not yet used in the headset.
+- **Image quality (user: "any way we can make the game look better?"):**
+  with VR on (from the start, `d3d11_set_quality`), `vr_aniso=16`: the
+  game's textures get mipmaps (GenerateMips at upload) and linear samplers
+  anisotropic filtering; `vr_sharpen=0.5`: the eyes go into the shared
+  texture through a cross-shaped CAS pass (d3d11.c `SHARPEN_SRC`) instead
+  of a copy. Headless with `--vr`: shader compiled, textures fine, clean
+  exit; the sharpening pass itself not yet seen in the headset. Not done:
+  MSAA (the game samples its render targets), render_scale=4 (try first:
+  1920 x ~1800 eyes), DLSS (no motion vectors; not a fit).
 - **Open:** hiding the player's own head (bone weights, or an eye-forward
   offset), body-relative movement (today the stick moves relative to the
   game camera, which trails behind), the cull behind the game camera.
