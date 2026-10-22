@@ -206,6 +206,12 @@ the world; the user found it overwhelming. Those were removed. Now:
   game logic ~30-40%. The renderer isn't the limit; the dips (min 36-44
   fps) are spikes: mission scenes (GE 40%, idle 22%) and texture-pack PNG
   loads on the game thread.
+- **Texture-pack PNGs off the game thread (user's pick of the spike
+  fixes):** texreplace.c decodes them on 2 worker threads; the first draw
+  queues the PNG and draws the original, and the backends (d3d11.c,
+  gl_ge.c `rep_wait`) look the texture up again once `texreplace_pending`
+  is 0. Checked headless at the title (the brand logos PNG: loaded by a
+  worker, swapped in, clean exit); not yet seen in the headset.
 - **Open:** hiding the player's own head (bone weights, or an eye-forward
   offset), body-relative movement (today the stick moves relative to the
   game camera, which trails behind), the cull behind the game camera.

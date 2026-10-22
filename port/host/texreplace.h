@@ -33,9 +33,15 @@ int texreplace_on(void);
 uint32_t texreplace_find(void);
 
 /* The PNG of a replacement, w*h pixels 0xAABBGGRR (the layout of
- * psp_gpu_decode_texture), decoded on first use and cached. Valid until the
- * next texreplace_ call. NULL if the file can't be read: draw the original. */
+ * psp_gpu_decode_texture), cached once decoded. Valid until the next
+ * texreplace_ call. NULL while it is being decoded (on a worker thread,
+ * queued by the first call: texreplace_pending is then nonzero) or if the
+ * file can't be read: draw the original meanwhile. */
 const uint32_t *texreplace_pixels(uint32_t id, int *w, int *h);
+
+/* Nonzero while replacement `id`'s PNG is queued or being decoded: ask
+ * texreplace_pixels again once this is 0. */
+int texreplace_pending(uint32_t id);
 
 #ifndef PSP2I_PROD
 /* Right after a texreplace_find that returned 0: with PSP2I_TEXREPLACE_DUMP

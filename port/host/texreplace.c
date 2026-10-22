@@ -6,8 +6,10 @@
  * the texture bytes. psp_gpu_pack_key computes the same three for the
  * current draw; this file maps them to PNGs, decodes those with stb_image
  * and keeps the decoded pixels, up to a budget, for the backends to upload
- * (d3d11.c, gl_ge.c). Loading is synchronous: a big PNG costs its decode
- * time on the frame that first draws it. */
+ * (d3d11.c, gl_ge.c). PNGs are decoded on worker threads: the first draw
+ * of a texture queues its PNG and draws the original, and the backend asks
+ * again until texreplace_pending says it's done (a decode on the game thread
+ * hitched area loads: up to ~340 ms of decoding in a run). */
 
 #include "texreplace.h"
 
@@ -18,6 +20,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <pthread.h>
+#endif
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
@@ -33,7 +40,9 @@ typedef struct { char dir[600]; int ignore_addr; } pack;
 typedef struct {
     char    *path;                   /* as the textures.ini names it, '/'-separated */
     int      pack;                   /* the pack that named it: looked for there, then in earlier packs */
-    int      state;                  /* 0 not loaded, 1 pixels in memory, -1 unreadable */
+    volatile int state;              /* 0 not loaded, 2 queued or decoding, 3 decoded (the game thread takes it),
+                                      * 1 pixels in memory, -2 unreadable (to log), -1 unreadable */
+    double   decode_ms;              /* the worker's decode time */
     int      w, h;
     uint32_t *px;
     uint64_t last_use;
@@ -350,6 +359,95 @@ void texreplace_dump_miss(const uint32_t *px, int w, int h) {
 }
 #endif
 
+/* ---- the decode workers ---------------------------------------------------------------- */
+
+/* A queue of file indices; the workers decode them and set the file's state
+ * to 3 (or -2). Only the game thread touches the cache's accounting. */
+#define WORKERS   2
+#define QUEUE_CAP 4096
+static int      g_queue[QUEUE_CAP];
+static int      g_q_head, g_q_tail, g_workers_up;
+#ifdef _WIN32
+static CRITICAL_SECTION   g_q_lock;
+static CONDITION_VARIABLE g_q_cond;
+#define Q_LOCK()    EnterCriticalSection(&g_q_lock)
+#define Q_UNLOCK()  LeaveCriticalSection(&g_q_lock)
+#define Q_WAIT()    SleepConditionVariableCS(&g_q_cond, &g_q_lock, INFINITE)
+#define Q_SIGNAL()  WakeConditionVariable(&g_q_cond)
+#define Q_PUBLISH() MemoryBarrier()
+#else
+static pthread_mutex_t g_q_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_q_cond = PTHREAD_COND_INITIALIZER;
+#define Q_LOCK()    pthread_mutex_lock(&g_q_lock)
+#define Q_UNLOCK()  pthread_mutex_unlock(&g_q_lock)
+#define Q_WAIT()    pthread_cond_wait(&g_q_cond, &g_q_lock)
+#define Q_SIGNAL()  pthread_cond_signal(&g_q_cond)
+#define Q_PUBLISH() __sync_synchronize()
+#endif
+
+static void decode_file(pfile *f) {
+    const clock_t t0 = clock();
+    int iw = 0, ih = 0, comp;
+    stbi_uc *px = NULL;
+    /* The pack that named it first, then the packs before it. */
+    char path[1300];
+    for (int pk = f->pack; pk >= 0 && !px; pk--) {
+        snprintf(path, sizeof path, "%s/%s", g_packs[pk].dir, f->path);
+        px = stbi_load(path, &iw, &ih, &comp, 4);
+    }
+    f->decode_ms = (double)(clock() - t0) * 1000.0 / CLOCKS_PER_SEC;
+    f->px = (uint32_t *)px; f->w = iw; f->h = ih;
+    Q_PUBLISH();                                        /* the pixels before the state */
+    f->state = px ? 3 : -2;
+}
+
+#ifdef _WIN32
+static DWORD WINAPI worker(LPVOID arg)
+#else
+static void *worker(void *arg)
+#endif
+{
+    (void)arg;
+    for (;;) {
+        Q_LOCK();
+        while (g_q_head == g_q_tail) Q_WAIT();
+        const int i = g_queue[g_q_head];
+        g_q_head = (g_q_head + 1) % QUEUE_CAP;
+        Q_UNLOCK();
+        decode_file(&g_files[i]);
+    }
+    return 0;
+}
+
+/* Queue file i (state 0 -> 2); 0 if the queue is full (asked again later). */
+static int enqueue(int i) {
+    if (!g_workers_up) {
+#ifdef _WIN32
+        InitializeCriticalSection(&g_q_lock);
+        InitializeConditionVariable(&g_q_cond);
+        for (int k = 0; k < WORKERS; k++) {
+            HANDLE th = CreateThread(NULL, 0, worker, NULL, 0, NULL);
+            if (th) { SetThreadPriority(th, THREAD_PRIORITY_BELOW_NORMAL); CloseHandle(th); }
+        }
+#else
+        for (int k = 0; k < WORKERS; k++) { pthread_t th; if (pthread_create(&th, NULL, worker, NULL) == 0) pthread_detach(th); }
+#endif
+        g_workers_up = 1;
+    }
+    Q_LOCK();
+    const int next = (g_q_tail + 1) % QUEUE_CAP;
+    const int ok = next != g_q_head;
+    if (ok) { g_queue[g_q_tail] = i; g_q_tail = next; g_files[i].state = 2; Q_SIGNAL(); }
+    Q_UNLOCK();
+    return ok;
+}
+
+int texreplace_pending(uint32_t id) {
+    if (!id || id > (uint32_t)g_nfiles) return 0;
+    const int st = g_files[id - 1].state;
+    return st == 2;         /* 0 (not queued yet: the queue was full) and 3 (decoded): ask texreplace_pixels */
+}
+
 /* Drop the least recently used decoded PNGs until `need` more bytes fit. */
 static void cache_trim(uint64_t need, const pfile *keep) {
     while (g_cached_bytes + need > CACHE_BYTES) {
@@ -369,31 +467,25 @@ static void cache_trim(uint64_t need, const pfile *keep) {
 const uint32_t *texreplace_pixels(uint32_t id, int *w, int *h) {
     if (!id || id > (uint32_t)g_nfiles) return NULL;
     pfile *f = &g_files[id - 1];
+    if (f->state == 0) { enqueue((int)(id - 1)); return NULL; }   /* decoded on a worker; the original until then */
+    if (f->state == 2) return NULL;
+    if (f->state == -2) {
+        f->state = -1;
+        n_failed++;
+        g_decode_ms += f->decode_ms;
+        fprintf(stderr, "texreplace: cannot read %s; the original texture is drawn\n", f->path);
+        return NULL;
+    }
     if (f->state < 0) return NULL;
-    if (f->state == 0) {
-        const clock_t t0 = clock();
-        int iw = 0, ih = 0, comp;
-        stbi_uc *px = NULL;
-        /* The pack that named it first, then the packs before it. */
-        char path[1300];
-        for (int pk = f->pack; pk >= 0 && !px; pk--) {
-            snprintf(path, sizeof path, "%s/%s", g_packs[pk].dir, f->path);
-            px = stbi_load(path, &iw, &ih, &comp, 4);
-        }
-        g_decode_ms += (double)(clock() - t0) * 1000.0 / CLOCKS_PER_SEC;
-        if (!px) {
-            f->state = -1;
-            n_failed++;
-            fprintf(stderr, "texreplace: cannot read %s (%s); the original texture is drawn\n", f->path, stbi_failure_reason());
-            return NULL;
-        }
-        cache_trim((uint64_t)iw * ih * 4, f);
-        f->px = (uint32_t *)px; f->w = iw; f->h = ih; f->state = 1;
-        g_cached_bytes += (uint64_t)iw * ih * 4;
+    if (f->state == 3) {                                /* just decoded: into the cache's accounting */
+        cache_trim((uint64_t)f->w * f->h * 4, f);
+        f->state = 1;
+        g_cached_bytes += (uint64_t)f->w * f->h * 4;
+        g_decode_ms += f->decode_ms;
         n_loaded++;
         if (g_verbose || g_logged < 16) {
             g_logged++;
-            fprintf(stderr, "texreplace: loaded %s (%dx%d)\n", f->path, iw, ih);
+            fprintf(stderr, "texreplace: loaded %s (%dx%d)\n", f->path, f->w, f->h);
         }
     }
     f->last_use = ++g_use;

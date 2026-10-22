@@ -127,6 +127,7 @@ typedef struct {
     ID3D11ShaderResourceView *srv;
     uint32_t rep_id;                 /* texture pack PNG drawn instead (texreplace.h), 0 = none */
     int rep_slot;                    /* where rep_id was last found in g_rep */
+    uint32_t rep_wait;               /* a replacement still decoding (texreplace_pending): the original until then */
 } tex_entry;
 
 static rt_entry    g_rt[MAX_RT];
@@ -688,6 +689,10 @@ static ID3D11ShaderResourceView *rep_view(tex_entry *e) {
 static tex_entry *tex_get(const psp_gpu_state *st, int allow_rep) {
     tex_entry *e = tex_find(st->tex_key);
     uint64_t f = frame_no();
+#ifdef PSP2I_TEXREPLACE
+    /* Its replacement has finished decoding: look the texture up again. */
+    if (e && e->rep_wait && !texreplace_pending(e->rep_wait)) { e->rep_wait = 0; e->hash = 0; e->check_frame = 0; }
+#endif
     if (e && e->check_frame == f) { e->last_use = ++g_use; return e; }
     uint64_t h = psp_gpu_texture_hash();
     if (e && e->hash == h) { e->check_frame = f; e->last_use = ++g_use; return e; }
@@ -718,7 +723,8 @@ static tex_entry *tex_get(const psp_gpu_state *st, int allow_rep) {
     /* A texture pack's PNG instead, when one replaces this texture: the
      * original isn't decoded (texture_view samples the PNG). */
     e->rep_id = allow_rep ? texreplace_find() : 0;
-    if (e->rep_id && rep_view(e)) { e->hash = h; e->check_frame = f; e->last_use = ++g_use; return e; }
+    if (e->rep_id && rep_view(e)) { e->hash = h; e->check_frame = f; e->last_use = ++g_use; e->rep_wait = 0; return e; }
+    e->rep_wait = e->rep_id && texreplace_pending(e->rep_id) ? e->rep_id : 0;
     e->rep_id = 0;
 #else
     (void)allow_rep;
