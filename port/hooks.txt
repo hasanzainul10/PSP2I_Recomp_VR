@@ -42,4 +42,5 @@
 0x08D7CD88   # frustum test of another shape: as above
 0x08D7CE6C   # frustum test of another shape: as above
 0x08D7CF90   # frustum test of another shape: as above
+0x08D7D270   # a scene node's visibility (flags[i] bit 0x1 = hidden, from its description's 0x10 / 0x20 and the frustum test): counted per reason (dev, host/main.c)
 0x08AFD474   # ApplyCamera(camera): VR first person puts the field camera's view at the player's head (host/main.c)

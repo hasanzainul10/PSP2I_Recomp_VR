@@ -1319,6 +1319,39 @@ static void hook_apply_camera(void (*original)(void)) {
     original();
 }
 
+#ifndef PSP2I_PROD
+/* Dev, what the game leaves out of the frame: 0x08D7D270(flags[], desc[],
+ * i, ...) decides scene node i's visibility; flags[i] bit 0x1 = hidden.
+ * Counted per reason and logged every ~5 s with the view in use, to compare
+ * first and third person at the same place: already hidden or skipped
+ * (flags 0x401 before), the description's 0x10, its 0x20, else the frustum
+ * (or another) test. Desc entries are 144 bytes. */
+#define FN_NODE_VIS 0x08D7D270u
+static uint64_t n_node[6];                  /* visited, visible, pre-hidden, desc 0x10, desc 0x20, other */
+static void hook_node_vis(void (*original)(void)) {
+    const uint32_t fa = psp_cpu.r[4] + psp_cpu.r[6] * 4u, da = psp_cpu.r[5] + psp_cpu.r[6] * 144u;
+    const uint32_t before = psp_read32(fa), desc = psp_read32(da);
+    original();
+    const uint32_t after = psp_read32(fa);
+    n_node[0]++;
+    if (before & 0x401) n_node[2]++;
+    else if (!(after & 1)) n_node[1]++;
+    else if (desc & 0x10) n_node[3]++;
+    else if (desc & 0x20) n_node[4]++;
+    else n_node[5]++;
+    static uint64_t last_vb;
+    const uint64_t vb = psp_sched_vblank_count();
+    if (vb - last_vb >= 300) {
+        last_vb = vb;
+        fprintf(stderr, "vr: nodes (%s person): %llu visited, %llu visible; hidden: %llu already, %llu desc 0x10, %llu desc 0x20,"
+                        " %llu by a test\n", g_vr_first ? "first" : "third",
+                (unsigned long long)n_node[0], (unsigned long long)n_node[1], (unsigned long long)n_node[2],
+                (unsigned long long)n_node[3], (unsigned long long)n_node[4], (unsigned long long)n_node[5]);
+        memset(n_node, 0, sizeof n_node);
+    }
+}
+#endif
+
 static void hook_frustum_planes(void (*original)(void)) {
     const float k = g_head_on ? g_vr_cull : 1.0f;
     if (k <= 1.0f || psp_read32(PSP2I_PROJ_ORTHO) == 1) { original(); return; }
@@ -3411,6 +3444,9 @@ int main(int argc, char **argv) {
     g_menu.vr_width_dm = g_vr_width_dm;
     psp_hook_set(FN_FRUSTUM_PLANES, hook_frustum_planes);   /* a no-op unless head tracking is on */
     psp_hook_set(FN_APPLY_CAMERA, hook_apply_camera);       /* a no-op unless first person is on */
+#ifndef PSP2I_PROD
+    psp_hook_set(FN_NODE_VIS, hook_node_vis);               /* counts only */
+#endif
     {
         static const uint32_t CULL_TESTS[] = { 0x08D7C934u, 0x08D7CAECu, 0x08D7CD88u, 0x08D7CE6Cu, 0x08D7CF90u };
         for (int i = 0; i < (int)(sizeof CULL_TESTS / sizeof CULL_TESTS[0]); i++) psp_hook_set(CULL_TESTS[i], hook_cull_test);
