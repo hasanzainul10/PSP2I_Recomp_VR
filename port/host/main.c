@@ -1335,6 +1335,14 @@ static uint64_t n_fp_cam;
  * the original back first. */
 static uint32_t g_wide_cam;
 static float    g_wide_w0, g_wide_w5, g_wide_o0, g_wide_o5;
+#ifndef PSP2I_PROD
+/* Dev: each ApplyCamera of a frame and the global projection when the
+ * scene walk starts (hook_node_vis), logged every ~5 s: is the widened
+ * projection the one the game culls with? */
+static char     g_apply_log[512];
+static int      g_apply_log_n, g_apply_log_print, g_node_seen;
+static uint64_t g_apply_log_flip;
+#endif
 
 static void hook_apply_camera(void (*original)(void)) {
     const uint32_t cam = psp_cpu.r[4], pl = gamelog_local_player();
@@ -1344,6 +1352,20 @@ static void hook_apply_camera(void (*original)(void)) {
     }
     if (cam == g_wide_cam) g_wide_cam = 0;
     const float px = cam ? psp_read_f32(cam + 0x90u) : 0.0f;
+#ifndef PSP2I_PROD
+    {
+        const uint64_t fl = psp_display_flips();
+        if (fl != g_apply_log_flip) {
+            if (g_apply_log_print && g_apply_log_n) fprintf(stderr, "vr: applies:%s\n", g_apply_log);
+            g_apply_log_print = psp_sched_vblank_count() % 300 < 4;
+            g_apply_log_flip = fl; g_apply_log_n = 0; g_apply_log[0] = '\0'; g_node_seen = 0;
+        }
+        size_t L = strlen(g_apply_log);
+        if (L < sizeof g_apply_log - 64)
+            snprintf(g_apply_log + L, sizeof g_apply_log - L, " [cam %08X x %.3f]", cam, (double)px);
+        g_apply_log_n++;
+    }
+#endif
     const int field = px > 1.15f && px < 2.5f;      /* other cameras (3 applies a frame) leave g_fp_cam alone */
     if (!g_head_on || !g_vr_first) g_fp_cam = 0;
     if (!field) { original(); return; }
@@ -1416,6 +1438,13 @@ static void hook_apply_camera(void (*original)(void)) {
 #define FN_NODE_VIS 0x08D7D270u
 static uint64_t n_node[6];                  /* visited, visible, pre-hidden, desc 0x10, desc 0x20, other */
 static void hook_node_vis(void (*original)(void)) {
+    if (!g_node_seen && g_apply_log_print) {
+        g_node_seen = 1;
+        size_t L = strlen(g_apply_log);
+        if (L < sizeof g_apply_log - 64)
+            snprintf(g_apply_log + L, sizeof g_apply_log - L, " {scene walk: global proj x %.3f y %.3f, wide %d}",
+                     (double)psp_read_f32(PSP2I_PROJ_MATRIX), (double)psp_read_f32(PSP2I_PROJ_MATRIX + 20), g_fp_cam);
+    }
     const uint32_t fa = psp_cpu.r[4] + psp_cpu.r[6] * 4u, da = psp_cpu.r[5] + psp_cpu.r[6] * 144u;
     const uint32_t before = psp_read32(fa), desc = psp_read32(da);
     original();
