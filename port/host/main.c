@@ -905,8 +905,25 @@ static float    g_vr_fov = VR_FOV_SCALE_DEFAULT, g_vr_fov_y = VR_FOV_SCALE_Y_DEF
  * the screen goes on the panel too: NPC portraits share the labels' layer
  * (86: the shop's portrait, GE dump 2026-10-22), and labels are small. */
 static int psp2i_hud_panel(float w, float frac) {
-    return frac > 0.2f || w < 80.0f || (w >= 84.0f && w < 85.995f) || (w >= 86.85f && w <= 87.05f) || (w >= 91.5f && w <= 92.5f) ||
-           w > 1000.0f;
+    const int layer = w < 80.0f || (w >= 84.0f && w < 85.995f) || (w >= 86.85f && w <= 87.05f) || (w >= 91.5f && w <= 92.5f) ||
+                      w > 1000.0f;
+#ifndef PSP2I_PROD
+    /* Dev: the big sheets that go on the panel only by their size (user: "the
+     * flat appears while moving"; a full-screen effect there would put a flat
+     * copy of the game in front of them). Each layer and size once. */
+    if (!layer && frac > 0.2f) {
+        static int seen[64], n;
+        const int key = (int)lroundf(w * 10.0f) * 16 + (int)(frac * 10.0f);
+        int k = 0;
+        while (k < n && seen[k] != key) k++;
+        if (k == n && n < 64) {
+            seen[n++] = key;
+            fprintf(stderr, "vr: a big HUD-pass sheet on the panel: w %.2f, %.0f%% of the screen (vblank %llu)\n", (double)w,
+                    (double)(frac * 100.0f), (unsigned long long)psp_sched_vblank_count());
+        }
+    }
+#endif
+    return frac > 0.2f || layer;
 }
 /* Screen-space effects (hit sparks, techniques: small orthographic draws in
  * the scene pass) are placed this far along the camera's ray: about where
