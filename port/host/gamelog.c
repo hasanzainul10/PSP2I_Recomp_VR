@@ -425,9 +425,14 @@ static void hp_watch_ptrs(const char *after) {
 }
 #endif
 
+/* The latest player object the game called local, in every build: VR first
+ * person reads its position (gamelog_local_player). Only read, never written. */
+static uint32_t g_local_player;
+
 static void hook_is_local(void (*original)(void)) {
     const uint32_t pl = psp_cpu.r[4];
     original();
+    if (pl && psp_cpu.r[2]) g_local_player = pl;
     /* remote: player id 1, the other human in a 2-player test (NPCs are 2, 3) */
 #ifndef PSP2I_PROD
     if (pl) { if (psp_cpu.r[2]) g_pl_local = pl; else if (psp_read32(pl + 40) == 1) g_pl_remote = pl; }
@@ -458,13 +463,7 @@ static void hook_is_local(void (*original)(void)) {
     logf_line("[party] player 0x%08X (+0x28 = %u) local? -> %d", pl, pl ? psp_read32(pl + 40) : 0, (int32_t)r);
 }
 
-uint32_t gamelog_local_player(void) {
-#ifndef PSP2I_PROD
-    return g_pl_local;
-#else
-    return 0;
-#endif
-}
+uint32_t gamelog_local_player(void) { return g_local_player; }
 
 /* 0x08CB611C = "this room is an infra lobby" (room size == lobby size, or the
  * lobby controller exists). Forcing it in a session turns the session into a

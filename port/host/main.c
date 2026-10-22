@@ -924,6 +924,20 @@ static int psp2i_hud_panel(float w, float frac) {
 #define PSP2I_PROJ_MATRIX_G     0x08FA97A0u
 static int      g_vr_menu_screen = 1;
 static int      g_menu_scene = -1;          /* the last frame was a menu scene (logged on change) */
+/* P4 first person (vr_view=first, vr_fp_eye=, vr_fp_scale=): with head
+ * tracking the eyes sit in the local player's head instead of at the game
+ * camera, rendering only (the camera, and what other players see, stay the
+ * game's). The head is placed from the player's position (player +0x4B0, the
+ * feet), vr_fp_eye game units up along world up. Measured 2026-10-22 (the
+ * GE probe, standing in town): the model's top is 5.8 units above the
+ * position, the hips 3.05, so a ~1.7 m character makes about 3.4 units per
+ * metre; vr_fp_scale is that, for the head's movement and the IPD in first
+ * person (vr_world_scale stays third person's). The view's heading is the
+ * game camera's (it follows behind the player; the right stick turns it). */
+#define VR_FP_EYE_DEFAULT   5.3f
+#define VR_FP_SCALE_DEFAULT 3.4f
+static int      g_vr_first;
+static float    g_vr_fp_eye = VR_FP_EYE_DEFAULT, g_vr_fp_scale = VR_FP_SCALE_DEFAULT;
 #define VR_HUD_DIST_INI_DEFAULT   2.5f          /* = vr.h VR_HUD_DISTANCE_DEFAULT (vr.h is VR builds only) */
 #define VR_HUD_FOLLOW_INI_DEFAULT 35.0f         /* = vr.h VR_HUD_FOLLOW_DEFAULT */
 static float    g_vr_hud_dist = VR_HUD_DIST_INI_DEFAULT, g_vr_hud_size = VR_HUD_SIZE_DEFAULT;
@@ -1040,12 +1054,34 @@ static void head_frame(psp_gpu_stereo *s) {
     else { static const float ID[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 }; memcpy(lev, ID, sizeof ID); }
     quat_mat3(h.q, hr);
     mat3_mul(lev, hr, q);                                       /* the head's axes in the game camera's view space */
-    const float k = g_vr_world_scale;
+    /* First person: the head's origin is the player's head, seen from the
+     * game camera (its position through the view matrix, plus vr_fp_eye
+     * along world up); else the game camera itself. */
+    float base[3] = { 0, 0, 0 };
+    int first = 0;
+    if (g_vr_first) {
+        const uint32_t pl = gamelog_local_player();
+        float v[16], w[3], c[3];
+        for (int i = 0; i < 16; i++) v[i] = psp_read_f32(PSP2I_VIEW_MATRIX + 4u * (uint32_t)i);
+        if (pl) for (int i = 0; i < 3; i++) w[i] = psp_read_f32(pl + 0x4B0u + 4u * (uint32_t)i);
+        for (int r = 0; r < 3 && pl; r++) c[r] = v[r] * w[0] + v[4 + r] * w[1] + v[8 + r] * w[2] + v[12 + r];
+        const float ul = sqrtf(v[4] * v[4] + v[5] * v[5] + v[6] * v[6]);
+        /* A sane position: in front of the camera, within the orbit's reach. */
+        if (pl && ul > 0.5f && ul < 2.0f && c[2] < 0.0f && c[0] * c[0] + c[1] * c[1] + c[2] * c[2] < 200.0f * 200.0f) {
+            for (int r = 0; r < 3; r++) base[r] = c[r] + g_vr_fp_eye * v[4 + r] / ul;
+            first = 1;
+        }
+    }
+    static int was_first = -1;
+    if (g_vr_first && first != was_first)
+        fprintf(stderr, "vr: first person %s\n", first ? "on (the eyes in the player's head)" : "waiting for the player");
+    was_first = g_vr_first ? first : -1;
+    const float k = first ? g_vr_fp_scale : g_vr_world_scale;
     for (int e = 0; e < 2; e++) {
         float p[3];
         for (int r = 0; r < 3; r++)
-            p[r] = k * (lev[r] * h.p[0] + lev[3 + r] * h.p[1] + lev[6 + r] * h.p[2] +
-                        q[r] * h.eye[e][0] + q[3 + r] * h.eye[e][1] + q[6 + r] * h.eye[e][2]);
+            p[r] = base[r] + k * (lev[r] * h.p[0] + lev[3 + r] * h.p[1] + lev[6 + r] * h.p[2] +
+                                  q[r] * h.eye[e][0] + q[3 + r] * h.eye[e][1] + q[6 + r] * h.eye[e][2]);
         view_of(q, p, s->eye_view[e]);
     }
     s->tag = live ? h.id : 0;
@@ -1071,6 +1107,39 @@ static void head_frame(psp_gpu_stereo *s) {
     }
     s->flat_frame = menu;
     if (menu) s->tag = 0;
+#ifndef PSP2I_PROD
+    /* P4 first person, measuring (dev): where the local player stands from
+     * the game camera, and how high above that position the camera aims (the
+     * point on its forward ray nearest the player: the orbit camera looks at
+     * the upper body). Gives the head height and the camera distance in game
+     * units before the eye is moved there. */
+    static unsigned n_fp;
+    const uint32_t pl = gamelog_local_player();
+    if (!menu && pl && ++n_fp % 120 == 0) {
+        float v[16], w[3], c[3];
+        for (int i = 0; i < 16; i++) v[i] = psp_read_f32(PSP2I_VIEW_MATRIX + 4u * (uint32_t)i);
+        for (int i = 0; i < 3; i++) w[i] = psp_read_f32(pl + 0x4B0u + 4u * (uint32_t)i);
+        for (int r = 0; r < 3; r++) c[r] = v[r] * w[0] + v[4 + r] * w[1] + v[8 + r] * w[2] + v[12 + r];
+        const float u[3] = { v[4], v[5], v[6] };                /* world up in view space: the view's second column */
+        const float off[3] = { -c[0], -c[1], 0.0f };            /* the ray point (0, 0, c.z) minus the player */
+        const float aim_h = off[0] * u[0] + off[1] * u[1] + off[2] * u[2];
+        const float dist = sqrtf(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]);
+        float pr[3];                                            /* the last probe: the model around the position */
+        const int got = psp_gpu_stereo_probe_result(pr);
+        fprintf(stderr, "vr: fp measure: player 0x%08X at (%.2f, %.2f, %.2f) world, (%.2f, %.2f, %.2f) from the camera; "
+                        "distance %.2f, the camera aims %.2f above the position; last probe: %.0f vertices from %.2f to %.2f\n",
+                pl, (double)w[0], (double)w[1], (double)w[2], (double)c[0], (double)c[1], (double)c[2], (double)dist,
+                (double)aim_h, got ? (double)pr[2] : 0.0, got ? (double)pr[0] : 0.0, got ? (double)pr[1] : 0.0);
+        /* The 3D vertices within 1.5 units of the vertical line through the
+         * position, up to 30 above it: the top is the head (if nothing else
+         * stands that close). */
+        const float ul = sqrtf(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+        if (ul > 0.5f) {
+            const float un[3] = { u[0] / ul, u[1] / ul, u[2] / ul };
+            psp_gpu_stereo_probe(c, un, 1.5f, 30.0f);
+        }
+    }
+#endif
 }
 
 #ifndef PSP2I_PROD
@@ -1365,6 +1434,15 @@ static int display_load(void) {
             const float k = (float)atof(line + 15);
             if (k >= 1.0f && k <= 100.0f) g_vr_world_scale = k;
         }
+        else if (!strncmp(line, "vr_view=", 8))        g_vr_first = !strncmp(line + 8, "first", 5);
+        else if (!strncmp(line, "vr_fp_eye=", 10)) {
+            const float k = (float)atof(line + 10);
+            if (k >= 1.0f && k <= 20.0f) g_vr_fp_eye = k;
+        }
+        else if (!strncmp(line, "vr_fp_scale=", 12)) {
+            const float k = (float)atof(line + 12);
+            if (k >= 0.5f && k <= 20.0f) g_vr_fp_scale = k;
+        }
         else if (!strncmp(line, "vr_distance=", 12) || !strncmp(line, "vr_width=", 9)) {
             const int dist = line[3] == 'd';
             int dm = (int)(atof(line + (dist ? 12 : 9)) * 10.0 + 0.5);
@@ -1429,6 +1507,10 @@ static void display_save(int res) {
                " follow = how many degrees you can look away before it glides back in front of you (0 = it stays where recenter put it)\n");
     fprintf(f, "vr_hud_distance=%.1f\nvr_hud_size=%.2f\nvr_hud_follow=%.0f\n", (double)g_vr_hud_dist, (double)g_vr_hud_size,
             (double)g_vr_hud_follow);
+    fprintf(f, "; with head tracking: view first = you are in your character's head (gamepad: L3 twice quickly toggles), third = behind it;"
+               " fp eye = the eye height in game units (the character is ~5.8 tall); fp scale = game units per metre in first person\n");
+    fprintf(f, "vr_view=%s\nvr_fp_eye=%.1f\nvr_fp_scale=%.1f\n", g_vr_first ? "first" : "third", (double)g_vr_fp_eye,
+            (double)g_vr_fp_scale);
     fprintf(f, "; menu screen: on = the game's menu scenes (continue, mission select, loading) on a flat screen instead of in 3D around you\n");
     fprintf(f, "vr_menu_screen=%s\n", g_vr_menu_screen ? "on" : "off");
     fprintf(f, "; PPSSPP texture packs: folders holding a textures.ini, ';'-separated, later ones win (relative to the exe); empty = off\n");
@@ -1651,7 +1733,17 @@ static void poll_controllers(void) {
 #endif
         }
         if (!l3 && down) {
-            if (!held_done) { fprintf(stderr, "vr: gamepad L3: recenter\n"); vr_recenter(); }
+            static ULONGLONG last_tap;              /* a second tap within 0.4 s: first / third person */
+            if (!held_done && last_tap && now - last_tap < 400) {
+                g_vr_first = !g_vr_first;
+                fprintf(stderr, "vr: gamepad L3 twice: %s person\n", g_vr_first ? "first" : "third");
+                if (!g_headless) display_save(g_res_saved);
+                last_tap = 0;
+            } else if (!held_done) {
+                fprintf(stderr, "vr: gamepad L3: recenter\n");
+                vr_recenter();
+                last_tap = now;
+            }
             down = 0;
         }
     }

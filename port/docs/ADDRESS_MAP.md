@@ -72,7 +72,7 @@ answer at the same addresses:
 | `0x08FA98A0` | **The view matrix** (world to eye), 4x4 column-major, VFPU layout (columns of 4 floats, translation in floats 12 to 14, last row 0 0 0 1). It's in the module's BSS (the image ends at `0x08FAA744`), so it's a global, likely the canonical copy | seen (2 reports; writer not yet watched) |
 | `0x09049170` | The same matrix (heap) | seen |
 | `0x09406020` to `0x09407200` (about 12 slots, 0x40 apart), `0x0942FE70` | Copies of it, probably a per-draw matrix stack. `0x09406980` sometimes holds the previous frame's value | seen |
-| player +0x4B0 | **The player's world position** (x, y, z floats). The view matrix maps it to 3.05 units from the first bone (the hips are likely above the feet) | seen (2 reports) |
+| player +0x4B0 | **The player's world position** (x, y, z floats): **the feet**. The view matrix maps it to 3.05 units from the first bone (the hips). The GE probe (`psp_gpu_stereo_probe`, 2026-10-22, standing still in town, 6 frames): the model within 1.5 units of the vertical through it reaches **5.77-5.91 units above** it (the head's top), so ~3.4 game units per metre for a ~1.7 m character. The orbit camera sits 48-72 units behind (usually ~56) and aims 3.3-4.4 units above it (the chest). Read every frame by VR first person (host/main.c `head_frame`) | seen (2 reports + probe) |
 
 The camera from that matrix: report 1 eye (-99.96, 17.82, -374.91), forward
 (0.985, -0.052, -0.165); report 2 eye (-49.15, 11.86, -439.37), forward (0.801,

@@ -150,6 +150,22 @@ the world; the user found it overwhelming. Those were removed. Now:
   captures agree: the reticle (w 90) placed over the shark in both eyes,
   labels (86 / 88) placed in the world (off view with the head turned 80°).
 
+**P4 first person (started 2026-10-22, the user's choice after P3):**
+- **Measured** (windowed `--stereo` runs, `fp_measure1/2.log`): player
+  +0x4B0 is the feet; the head's top is 5.8 units above (GE probe
+  `psp_gpu_stereo_probe`, psprecomp); ~3.4 game units per metre. The
+  third-person `vr_world_scale` of 10 is ~3x that (a miniature world).
+- **Built, not yet seen in the headset:** `vr_view=first` puts both eyes
+  at the local player's head (feet + `vr_fp_eye` 5.3 along world up, seen
+  through the view matrix), heading from the game camera (levelled), the
+  head's movement and IPD at `vr_fp_scale` 3.4 units/m. Rendering only:
+  the game camera is untouched. Gamepad L3 twice quickly toggles first /
+  third (saved). The local player is now tracked in every build
+  (gamelog.c `g_local_player`).
+- **Open:** hiding the player's own head (bone weights, or an eye-forward
+  offset), body-relative movement (today the stick moves relative to the
+  game camera, which trails behind), the cull behind the game camera.
+
 **Next (in order):**
 1. **Try the controller capture in the headset:** left grip + left stick
    click (added after the fifth run; built, not yet pressed in the headset).
