@@ -47,6 +47,10 @@
 #include <psprecomp/mem.h>
 #include <psprecomp/render.h>
 
+#ifdef PSP2I_TEXREPLACE
+#include "texreplace.h"
+#endif
+
 #define VRAM_SIZE 0x200000u
 #define MAX_RT    32
 #define MAX_DEPTH 8
@@ -96,6 +100,8 @@ typedef struct {
     uint32_t w, h;
     ID3D11Texture2D *tex;
     ID3D11ShaderResourceView *srv;
+    uint32_t rep_id;                 /* texture pack PNG drawn instead (texreplace.h), 0 = none */
+    int rep_slot;                    /* where rep_id was last found in g_rep */
 } tex_entry;
 
 static rt_entry    g_rt[MAX_RT];
@@ -540,7 +546,81 @@ static tex_entry *tex_find(uint64_t key) {
     return NULL;
 }
 
-static tex_entry *tex_get(const psp_gpu_state *st) {
+#ifdef PSP2I_TEXREPLACE
+/* ---- texture packs (texreplace.c) ---------------------------------------------------------
+ *
+ * One GPU texture per pack PNG, shared by every game texture that maps to it,
+ * evicted least recently used beyond a budget. Each gets a full mip chain:
+ * pack PNGs are often 4 to 8 times the original's size, and minifying them
+ * through the game's single-level sampling would shimmer. UVs need no change,
+ * since the shader samples in normalized coordinates (texel / original size). */
+#define MAX_REP   256
+#define REP_BYTES (1024ull << 20)
+typedef struct {
+    uint32_t id;
+    uint64_t bytes, last_use;
+    ID3D11Texture2D *tex;
+    ID3D11ShaderResourceView *srv;
+} rep_entry;
+static rep_entry g_rep[MAX_REP];
+static uint64_t g_rep_bytes, n_rep_uploads;
+
+static void rep_free(rep_entry *r) {
+    if (r->srv) ID3D11ShaderResourceView_Release(r->srv);
+    if (r->tex) ID3D11Texture2D_Release(r->tex);
+    g_rep_bytes -= r->bytes;
+    memset(r, 0, sizeof *r);
+}
+
+/* The view of e's replacement, uploading the PNG if it isn't on the GPU;
+ * NULL if it can't be (the caller draws the original). */
+static ID3D11ShaderResourceView *rep_view(tex_entry *e) {
+    rep_entry *r = &g_rep[e->rep_slot];
+    if (r->id != e->rep_id) {
+        r = NULL;
+        for (int i = 0; i < MAX_REP && !r; i++) if (g_rep[i].id == e->rep_id) r = &g_rep[i];
+    }
+    if (!r) {
+        int w, h;
+        const uint32_t *px = texreplace_pixels(e->rep_id, &w, &h);
+        if (!px) return NULL;
+        const uint64_t bytes = (uint64_t)w * h * 4 * 4 / 3;
+        for (;;) {
+            rep_entry *slot = NULL, *old = NULL;
+            for (int i = 0; i < MAX_REP; i++) {
+                if (!g_rep[i].id) { if (!slot) slot = &g_rep[i]; }
+                else if (!old || g_rep[i].last_use < old->last_use) old = &g_rep[i];
+            }
+            if (slot && g_rep_bytes + bytes <= REP_BYTES) { r = slot; break; }
+            if (!old) { r = slot; break; }
+            rep_free(old);
+        }
+        if (!r) return NULL;
+        D3D11_TEXTURE2D_DESC d;
+        memset(&d, 0, sizeof d);
+        d.Width = (UINT)w; d.Height = (UINT)h; d.MipLevels = 0; d.ArraySize = 1;
+        d.Format = DXGI_FORMAT_R8G8B8A8_UNORM; d.SampleDesc.Count = 1;
+        d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        d.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
+        if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &d, NULL, &r->tex))) { r->tex = NULL; return NULL; }
+        if (FAILED(ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)r->tex, NULL, &r->srv))) {
+            ID3D11Texture2D_Release(r->tex); r->tex = NULL; r->srv = NULL;
+            return NULL;
+        }
+        ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)r->tex, 0, NULL, px, (UINT)w * 4, 0);
+        ID3D11DeviceContext_GenerateMips(g_ctx, r->srv);
+        r->id = e->rep_id; r->bytes = bytes;
+        g_rep_bytes += bytes;
+        n_rep_uploads++;
+    }
+    e->rep_slot = (int)(r - g_rep);
+    r->last_use = ++g_use;
+    return r->srv;
+}
+#endif
+
+/* allow_rep 0: decode the original even if a pack replaces it. */
+static tex_entry *tex_get(const psp_gpu_state *st, int allow_rep) {
     tex_entry *e = tex_find(st->tex_key);
     uint64_t f = frame_no();
     if (e && e->check_frame == f) { e->last_use = ++g_use; return e; }
@@ -569,6 +649,15 @@ static tex_entry *tex_get(const psp_gpu_state *st) {
         e->key = st->tex_key; e->w = st->tex_w; e->h = st->tex_h; e->used = 1;
         if (evicted) tex_index_rebuild(); else tex_index_add((int)(e - g_tex));
     }
+#ifdef PSP2I_TEXREPLACE
+    /* A texture pack's PNG instead, when one replaces this texture: the
+     * original isn't decoded (texture_view samples the PNG). */
+    e->rep_id = allow_rep ? texreplace_find() : 0;
+    if (e->rep_id && rep_view(e)) { e->hash = h; e->check_frame = f; e->last_use = ++g_use; return e; }
+    e->rep_id = 0;
+#else
+    (void)allow_rep;
+#endif
     uint32_t *px = (uint32_t *)malloc((size_t)st->tex_w * st->tex_h * 4);
     if (!px) return NULL;
     psp_gpu_decode_texture(px);
@@ -772,9 +861,18 @@ static ID3D11ShaderResourceView *texture_view(const psp_gpu_state *st, rt_entry 
             }
         }
     }
-    tex_entry *e = tex_get(st);
+    tex_entry *e = tex_get(st, 1);
     scale[0] = 1.0f / (float)st->tex_w;
     scale[1] = 1.0f / (float)st->tex_h;
+#ifdef PSP2I_TEXREPLACE
+    if (e && e->rep_id) {
+        ID3D11ShaderResourceView *v = rep_view(e);
+        if (v) return v;
+        /* Its PNG can't be read back (or uploaded): decode the original. */
+        e->rep_id = 0; e->hash = 0; e->check_frame = 0;
+        e = tex_get(st, 0);
+    }
+#endif
     return e ? e->srv : NULL;
 }
 
@@ -1371,6 +1469,11 @@ void d3d11_report(FILE *out) {
             (unsigned long long)n_rb_reason[3], (unsigned long long)n_rb_reason[4], (unsigned long long)n_rb_reason[5],
             (unsigned long long)n_rb_reason[6]);
     fprintf(out, "  d3d11 transfers     %llu GPU-side target-to-target transfers\n", (unsigned long long)n_xfer);
+#ifdef PSP2I_TEXREPLACE
+    if (texreplace_on())
+        fprintf(out, "  d3d11 texture packs %llu PNG uploads, %.0f MB on the GPU\n",
+                (unsigned long long)n_rep_uploads, (double)g_rep_bytes / (1024.0 * 1024.0));
+#endif
     if (xverify())
         fprintf(out, "  d3d11 xfer-verify   %llu transfers checked, %llu wrong (%llu pixels); %llu ownership overlaps\n",
                 (unsigned long long)n_xv_checked, (unsigned long long)n_xv_bad_xfers,
