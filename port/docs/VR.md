@@ -47,6 +47,9 @@ In `psp2i_display.ini` (no menu items yet):
 | `vr_world_scale=10.0` | Game units per metre. Higher = the world looks smaller and the 3D weaker; lower = bigger and stronger |
 | `vr_head=on` | Head tracking (phase 3, below). `off` = the stereo window |
 | `vr_level=on` | With head tracking: the horizon stays level with your floor (the game camera's up/down tilt is taken out). `off` = the game's tilt stays |
+| `vr_fov_scale=1.6` | With head tracking: the view is that many times the game's across (1.0 to 3.0). Wider = less sharp |
+| `vr_fov_scale_y=2.6` | The same up and down (1.0 to 4.0). The picture keeps the PSP's shape, so this makes its pixels taller |
+| `vr_cull_scale=8.0` | With head tracking: the game draws objects that much further out to the sides (1 = the game's own culling). Lower it if the frame rate drops |
 
 The IPD comes from the headset. OpenGL keeps the flat screen.
 
@@ -59,14 +62,16 @@ click) makes the direction you face the game camera's again.
 
 For now:
 
-- You see the game's own field of view (about 72 x 45 degrees) in front of
-  you. Around it the view is black, and it follows your head.
+- You see about 99 x 94 degrees (`vr_fov_scale` / `_y`). Past that the view
+  is black, and that edge follows your head. Raise `render_scale` if the
+  picture looks pixelated (it costs GPU time).
 - Between game frames the headset turns the last picture with your head, so
   head turns stay smooth at 30 fps.
-- The game only draws what its camera sees. Things outside its view are
-  missing when you look far to the side.
-- The HUD is drawn into the picture, so it stays in front of your eyes and
-  looks far away.
+- The game's culling is widened (`vr_cull_scale`), so what you look at is
+  drawn.
+- Names, the lock-on reticle and location labels stay on what they label.
+  The HUD (HP, the palette, menus) stays in front of the game camera, about
+  7 m away: in front of you until you turn the camera.
 - The engine menu stays on a screen in front of you.
 
 ## Controls

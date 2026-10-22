@@ -5,7 +5,7 @@ this file at the end of every working session: what changed, what was checked,
 what is next. The plan itself is [VR_PLAN.md](VR_PLAN.md); user-facing docs are
 [VR.md](VR.md); reverse-engineering results go in [ADDRESS_MAP.md](ADDRESS_MAP.md).
 
-_Last updated: 2026-10-22 (P3 head tracking works in the headset; next: a wider view and the HUD)._
+_Last updated: 2026-10-22 (P3: wider view, wider cull, HUD pass seen from the head; checked in the headset)._
 
 ## Handoff: start here (2026-10-22)
 
@@ -61,12 +61,28 @@ down when found).
   character names stay at their place in the world (today they are in the
   HUD pass, flat).
 
+**The wider view (2026-10-22, third part of the session): in the headset.**
+Details are in VR_PLAN.md "A wider view, the cull and the HUD", and the cull
+in ADDRESS_MAP.md.
+- **Run 1** (1.6x across and up, cull 8x): only wider across; the user saw
+  no gaps from the cull. HUD, reticle, location names and technique effects
+  were still eye-locked.
+- **Run 2** (`vr_fov_scale_y=2.6`, and the HUD pass seen from the eyes), user:
+  - the border is almost gone (some is left), but the picture is quite
+    pixelated;
+  - names, labels and the reticle are correct; technique effects stay in
+    the world;
+  - the HUD is mostly correct, but the start menu, the mission menu and
+    the map in a mission "stay but angle changes when head move".
+- **Log** (`testwork/p3/vr_wide2.log`): 30 fps (29.9 average over 4 min),
+  game thread 45-67% idle, 7697 pictures shared on the GPU. At 60 fps (run
+  1) about 49 fps average: "not constant 60, but not bad".
+
 **Next (in order):**
-1. **A wider view:** a wider PROJ for the eyes (the eye FOV, or a setting)
-   and the game's frustum cull found and widened, or what's culled shows as
-   gaps. See VR_PLAN.md "P3 approach".
-2. **The HUD pass on its own body-locked layer**, and world-space labels
-   drawn at their depth.
+1. **The big HUD menus:** make them comfortable (see the options in the
+   session: smaller or nearer, or turned to face the head).
+2. **Sharpness:** try `render_scale=4`; the real fix is eye pictures taller
+   than 480:272 (the vertical scale stretches pixels).
 3. Engine-menu items for `vr_stereo` and `vr_world_scale` (the menu has 31
    items and a 32-bit hidden mask: widen it first, see Gotchas). The world
    scale 10 units/m is a guess the user hasn't judged yet.
@@ -84,7 +100,7 @@ unless the user asks.
 | P0 RE tooling | **Done, run in town and field:** the GE gets identity view matrices (camera folded into bones / world on the CPU). View matrix found in RAM at `0x08FA98A0`, player world position at player object +0x4B0 (2 reports each; writer not yet watched) |
 | P1 PCVR theater | **Done, checked in the headset** by the user (2026-10-22): screen size, sharpness, colours, recenter and the button mapping in VR.md all right. Nothing to fix |
 | P2 stereo third person | **Stereo window done and checked in the PS VR2 (2026-10-22):** each GE draw replayed per eye, both pictures on one world-locked screen, HUD at screen depth. User: "looks pretty good", "3D looks right and it's steadier". 3x at 60 fps in town: 59.7 fps average (min 55.9). Still open for P2: world-scale tuning, wider culling, menu items, cutscene handling |
-| P3 head-rate decoupling | **Head tracking works in the PS VR2 (2026-10-22):** each eye drawn from the head at the GE (`psp_gpu_stereo.eye_views`, one pose per frame by tag), a projection layer at that pose with the game's FOV, the horizon levelled. User: the world stays still, leaning and recenter work; 30 fps steady. Still open: a view wider than the game's FOV (the border), wider culling, the HUD on a body-locked layer, world-space labels at depth, the FramePacket replay at headset rate |
+| P3 head-rate decoupling | **Head tracking works in the PS VR2 (2026-10-22):** each eye drawn from the head at the GE (`psp_gpu_stereo.eye_views`, one pose per frame by tag), a projection layer at that pose with the game's FOV, the horizon levelled. User: the world stays still, leaning and recenter work; 30 fps steady. Since then: a view of about 99 x 94° (border almost gone, but pixelated), the game's cull widened 8x (hook on `0x08D7D63C`), and the HUD pass seen from the head (labels, reticle and effects stay in the world; the HUD stays in front of the game camera). Still open: the big HUD menus seen at an angle, sharpness, the FramePacket replay at headset rate |
 | P4 to P8 | Not started |
 
 ## Branches and PR

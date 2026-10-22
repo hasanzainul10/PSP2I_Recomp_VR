@@ -168,12 +168,36 @@ about 60 units behind and above the target. Roll +0x114 = 0. +0x118 = 0.6388,
 | `0x08AFD5C0` | **Camera_SetTarget(cam, vec3*)**: +0x108..+0x110, +0x130 \|= 1 | seen |
 | `0x08AFDEC8`, `0x08AFDF30` | GetEye / GetTarget of a slot (defaults when the slot has no camera; the target default is at `0x08E41020`) | seen |
 
+### The frustum cull (decoded 2026-10-22; hooked for VR)
+
+Found from the generated code: the functions that read the current
+projection `0x08FA97A0` (lui/offset scan of `port/gen/recomp_funcs.c`).
+
+| Address | What | Status |
+|---|---|---|
+| `0x08D7D63C` | **Build the cull planes**: from the projection's x and y scales (`0x08FA97A0` floats 0 and 5) and the viewport/scissor values at `0x08FA97E0` / `0x08FA9818`, writes four normalised view-space side planes (pairs of floats) to `0x08FA9760`..`0x08FA977F`. An orthographic projection (`0x08FA9830` == 1) takes a second path. Called only by SetProjection `0x08D7DA78` and the viewport setter `0x08D7D868`. **Hooked** (host/main.c `hook_frustum_planes`): with VR head tracking it runs with those two scales divided by `vr_cull_scale`, then the projection is put back | decoded, hooked; headset: no gaps noticed at 8x |
+| `0x08FA9760` | The four side planes (view space), 8 floats | decoded |
+| `0x08FA9818` | Near/far (and viewport) values the tests use | seen |
+| `0x08FA9830` | 1 = the current projection is orthographic | decoded |
+| `0x08D7CAEC` | Box (centre, axes, half sizes) against the planes: 16 = outside, 2 = inside, else crossing flags. Its neighbours `0x08D7C934`, `0x08D7CD88`, `0x08D7CE6C`, `0x08D7CF90` use the same planes (other shapes, not decoded) | decoded |
+| `0x08D7DCE4` | From an integer angle: the floats at camera +0x118 / +0x11C (likely sin / cos of the FOV angle), called by the projection build `0x08AFCF3C` | seen |
+
+### The HUD pass (GE dump, town, 2026-10-22)
+
+After the 3D scene (into `0x0CC000`) and the orthographic bloom passes, the
+game clears `0x0CC000` again (depth only, a 2-vertex through-mode clear) and
+draws the HUD there: 176 draws, all flat perspective sheets (every vertex at
+clip z −1, w a fixed 64-86). The labels (names, the reticle, location names)
+are drawn the same way, already projected for the game camera on the CPU.
+Last, one through-mode draw copies `0x0CC000` to the display buffer
+`0x000000`.
+
 ## Needed for VR (todo)
 
 | What | Phase | How to find it |
 |---|---|---|
 | The orbit maths (yaw, pitch, distance) in `0x08AFA8E0` / `0x08AFA714` | P3 / P4 | The apply point `0x08AFA598` is found (above); decode its callers, or hook `0x08AFA598` and leave them alone |
-| Frustum / LOD culling (objects pop at the headset's wider FOV) | P2 | Objects vanishing at the screen edges; the cull test reads the camera FOV or planes |
+| LOD / map-sector culling, if any (the frustum cull is found, above) | P3 | Gaps or popping far to the side with `vr_cull_scale` high |
 | Bloom / blur passes (signature to skip or redo per eye) | P2 | Redone per eye without a signature: P2 replays every draw per eye, and a render target sampled as a texture is sampled in the same eye's copy (d3d11.c `d3d_draw_eye`). A signature is still needed to switch bloom off |
 | Local player yaw | P4 | Position found (player +0x4B0, above). Yaw: an angle or rotation near +0x4B0 that follows turning |
 | Player skeleton: bone indices for head, neck, spine, hands, feet | P4 / P6 | Skinned draws of the local player: bone palette per batch; hide one bone's triangles at a time |

@@ -76,7 +76,8 @@ static char g_dir[600];
 static SRWLOCK  g_cfg_lock = SRWLOCK_INIT;
 static vr_config g_cfg = { VR_DISTANCE_DEFAULT, VR_WIDTH_DEFAULT, VR_SCALE_DEFAULT, 0 };
 static float     g_ipd = VR_IPD_DEFAULT;    /* under g_cfg_lock */
-static float     g_tan_fov = 0.7311f;       /* the game's horizontal half-FOV tangent (fovy 45, 480:272) */
+static float     g_tan_fov = 0.7311f;       /* the pictures' horizontal half-FOV tangent (the game's: fovy 45, 480:272) */
+static float     g_tan_fov_y;               /* ... and vertical; 0 = from the picture's shape */
 
 static SRWLOCK  g_frame_lock = SRWLOCK_INIT;
 /* The latest picture (0xAARRGGBB): 480x272, or k times that when the game
@@ -871,7 +872,8 @@ static void frame(void) {
              * the game's FOV; the compositor turns them with the head until
              * the next game frame. Around the game's FOV the view is black. */
             AcquireSRWLockShared(&g_cfg_lock);
-            const float ax = atanf(g_tan_fov), ay = atanf(g_tan_fov * (float)GAME_H / (float)GAME_W);
+            const float ax = atanf(g_tan_fov),
+                        ay = atanf(g_tan_fov_y > 0 ? g_tan_fov_y : g_tan_fov * (float)GAME_H / (float)GAME_W);
             ReleaseSRWLockShared(&g_cfg_lock);
             AcquireSRWLockShared(&g_head_lock);
             const XrVector3f off[2] = { g_eye_off[0], g_eye_off[1] };
@@ -918,8 +920,11 @@ static void frame(void) {
         const int ovl = g_ovl_on;
         ReleaseSRWLockShared(&g_frame_lock);
         if (nl && ovl && g_ochain_filled) {              /* the overlay on top, both eyes, at screen depth */
+            /* With head tracking the pictures' FOV may be wider than the
+             * game's (vr_fov_scale): the menu is then on the theater screen's
+             * width instead. */
             AcquireSRWLockShared(&g_cfg_lock);
-            const float w = g_cfg.stereo ? 2.0f * g_cfg.distance_m * g_tan_fov : g_cfg.width_m;
+            const float w = g_cfg.stereo && !tracked ? 2.0f * g_cfg.distance_m * g_tan_fov : g_cfg.width_m;
             ReleaseSRWLockShared(&g_cfg_lock);
             XrCompositionLayerQuad *q = &quad[2];
             q->layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
@@ -1045,7 +1050,8 @@ void vr_submit_frame(const uint32_t *argb, int w, int h) {
     InterlockedIncrement(&g_frame_seq);
 }
 
-void vr_submit_stereo(const uint32_t *left, const uint32_t *right, int w, int h, float tan_half_fov_x, uint32_t head) {
+void vr_submit_stereo(const uint32_t *left, const uint32_t *right, int w, int h, float tan_half_fov_x,
+                      float tan_half_fov_y, uint32_t head) {
     if (!g_thread || w < GAME_W || w % GAME_W || h * GAME_W != w * GAME_H || w > GAME_W * 4) return;
     AcquireSRWLockExclusive(&g_frame_lock);
     memcpy(g_frame, left, (size_t)w * h * 4);
@@ -1058,12 +1064,13 @@ void vr_submit_stereo(const uint32_t *left, const uint32_t *right, int w, int h,
     if (tan_half_fov_x > 0.1f && tan_half_fov_x < 10.0f) {
         AcquireSRWLockExclusive(&g_cfg_lock);
         g_tan_fov = tan_half_fov_x;
+        g_tan_fov_y = tan_half_fov_y > 0.1f && tan_half_fov_y < 10.0f ? tan_half_fov_y : 0.0f;
         ReleaseSRWLockExclusive(&g_cfg_lock);
     }
     InterlockedIncrement(&g_frame_seq);
 }
 
-void vr_submit_stereo_shared(void *handle, int w, int h, float tan_half_fov_x, uint32_t head) {
+void vr_submit_stereo_shared(void *handle, int w, int h, float tan_half_fov_x, float tan_half_fov_y, uint32_t head) {
     if (!g_thread || !handle || g_share_failed) return;
     AcquireSRWLockExclusive(&g_frame_lock);
     g_frame_shared = handle;
@@ -1074,6 +1081,7 @@ void vr_submit_stereo_shared(void *handle, int w, int h, float tan_half_fov_x, u
     if (tan_half_fov_x > 0.1f && tan_half_fov_x < 10.0f) {
         AcquireSRWLockExclusive(&g_cfg_lock);
         g_tan_fov = tan_half_fov_x;
+        g_tan_fov_y = tan_half_fov_y > 0.1f && tan_half_fov_y < 10.0f ? tan_half_fov_y : 0.0f;
         ReleaseSRWLockExclusive(&g_cfg_lock);
     }
     InterlockedIncrement(&g_frame_seq);

@@ -199,11 +199,36 @@ SetViewMatrix were the other options):
   `0x08FA98A0`) times the head rotation, at the head's position plus the eye
   offset, times the world scale.
 
-The cost of this choice: culling stays the game's. Anything outside the game
-camera's frustum is missing when the head turns far, so the frustum cull has
-to be found and widened (it was already needed for P2). The projection layer
-uses the game's own FOV for now. A wider FOV means a wider PROJ for the eyes,
-which also needs that cull.
+The cost of this choice: culling stays the game's, so it has to be widened
+separately (below).
+
+**A wider view, the cull and the HUD (2026-10-22, in the headset):**
+- **Wider eyes:** `fov_scale` / `fov_scale_y` divide the eyes' clip x / y
+  (`S · PROJ · E · PROJ⁻¹`). The layer's FOV is the game's times the same
+  scales (main.c `eye_tan`, `eye_tan_y`). Defaults 1.6 / 2.6 (about
+  99 x 94°). The picture keeps 480:272, so the vertical scale makes its
+  pixels taller. User: the border is almost gone, but the picture is quite
+  pixelated.
+- **The cull:** the game's frustum planes are built by `0x08D7D63C` from the
+  projection (ADDRESS_MAP.md "The frustum cull"). A hook runs it with the
+  projection's x/y scales divided by `vr_cull_scale` (default 8) and puts
+  them back, so only the cull planes widen. User: no gaps noticed. Cost: town
+  stayed at 30 fps with the game thread 40-50% idle.
+- **The HUD pass seen from the eyes** (`ST_HUD` in gpu.c): PSP2i draws the HUD
+  and its world labels after the second clear of the 3D target, as flat
+  perspective sheets already projected for the game camera. With
+  `eye_views` they get the eye transform too, keeping each vertex's depth
+  value (z / w) so the depth tests and draw order stay the game's. A point
+  keeps its direction whatever its depth, so names, the reticle and location
+  labels stay on what they label (user: correct), and technique effects stay
+  in the world. The HUD widgets stay in front of the game camera (the body)
+  at their 6.5-8.6 m. Non-perspective HUD-pass draws on the 3D target are
+  shrunk to the game's view instead (`ST_SHRINK`). The final copy to the
+  display buffer, on another target, is untouched.
+- **Still odd:** big HUD-pass menus (the start menu, the mission menu, the
+  map in a mission) are flat sheets as wide as the game's view at ~7 m. When
+  the head turns they are seen at an angle (user: "they stay but angle
+  changes when head move").
 
 **P4: First person.** Head-bone camera, head hidden by bone weight, body-relative movement, lock-on in the world, the mirror.
 

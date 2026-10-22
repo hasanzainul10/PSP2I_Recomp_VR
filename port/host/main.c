@@ -867,6 +867,16 @@ static float    g_vr_world_scale = VR_WORLD_SCALE_DEFAULT;
  * FOV, instead of the window. vr_level takes the game camera's pitch and
  * roll out, so the horizon stays level with the real floor. */
 static int      g_vr_head = 1, g_vr_level = 1;
+/* vr_fov_scale=, vr_fov_scale_y=: with head tracking the eyes see that many
+ * times the game's view across and up (its FOV tangents). The picture keeps
+ * the PSP's shape, so a taller scale makes its pixels taller: the game's
+ * 480:272 at 1.6 across would be only ~67 degrees tall.
+ * vr_cull_scale=: the game's frustum cull (0x08D7D63C) is built that much
+ * wider, so what the wider view and the head turns show is drawn. */
+#define VR_FOV_SCALE_DEFAULT  1.6f
+#define VR_FOV_SCALE_Y_DEFAULT 2.6f
+#define VR_CULL_SCALE_DEFAULT 8.0f
+static float    g_vr_fov = VR_FOV_SCALE_DEFAULT, g_vr_fov_y = VR_FOV_SCALE_Y_DEFAULT, g_vr_cull = VR_CULL_SCALE_DEFAULT;
 static int      g_head_on;                  /* the eyes follow the head now */
 static int      g_fake_head;                /* PSP2I_VR_FAKE_HEAD=yaw,pitch (dev): a fixed head turn without a headset */
 static float    g_fake_yaw, g_fake_pitch;   /* degrees */
@@ -983,6 +993,28 @@ static void head_frame(psp_gpu_stereo *s) {
     s->tag = live ? h.id : 0;
 }
 
+/* The game builds its cull planes (view space, from the projection) in
+ * 0x08D7D63C, called by SetProjection and the viewport setter
+ * (ADDRESS_MAP.md). With head tracking it runs with the projection's x and y
+ * scales divided by vr_cull_scale, then the projection is put back: the
+ * planes are wider and nothing else changes. Orthographic projections are
+ * left alone. */
+#define FN_FRUSTUM_PLANES 0x08D7D63Cu
+#define PSP2I_PROJ_MATRIX 0x08FA97A0u
+#define PSP2I_PROJ_ORTHO  0x08FA9830u   /* 1 = the current projection is orthographic */
+static uint64_t n_cull_wide;
+static void hook_frustum_planes(void (*original)(void)) {
+    const float k = g_head_on ? g_vr_cull : 1.0f;
+    if (k <= 1.0f || psp_read32(PSP2I_PROJ_ORTHO) == 1) { original(); return; }
+    const float p0 = psp_read_f32(PSP2I_PROJ_MATRIX), p5 = psp_read_f32(PSP2I_PROJ_MATRIX + 20);
+    psp_write_f32(PSP2I_PROJ_MATRIX, p0 / k);
+    psp_write_f32(PSP2I_PROJ_MATRIX + 20, p5 / k);
+    original();
+    psp_write_f32(PSP2I_PROJ_MATRIX, p0);
+    psp_write_f32(PSP2I_PROJ_MATRIX + 20, p5);
+    if (n_cull_wide++ == 0) fprintf(stderr, "vr: cull planes %.1fx wider than the game's\n", (double)k);
+}
+
 /* Once per vblank: the eyes are drawn while the headset shows the game (or
  * --stereo), with Direct3D 11 only (the backend with eye copies). */
 static void stereo_update(void) {
@@ -1006,15 +1038,28 @@ static void stereo_update(void) {
         st.mono_is_left = 1;                                      /* two pictures, not three: the window shows the left eye */
         st.eye_views = head;                                      /* head tracking: head_frame sets each eye per frame */
         st.on_frame = head ? head_frame : NULL;
+        st.fov_scale = head ? g_vr_fov : 1.0f;
+        st.fov_scale_y = head ? g_vr_fov_y : 1.0f;
     }
     if (on != g_stereo_on) fprintf(stderr, "vr: stereo %s\n", on ? "on (each eye drawn at the GE)" : "off");
     if (head != g_head_on)
-        fprintf(stderr, "vr: head tracking %s\n", head ? (g_vr_level ? "on (horizon levelled)" : "on") : "off");
+        fprintf(stderr, "vr: head tracking %s (view %.1fx / %.1fx the game's across / up, cull %.1fx)\n",
+                head ? (g_vr_level ? "on, horizon levelled" : "on") : "off", (double)g_vr_fov, (double)g_vr_fov_y,
+                (double)g_vr_cull);
     g_head_on = head;
     psp_gpu_set_stereo(&st);
     d3d11_set_mono_left(st.mono_is_left);
     d3d11_eye_share(on && g_vr_live && !vr_share_failed());
     g_stereo_on = on;
+}
+
+/* The eye pictures' half-FOV tangents: the game's, times vr_fov_scale(_y)
+ * for pictures drawn from the head (tag != 0); vertical 0 = from the shape. */
+static float eye_tan(uint32_t tag) {
+    return psp_gpu_stereo_tan_half_fov() * (tag && g_vr_fov > 1.0f ? g_vr_fov : 1.0f);
+}
+static float eye_tan_y(uint32_t tag) {
+    return tag ? psp_gpu_stereo_tan_half_fov() * (float)SCREEN_H / (float)SCREEN_W * (g_vr_fov_y > 1.0f ? g_vr_fov_y : 1.0f) : 0.0f;
 }
 
 /* The eye pictures with the overlay (menus, FPS) on top, as compose() does
@@ -1111,6 +1156,18 @@ static int display_load(void) {
         else if (!strncmp(line, "vr_stereo=", 10))     g_vr_stereo = strncmp(line + 10, "off", 3) != 0;
         else if (!strncmp(line, "vr_head=", 8))        g_vr_head = strncmp(line + 8, "off", 3) != 0;
         else if (!strncmp(line, "vr_level=", 9))       g_vr_level = strncmp(line + 9, "off", 3) != 0;
+        else if (!strncmp(line, "vr_fov_scale=", 13)) {
+            const float k = (float)atof(line + 13);
+            if (k >= 1.0f && k <= 3.0f) g_vr_fov = k;
+        }
+        else if (!strncmp(line, "vr_fov_scale_y=", 15)) {
+            const float k = (float)atof(line + 15);
+            if (k >= 1.0f && k <= 4.0f) g_vr_fov_y = k;
+        }
+        else if (!strncmp(line, "vr_cull_scale=", 14)) {
+            const float k = (float)atof(line + 14);
+            if (k >= 1.0f && k <= 50.0f) g_vr_cull = k;
+        }
         else if (!strncmp(line, "vr_world_scale=", 15)) {
             const float k = (float)atof(line + 15);
             if (k >= 1.0f && k <= 100.0f) g_vr_world_scale = k;
@@ -1171,6 +1228,10 @@ static void display_save(int res) {
     fprintf(f, "; VR head tracking (with stereo): on = you see the game from your head (at the game's field of view), off = the 3D window;"
                " level: on = the horizon stays level (the game camera's tilt taken out)\n");
     fprintf(f, "vr_head=%s\nvr_level=%s\n", g_vr_head ? "on" : "off", g_vr_level ? "on" : "off");
+    fprintf(f, "; with head tracking: fov scale = the view as that many times the game's across (1.0..3.0) and up (_y, 1.0..4.0;"
+               " wider = less sharp); cull scale = the game's object culling that much wider (1 = the game's)\n");
+    fprintf(f, "vr_fov_scale=%.1f\nvr_fov_scale_y=%.1f\nvr_cull_scale=%.1f\n", (double)g_vr_fov, (double)g_vr_fov_y,
+            (double)g_vr_cull);
     fprintf(f, "; PPSSPP texture packs: folders holding a textures.ini, ';'-separated, later ones win (relative to the exe); empty = off\n");
     fprintf(f, "texture_packs=%s\n", g_texpacks);
     fclose(f);
@@ -1655,8 +1716,8 @@ static void on_vblank(void) {
              * every vblank while the overlay (engine menu) is up so it stays
              * live. On the GPU when it can be (no overlay). */
             if (g_vr_live && g_eye_shared) {
-                vr_submit_stereo_shared(g_eye_shared, g_eye_shared_w, g_eye_shared_h, psp_gpu_stereo_tan_half_fov(),
-                                        g_eye_shared_tag);
+                vr_submit_stereo_shared(g_eye_shared, g_eye_shared_w, g_eye_shared_h, eye_tan(g_eye_shared_tag),
+                                        eye_tan_y(g_eye_shared_tag), g_eye_shared_tag);
                 g_eye_shared_vb = vb;
             }
             if (g_vr_live && g_stereo_on && vb - g_eye_shared_vb < 8) {
@@ -1676,8 +1737,8 @@ static void on_vblank(void) {
                 if (g_eye_new || g_overlay_up) {
                     compose_eyes();
                     if (g_eye_rgba[0] && g_eye_rgba[1])
-                        vr_submit_stereo(g_eye_rgba[0], g_eye_rgba[1], g_eye_w, g_eye_h, psp_gpu_stereo_tan_half_fov(),
-                                         g_eye_px_tag);
+                        vr_submit_stereo(g_eye_rgba[0], g_eye_rgba[1], g_eye_w, g_eye_h, eye_tan(g_eye_px_tag),
+                                         eye_tan_y(g_eye_px_tag), g_eye_px_tag);
                 }
             } else if (g_vr_live && have_frame && !(g_stereo_on && vb - g_eye_shared_vb < 8)) {
                 /* the same picture, in the headset (not between shared stereo frames) */
@@ -2795,6 +2856,7 @@ int main(int argc, char **argv) {
     g_menu.vr_on = g_vr_on;
     g_menu.vr_dist_dm = g_vr_dist_dm;
     g_menu.vr_width_dm = g_vr_width_dm;
+    psp_hook_set(FN_FRUSTUM_PLANES, hook_frustum_planes);   /* a no-op unless head tracking is on */
 #ifndef PSP2I_PROD
     {   /* PSP2I_VR_FAKE_HEAD=yaw,pitch (degrees; with --stereo): the eyes drawn from a turned head, no headset */
         const char *e = getenv("PSP2I_VR_FAKE_HEAD");
