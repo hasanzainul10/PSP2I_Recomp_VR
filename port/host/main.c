@@ -1329,8 +1329,20 @@ static void hook_cull_test(void (*original)(void)) {
  * field camera is the one with the field's projection (x scale 1.15..2.5). */
 static uint64_t n_fp_cam;
 #define FN_APPLY_CAMERA 0x08AFD474u
+/* The camera left widened by the last apply (its projection x / y as
+ * written, and as they were): the game reads the camera object's projection
+ * during the frame too, so it stays widened until the next apply, which puts
+ * the original back first. */
+static uint32_t g_wide_cam;
+static float    g_wide_w0, g_wide_w5, g_wide_o0, g_wide_o5;
+
 static void hook_apply_camera(void (*original)(void)) {
     const uint32_t cam = psp_cpu.r[4], pl = gamelog_local_player();
+    if (cam && cam == g_wide_cam && psp_read_f32(cam + 0x90u) == g_wide_w0 && psp_read_f32(cam + 0xA4u) == g_wide_w5) {
+        psp_write_f32(cam + 0x90u, g_wide_o0);           /* ours from the last frame: the original first */
+        psp_write_f32(cam + 0xA4u, g_wide_o5);
+    }
+    if (cam == g_wide_cam) g_wide_cam = 0;
     const float px = cam ? psp_read_f32(cam + 0x90u) : 0.0f;
     const int field = px > 1.15f && px < 2.5f;      /* other cameras (3 applies a frame) leave g_fp_cam alone */
     if (!g_head_on || !g_vr_first) g_fp_cam = 0;
@@ -1377,19 +1389,21 @@ static void hook_apply_camera(void (*original)(void)) {
         }
     }
     if (!g_fp_cam) { original(); return; }
-    /* Its projection wider for this apply (SetProjection copies it to the
-     * global and builds the cull planes from it), the camera object's own
-     * put back after, so it isn't widened again next frame. */
+    /* Its projection wider (SetProjection copies it to the global and builds
+     * the cull planes from it), and the camera object's own left widened for
+     * the frame: put back for SetProjection only, the edges of the eyes' view
+     * were still culled (2026-10-23 capture in the ship: looking up, no floor). */
     const float fx = g_vr_fov > 1.0f ? g_vr_fov : 1.0f, fy = g_vr_fov_y > 1.0f ? g_vr_fov_y : 1.0f;
     g_fp_kx = fx * VR_FP_VIEW_MARGIN;
     g_fp_ky = fy * VR_FP_VIEW_MARGIN;
-    const float p0 = psp_read_f32(cam + 0x90u), p5 = psp_read_f32(cam + 0x90u + 20u);
+    const float p0 = psp_read_f32(cam + 0x90u), p5 = psp_read_f32(cam + 0xA4u);
     g_fp_p0 = fabsf(p0); g_fp_p5 = fabsf(p5);
-    psp_write_f32(cam + 0x90u, p0 / g_fp_kx);
-    psp_write_f32(cam + 0x90u + 20u, p5 / g_fp_ky);
+    g_wide_o0 = p0; g_wide_o5 = p5;
+    g_wide_w0 = p0 / g_fp_kx; g_wide_w5 = p5 / g_fp_ky;
+    psp_write_f32(cam + 0x90u, g_wide_w0);
+    psp_write_f32(cam + 0xA4u, g_wide_w5);
+    g_wide_cam = cam;
     original();
-    psp_write_f32(cam + 0x90u, p0);
-    psp_write_f32(cam + 0x90u + 20u, p5);
 }
 
 #ifndef PSP2I_PROD
