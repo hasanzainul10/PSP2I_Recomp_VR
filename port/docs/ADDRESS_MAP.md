@@ -104,16 +104,47 @@ Decoded from the generated code (`port/gen/recomp_funcs.c`):
 | camera +0xF4, +0xF8 | Two floats, stored by `0x08D7D8E0` at `0x08FA9784`/`0x08FA9780` and `0x08FA981C`/`0x08FA9818` (likely near/far or depth range) | seen |
 | `0x08FA97A0` | Current projection matrix | seen |
 
-Next: watch camera +0x10's writer (the camera update: eye, target and up, or
-yaw/pitch/distance), which is what VR head tracking and P3's first person
-replace.
+### The camera object and its look-at update (write watch, 2026-10-22)
+
+`PSP2I_VR_PROBE_WATCH=camera+0x40` (F8 finds the active camera through the slot
+table). In a field the active camera was index 0, object **`0x0942FE60`**
+(heap; the address may change by area; the `0x0942FE70` hit in the first
+search was its +0x10). All 32 writes to camera +0x40 had one stack:
+
+`0x08AFDC28` → `0x08AFDBD0` → **`0x08AFD3FC`** → **`0x08AFCE90`** → **`0x08D8969C`** → `0x08D89AF0` / `0x08D7AED4`
+
+(from `0x08AFCE6C`, the same frame path as the SetViewMatrix calls.)
+
+| Address / field | What | Status |
+|---|---|---|
+| `0x08AFD3FC` | **UpdateCamera(cam)**: if cam+0x130 & 1, rebuild the view (`0x08AFCE90`); if & 2, the projection (`0x08AFCF3C`(cam+0x90, cam+0xE8, cam+0x118, +0x11C, +0x120)); then clear +0x130 | seen (decoded) |
+| `0x08AFCE90` | Build the view: LookAt(cam+0x10, cam+0xE8) (`0x08D8969C`), inverse into cam+0x50 (`0x08D7AE5C`), then two direction vectors into cam+0xD0 and cam+0xDC | seen (decoded) |
+| `0x08D8969C` | **LookAt(out, p)**: direction = p+0x14 − p+0x20 (eye − target), normalised; up from it; roll = −(p+0x2C) about Z (`0x08D7AA98`); result multiplied into `out` | seen (decoded) |
+| camera +0x10 | View matrix (world to eye), 4x4 | seen (dump matches) |
+| camera +0x50 | Its inverse (the camera's world transform; +0x80 = eye position) | seen (dump: +0x80 = eye) |
+| camera +0x90 | Projection 4x4 (fovy 45°, aspect 1.765, the same as the GE PROJ) | seen (dump) |
+| camera +0xD0, +0xDC | Direction vectors derived from the view (likely forward and up) | seen |
+| camera +0xE8 | Start of the look-at parameter block `p` | seen (decoded) |
+| camera +0xF0, +0xF4, +0xF8 | Aspect 1.7647, near 1.0, far 30000 (from the dump; +0xF4/+0xF8 are the pair `0x08D7D8E0` gets) | seen |
+| **camera +0xFC** | **Eye position** (x, y, z), world (dump: -58.51, matching +0x80) | seen |
+| **camera +0x108** | **Target (look-at point)**, world | seen (decoded; value not dumped yet) |
+| camera +0x114 | Roll angle | seen (decoded) |
+| camera +0x130 | Dirty flags: 1 = view, 2 = projection | seen (decoded) |
+
+So the game's camera is eye + target + roll. For VR: P2's stereo can offset the
+eye per eye after LookAt (or hook SetViewMatrix); P3/P4 head tracking can
+either write eye/target and set +0x130 |= 1, or replace the LookAt result in
+`0x08AFCE90`.
+
+Next: who writes camera +0xFC / +0x108 (the orbit controller that follows the
+player and the right stick): `PSP2I_VR_PROBE_WATCH=camera+0xFC`. The F8 dump
+now covers up to +0x140.
 
 ## Needed for VR (todo)
 
 | What | Phase | How to find it |
 |---|---|---|
-| Camera object: eye, target, up, FOV | P2 | Layout started (+0x10 view, +0x90 proj, above). The eye/target or orbit parameters: the writer of camera +0x10 (`PSP2I_VR_PROBE_WATCH`) |
-| Code that builds camera +0x10 from the orbit camera (to replace the camera, not just the matrix) | P2 / P3 | Write watch on camera +0x10 + 0x30; SetViewMatrix itself is found (`0x08D81D84`) |
+| The orbit controller that writes camera +0xFC (eye) / +0x108 (target) | P3 / P4 | `PSP2I_VR_PROBE_WATCH=camera+0xFC`; the camera object and LookAt are found (above) |
 | Frustum / LOD culling (objects pop at the headset's wider FOV) | P2 | Objects vanishing at the screen edges; the cull test reads the camera FOV or planes |
 | Bloom / blur passes (signature to skip or redo per eye) | P2 | F12 dump: through-mode full-screen draws sampling a render target |
 | Local player yaw | P4 | Position found (player +0x4B0, above). Yaw: an angle or rotation near +0x4B0 that follows turning |

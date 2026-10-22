@@ -251,6 +251,31 @@ static void find_camera(FILE *f, const float player_eye[3]) {
                 (double)c[i].fwd[0], (double)c[i].fwd[1], (double)c[i].fwd[2], (double)c[i].t[0], (double)c[i].t[1], (double)c[i].t[2]);
 }
 
+/* The active camera object, as 0x08AFDC60 picks it (ADDRESS_MAP.md "Who sets
+ * the view"): index at 0x08ED9920 (-1 = none), slot pointers from 0x08ED9924,
+ * slot+4 = the camera. 0 when there's none. */
+static uint32_t active_camera(void) {
+    const uint32_t idx = psp_read32(0x08ED9920u);
+    if (idx >= 64) return 0;
+    const uint32_t slot = psp_read32(0x08ED9924u + idx * 4);
+    if (slot < USER_LO || slot >= USER_HI) return 0;
+    const uint32_t cam = psp_read32(slot + 4);
+    return cam >= USER_LO && cam + 0x140 <= USER_HI ? cam : 0;
+}
+
+/* The camera object's first 0x140 bytes as floats, 4 per line (to the
+ * look-at block: eye +0xFC, target +0x108, flags +0x130). */
+static void dump_camera(FILE *f) {
+    const uint32_t cam = active_camera();
+    if (!cam) { fprintf(f, "active camera: none\n"); return; }
+    fprintf(f, "active camera object 0x%08X (index %u):\n", cam, psp_read32(0x08ED9920u));
+    for (uint32_t o = 0; o < 0x140; o += 16) {
+        fprintf(f, "  +0x%02X:", o);
+        for (uint32_t k = 0; k < 16; k += 4) fprintf(f, " %12.4f", (double)psp_read_f32(cam + o + k));
+        fprintf(f, "\n");
+    }
+}
+
 /* ---- the report ----------------------------------------------------------------- */
 
 static void print_m43(FILE *f, const char *name, const float *m) {
@@ -331,6 +356,7 @@ static void report(void) {
         }
     }
     if (n > 0) find_camera(f, r[0].pos);
+    dump_camera(f);
     fprintf(f, "\n");
     fclose(f);
     fprintf(stderr, "vr-probe: report written to %s\n", g_path);
@@ -349,10 +375,17 @@ void vr_probe_request(void) {
     g_report_due = 1;
     /* PSP2I_VR_PROBE_WATCH=ADDR: (re)arm the write watch on F8, so it starts
      * where the scene is (the first 32 writes get a stack in game_log.txt)
-     * rather than at boot, when clears use up the hits. */
+     * rather than at boot, when clears use up the hits. "camera+OFF" watches
+     * the active camera object (it lives on the heap, so its address is only
+     * known in the scene). */
     const char *w = getenv("PSP2I_VR_PROBE_WATCH");
     if (w && *w) {
-        const uint32_t a = (uint32_t)strtoul(w, NULL, 0);
+        uint32_t a;
+        if (!strncmp(w, "camera", 6)) {
+            const uint32_t cam = active_camera();
+            if (!cam) { fprintf(stderr, "vr-probe: no active camera, watch not armed\n"); return; }
+            a = cam + (w[6] == '+' ? (uint32_t)strtoul(w + 7, NULL, 0) : 0u);
+        } else a = (uint32_t)strtoul(w, NULL, 0);
         psp_mem_watch_write(a);
         fprintf(stderr, "vr-probe: write watch armed on 0x%08X\n", a);
     }

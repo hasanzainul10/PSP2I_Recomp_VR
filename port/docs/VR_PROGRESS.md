@@ -42,8 +42,9 @@ _Last updated: 2026-10-22._
   that map a float triple of the local player object (`gamelog_local_player`)
   to the player model's eye-space position.
   `PSP2I_VR_PROBE_EVERY=N` logs the camera to the console.
-  `PSP2I_VR_PROBE_WATCH=ADDR` arms the write watch on ADDR at each F8 (the
-  first 32 writes with their game stacks, in the console and `game_log.txt`).
+  `PSP2I_VR_PROBE_WATCH=ADDR` (or `camera+OFF`, the active camera object)
+  arms the write watch at each F8 (the first 32 writes with their game stacks, in the console and
+  `game_log.txt`). F8 also dumps the active camera object.
 - `port/tests/vr_test.c`: the theater with a test picture, without the game.
 - Menu tests: `test_menu` (445 checks), including `test_vr_page`.
 
@@ -71,13 +72,14 @@ Build and run steps: the `psp2i-build-run` skill (`.claude/skills/`).
 
 ## Next steps
 
-1. **The camera update:** SetViewMatrix (`0x08D81D84`) and ApplyCamera
-   (`0x08AFD474`, camera object: +0x10 view, +0x90 projection) are found
-   (ADDRESS_MAP.md "Who sets the view"). Next, find who writes camera +0x10:
-   F8 in a field with `PSP2I_VR_PROBE_WATCH=<camera+0x40>`. Find the camera
-   object from the slot table: `0x08ED9924[*0x08ED9920] + 4`, or the heap copy of
-   the view matrix in the F8 camera search. That gives the orbit camera's
-   inputs (eye/target or yaw/pitch/distance). Also: which camera the
+1. **The orbit controller:** the camera is found down to its inputs
+   (ADDRESS_MAP.md "The camera object and its look-at update"). UpdateCamera
+   `0x08AFD3FC` rebuilds the view by LookAt `0x08D8969C` from the **eye at
+   camera +0xFC** and the **target at +0x108** (roll +0x114, dirty flags
+   +0x130). Next, find who writes the eye/target: F8 in a field with
+   `PSP2I_VR_PROBE_WATCH=camera+0xFC` (the probe resolves `camera` through the
+   slot table `0x08ED9924[*0x08ED9920] + 4`). That's the orbit controller
+   that follows the player and the right stick. Also: which camera the
    `0x08969314` write (translation x 6.31) is.
 2. **Player yaw:** near player +0x4B0 (position), find the angle or rotation
    that follows turning (two F8 reports with a turn, or `--log-floats`).
