@@ -1033,6 +1033,11 @@ static void vr_apply(void) {
         vr_set_swap_circle_cross(g_swap_oc);
         g_vr_live = vr_start(g_exe_dir, &cfg) == 0;
     } else if (!g_vr_on && g_vr_live) {
+        /* No more eyes to the headset from this frame on: the next present
+         * came before the stereo update turned sharing off, and crashed in
+         * share_eyes once the runtime was gone (VR off in the menu, crash
+         * 2026-10-23). */
+        if (g_renderer == REN_D3D11) d3d11_eye_share(0);
         vr_stop();
         g_vr_live = 0;
         g_vr_host = 0;

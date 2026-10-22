@@ -182,8 +182,48 @@ static void set_status(int s) {
 
 /* ---- loader ----------------------------------------------------------------- */
 
+/* The modules the OpenXR runtime brings in (SteamVR's client and what it
+ * loads) are pinned: never unloaded, even when VR is turned off and the
+ * instance destroyed. A runtime that hooks the process's D3D11 left the
+ * game's next call jumping into unloaded code (VR off in the menu, crash
+ * 2026-10-23). The modules loaded before the runtime are remembered first. */
+#define MAX_MODS 1024
+static HMODULE g_mods_before[MAX_MODS];
+static DWORD   g_nmods_before;
+
+typedef BOOL (WINAPI *enum_mods_fn)(HANDLE, HMODULE *, DWORD, LPDWORD);
+static enum_mods_fn enum_mods(void) {
+    return (enum_mods_fn)(void (*)(void))GetProcAddress(GetModuleHandleA("kernel32.dll"), "K32EnumProcessModules");
+}
+
+static void mods_remember(void) {
+    const enum_mods_fn f = enum_mods();
+    DWORD bytes = 0;
+    g_nmods_before = f && f(GetCurrentProcess(), g_mods_before, sizeof g_mods_before, &bytes) ? bytes / sizeof(HMODULE) : 0;
+    if (g_nmods_before > MAX_MODS) g_nmods_before = MAX_MODS;
+}
+
+static void mods_pin_new(void) {
+    static HMODULE now[MAX_MODS];
+    const enum_mods_fn f = enum_mods();
+    DWORD bytes = 0;
+    if (!f || !g_nmods_before || !f(GetCurrentProcess(), now, sizeof now, &bytes)) return;
+    DWORD n = bytes / sizeof(HMODULE), pinned = 0;
+    if (n > MAX_MODS) n = MAX_MODS;
+    for (DWORD i = 0; i < n; i++) {
+        DWORD k = 0;
+        while (k < g_nmods_before && g_mods_before[k] != now[i]) k++;
+        HMODULE h;
+        if (k == g_nmods_before && GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                                                      (LPCSTR)now[i], &h))
+            pinned++;
+    }
+    if (pinned) fprintf(stderr, "vr: %lu runtime modules pinned (kept loaded after VR is off)\n", (unsigned long)pinned);
+}
+
 static int load_loader(void) {
     if (g_loader) return 0;
+    mods_remember();
     char path[700];
     snprintf(path, sizeof path, "%s/openxr_loader.dll", g_dir);
     g_loader = LoadLibraryA(path);
@@ -537,6 +577,7 @@ static int session_create(void) {
     ci.next = &gb;
     ci.systemId = g_sys;
     XR_CHECK(p_xrCreateSession(g_inst, &ci, &g_sess), "xrCreateSession");
+    mods_pin_new();
     XrReferenceSpaceCreateInfo rs = { XR_TYPE_REFERENCE_SPACE_CREATE_INFO };
     rs.poseInReferenceSpace.orientation.w = 1.0f;
     rs.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;

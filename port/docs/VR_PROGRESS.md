@@ -250,6 +250,14 @@ the world; the user found it overwhelming. Those were removed. Now:
   exit; the sharpening pass itself not yet seen in the headset. Not done:
   MSAA (the game samples its render targets), render_scale=4 (try first:
   1920 x ~1800 eyes), DLSS (no motion vectors; not a fit).
+- **Quality run (`vr_quality1.log`, ~15 min, 54-60 fps at 60):** the user
+  tried WORLD SIZE (20-40%, third person) and HUD DISTANCE (1-5 m) from
+  the menu: both applied. Then VR was switched off in the menu and the
+  game crashed at once: `share_eyes_body` called into unmapped code
+  (0x00007FFF...), the frame right after `vr_stop`. Fixes (built, not
+  run): VR off turns eye sharing off before `vr_stop`; the modules the
+  OpenXR runtime loads are pinned (`mods_pin_new`, after xrCreateSession)
+  so hooks it leaves can't point at unloaded code.
 - **Open:** hiding the player's own head (bone weights, or an eye-forward
   offset), body-relative movement (today the stick moves relative to the
   game camera, which trails behind), the cull behind the game camera.
