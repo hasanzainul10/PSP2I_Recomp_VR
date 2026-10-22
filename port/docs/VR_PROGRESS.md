@@ -142,10 +142,19 @@ _Last updated: 2026-10-22 (P2 stereo window)._
     idle. The session dropped to WAITING (not VISIBLE/FOCUSED) every 20-40 s
     while the user still saw 3D, and each drop turned stereo off for a
     moment. Fixed: stereo stays on until 3 s without RUNNING, and the log
-    names each session state (`vr: session state ...`) so the next run shows
-    what SteamVR reports. Fix built, **not run in the headset yet**.
-  - Next for speed: skip the mono draws while only the headset needs
-    pictures (the GPU draws everything 3 times).
+    names each session state (`vr: session state ...`). Run in the headset
+    since (below).
+  - **Two pictures instead of three (2026-10-22):** `psp_gpu_stereo.mono_is_left`
+    moves the game's own (mono) draw to the left eye's position, so
+    `draw_eye` runs for the right eye only; d3d11.c `eye_picture()` takes the
+    target itself as the left eye (`d3d11_set_mono_left`). VRAM and the
+    desktop window then hold the left eye's picture (local only; online
+    unaffected). Headset, town, 60 fps (user: "3D looks right and it's
+    steadier"): 59.7 fps average, min 55.9 over a minute, game thread 42%
+    idle; before 50-56 average with dips to 30.
+  - Session states seen with SteamVR: FOCUSED -> VISIBLE -> SYNCHRONIZED and
+    back (the dashboard / system overlay). Short dips keep stereo now; one
+    over 3 s turned it off and on again as intended.
   - Not done: the window doesn't follow the head (P3: head tracking +
     projection layer); objects nearer than the screen distance come out of
     the window and may cross its edge; world-space name labels in the HUD

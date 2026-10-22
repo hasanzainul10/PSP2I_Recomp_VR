@@ -171,6 +171,7 @@ void d3d11_set_scale(int s);
 const uint32_t *d3d11_present_hires(int *w, int *h);
 const uint32_t *d3d11_present_eye(int eye, int *w, int *h);
 void d3d11_eye_share(int on);
+void d3d11_set_mono_left(int on);
 void *d3d11_present_eye_shared(int *w, int *h);
 #endif
 #include "gl_ge.h"
@@ -909,15 +910,17 @@ static void stereo_update(void) {
     const int recent = running_vb && vb - running_vb < 180;
     const int on = g_renderer == REN_D3D11 &&
                    (g_stereo_arg || (g_vr_live && g_vr_stereo && recent));
-    psp_gpu_stereo st = { 0, 0, 0, 0 };
+    psp_gpu_stereo st = { 0, 0, 0, 0, 0 };
     if (on) {
         st.on = 1;
         st.half_ipd = 0.5f * vr_ipd() * g_vr_world_scale;
         st.converge = g_vr_dist_dm / 10.0f * g_vr_world_scale;   /* the screen's distance: no disparity there */
         st.flat_after_clear = 1;                                  /* PSP2i draws its HUD in 3D after a second clear */
+        st.mono_is_left = 1;                                      /* two pictures, not three: the window shows the left eye */
     }
     if (on != g_stereo_on) fprintf(stderr, "vr: stereo %s\n", on ? "on (each eye drawn at the GE)" : "off");
     psp_gpu_set_stereo(&st);
+    d3d11_set_mono_left(st.mono_is_left);
     d3d11_eye_share(on && g_vr_live && !vr_share_failed());
     g_stereo_on = on;
 }

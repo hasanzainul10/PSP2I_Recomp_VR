@@ -1233,6 +1233,13 @@ static struct {
 } g_last;
 static uint64_t n_eye_draws;
 
+/* Stereo with the mono draw as the left eye (psp_gpu_stereo.mono_is_left):
+ * the left eye's picture is the target itself, and only the right eye has a
+ * copy. */
+static int g_mono_left;
+void d3d11_set_mono_left(int on) { g_mono_left = on; }
+static ID3D11Texture2D *eye_picture(rt_entry *t, int e) { return e == 0 && g_mono_left ? t->tex : t->eye_tex[e]; }
+
 static int d3d_draw(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts) {
     if ((st->fb_addr & 0x0F000000u) != 0x04000000u || !st->fb_stride || nverts <= 0) return 1;
     if (trace_on()) {
@@ -1541,7 +1548,7 @@ static int share_eyes(rt_entry *t, UINT W, UINT H) {
     D3D11_BOX box = { 0, 0, 0, W, H, 1 };
     for (int e = 0; e < 2; e++)
         ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)g_share, 0, (UINT)e * W, 0, 0,
-                                                  (ID3D11Resource *)t->eye_tex[e], 0, &box);
+                                                  (ID3D11Resource *)eye_picture(t, e), 0, &box);
     IDXGIKeyedMutex_ReleaseSync(g_share_mx, 0);
     ID3D11DeviceContext_Flush(g_ctx);
     g_share_fresh = 1;
@@ -1597,7 +1604,7 @@ int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w,
         ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)g_present[k], 0, 0, 0, 0,
                                                   (ID3D11Resource *)t->tex, 0, &box);
         /* Stereo: the eye copies too, when this frame was drawn for the eyes. */
-        g_present_eyes[k] = t->eye_tex[0] && t->eye_tex[1] && t->eye_frame + 2 >= frame_no();
+        g_present_eyes[k] = eye_picture(t, 0) && eye_picture(t, 1) && t->eye_frame + 2 >= frame_no();
         g_present_stereo[k] = g_present_eyes[k];
         if (g_present_eyes[k] && g_share_on && share_eyes(t, (UINT)(w * g_scale), (UINT)(h * g_scale)))
             g_present_eyes[k] = 0;                     /* the headset has them already */
@@ -1609,7 +1616,7 @@ int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w,
                 if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &d, NULL, &g_eye_present[k][e]))) { g_present_eyes[k] = 0; break; }
             }
             ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)g_eye_present[k][e], 0, 0, 0, 0,
-                                                      (ID3D11Resource *)t->eye_tex[e], 0, &box);
+                                                      (ID3D11Resource *)eye_picture(t, e), 0, &box);
         }
         ID3D11DeviceContext_Flush(g_ctx);              /* start it now, not at the next stall */
         g_present_fmt[k] = fmt;
