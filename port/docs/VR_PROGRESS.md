@@ -5,7 +5,47 @@ this file at the end of every working session: what changed, what was checked,
 what is next. The plan itself is [VR_PLAN.md](VR_PLAN.md); user-facing docs are
 [VR.md](VR.md); reverse-engineering results go in [ADDRESS_MAP.md](ADDRESS_MAP.md).
 
-_Last updated: 2026-10-22 (P2 stereo window)._
+_Last updated: 2026-10-22 (P2 stereo window at 60 fps; handoff for a new account)._
+
+## Handoff: start here (2026-10-22)
+
+The user switches Claude accounts to save tokens. A new session should:
+
+1. Read `CLAUDE.md`, then this file (this section, "Status by phase",
+   "Next steps"), then VR_PLAN.md "P2 approach (decided 2026-10-22)".
+2. Check out `vr-theater` (main repo) and `vr-draw-observer` (psprecomp
+   submodule). Both are pushed; the working tree was clean at handoff.
+3. Build with the `psp2i-build-run` skill. Headless runs **cannot** reach town
+   (they stall in the intro movie, see Gotchas); 3D checks need a windowed
+   run (tell the user first) or the headset.
+4. To run in the headset for the user (they ask "run it for me"): from
+   `port/build/Release`,
+   `./psp2i.exe --root ../../../FinalBuild/GameData --eboot ../../../FinalBuild/EBOOT.BIN --vr --seconds 3600 > ../../testwork/p2/vr_stereoN.log 2>&1`
+   in the background; wait for `vr: stereo on` in the log; the user plays
+   and closes the game; then read `perf:` lines and the report
+   (`d3d11 stereo ... shared on the GPU`). The game must be closed before a
+   rebuild (the exe is locked while it runs).
+
+**State at handoff:** P2's stereo window works and the user confirmed it in
+the PS VR2 at 3x and at 60 fps in town ("3D looks right and it's steadier"):
+59.7 fps average, min 55.9. Eye pictures go to the headset on the GPU
+(shared texture); the overlay is its own layer; the mono draw is the left eye.
+
+**Next (in order):**
+1. **P3 head tracking:** today the window is world-locked; the game camera
+   doesn't follow the head. Hook OrbitCamera_Apply `0x08AFA598` (or LookAt
+   `0x08D8969C`) to add the head pose to the game camera, then move from the
+   stereo window to a projection layer with the eyes' FOV. Mind CLAUDE.md:
+   camera changes are local only.
+2. Engine-menu items for `vr_stereo` and `vr_world_scale` (the menu has 31
+   items and a 32-bit hidden mask: widen it first, see Gotchas). The world
+   scale 10 units/m is a guess the user hasn't judged yet.
+3. Wider culling (objects popping at the window edges), a cutscene /
+   camera-cut fade, and the open items under "What exists" > stereo window.
+4. Not VR: the 120 fps crash and the headless intro-movie stall.
+
+**The `3ds_port` branch** is a placeholder (see Gotchas); don't work on it
+unless the user asks.
 
 ## Status by phase
 
@@ -13,7 +53,7 @@ _Last updated: 2026-10-22 (P2 stereo window)._
 |---|---|
 | P0 RE tooling | **Done, run in town and field:** the GE gets identity view matrices (camera folded into bones / world on the CPU). View matrix found in RAM at `0x08FA98A0`, player world position at player object +0x4B0 (2 reports each; writer not yet watched) |
 | P1 PCVR theater | **Done, checked in the headset** by the user (2026-10-22): screen size, sharpness, colours, recenter and the button mapping in VR.md all right. Nothing to fix |
-| P2 stereo third person | **First step built (2026-10-22): the stereo window.** Each GE draw is replayed per eye; the headset shows the two pictures on one world-locked screen. Checked in town from the eye pictures (disparity as computed, HUD at screen depth). **Seen in the PS VR2 by the user (2026-10-22): "looks pretty good", and smooth after the readback fix.** The game itself ran at 19.4 fps average (min 12) at 3x in that run, under its 30 target |
+| P2 stereo third person | **Stereo window done and checked in the PS VR2 (2026-10-22):** each GE draw replayed per eye, both pictures on one world-locked screen, HUD at screen depth. User: "looks pretty good", "3D looks right and it's steadier". 3x at 60 fps in town: 59.7 fps average (min 55.9). Still open for P2: world-scale tuning, wider culling, menu items, cutscene handling |
 | P3 to P8 | Not started |
 
 ## Branches and PR
@@ -24,7 +64,11 @@ _Last updated: 2026-10-22 (P2 stereo window)._
 - psprecomp submodule: branch `vr-draw-observer` on hasanzainul10/psprecomp
   (remote `fork` in the submodule; its `origin` is zmbkilla/psprecomp).
   `.gitmodules` points at the fork. Commit `12430e8` adds
-  `psp_gpu_set_draw_observer` (render.h, gpu.c).
+  `psp_gpu_set_draw_observer` (render.h, gpu.c); `09e9ba3` and `288a1c4` add
+  the GE stereo replay (`psp_gpu_set_stereo`, `draw_eye`, `mono_is_left`).
+- At handoff: main repo `vr-theater` at the commit that adds this handoff
+  section (after `11f644d`); psprecomp `vr-draw-observer` at `288a1c4`.
+- `3ds_port` (main repo, origin): a placeholder branch from `fd149a1`.
 
 ## What exists
 
@@ -208,9 +252,9 @@ Build and run steps: the `psp2i-build-run` skill (`.claude/skills/`).
    seen at `--fps 30`. Not VR code; not investigated.
 4. **Find the rest of what P2 needs:** the frustum cull and the bloom/blur pass
    signature (F12 dump).
-5. **P2 started (stereo window, above).** Next: the user's headset check
-   (comfort, world scale, HUD), then 3x performance, sharing eye textures
-   with the VR device, and head tracking (P3). The original notes: every 3D draw reaches the GE in eye space (identity VIEW;
+5. **P2 stereo window done** (above, and the handoff section's "Next").
+   Done since: the headset check, 3x performance, eye textures shared with
+   the VR device, two renders instead of three. The original notes: every 3D draw reaches the GE in eye space (identity VIEW;
    WORLD and bones are already model-view). So stereo means swapping the view
    in `0x08FA98A0`'s builder per eye (two game-side renders), or a per-eye
    offset applied in eye space at the GE (cheap, but only right for an IPD
