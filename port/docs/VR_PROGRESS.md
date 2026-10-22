@@ -35,7 +35,8 @@ the PS VR2 at 3x and at 60 fps in town ("3D looks right and it's steadier"):
 It's applied at the GE, not by hooking the camera (the reasons are in
 VR_PLAN.md "P3 approach"). `vr_head=on` and `vr_level=on` are the defaults.
 - **The user, in the headset:** the world stays still while the head turns;
-  leaning moves the view; recenter works.
+  leaning moves the view. (Recenter was noted as working here, but the
+  user later said it never worked for them: see "Recenter" below.)
 - **The log** (`port/testwork/p3/vr_head1.log`, about 5 min, 30 fps cap): a
   steady 30 fps (each minute after the first averaged 30.0). 8493 eye
   pictures were shared on the GPU and none went through the CPU.
@@ -154,6 +155,14 @@ the world; the user found it overwhelming. Those were removed. Now:
    click (added after the fifth run; built, not yet pressed in the headset).
    It latches in the VR thread (`g_shot`) and reaches `vrshot_request` through
    `VR_HOST_SHOT`; without the grip the click still recenters.
+   **Recenter never worked for the user.** No log has a recenter after the
+   automatic one at start, though SteamVR's generated binding maps the
+   left stick click (PS VR2 `left_stick` click) to `recenter`. Also, a
+   SteamVR "Reset view" moved LOCAL without the game taking the head again.
+   Added: `REFERENCE_SPACE_CHANGE_PENDING` (LOCAL) recenters too
+   (`vr: the runtime recentered`), a log line on each left stick click, and
+   one at focus saying whether the stick clicks are bound. Built, not run:
+   the next run's log tells whether the click arrives.
 2. **Sharpness:** try `render_scale=4`; the real fix is eye pictures taller
    than 480:272 (the vertical scale stretches pixels).
 3. Engine-menu items for `vr_stereo` and `vr_world_scale` (the menu has 31

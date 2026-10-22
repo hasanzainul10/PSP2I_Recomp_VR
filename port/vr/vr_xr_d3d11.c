@@ -413,6 +413,16 @@ static void input_update(int focused) {
         if (XR_FAILED(p_xrSyncActions(g_sess, &si))) focused = 0;
     }
     if (focused) {
+        static int told;                     /* once: whether the runtime bound the stick clicks */
+        if (!told) {
+            told = 1;
+            XrActionStateGetInfo gi = { XR_TYPE_ACTION_STATE_GET_INFO };
+            XrActionStateBoolean l = { XR_TYPE_ACTION_STATE_BOOLEAN }, r = { XR_TYPE_ACTION_STATE_BOOLEAN };
+            gi.action = g_act[A_LCLICK]; p_xrGetActionStateBoolean(g_sess, &gi, &l);
+            gi.action = g_act[A_RCLICK]; p_xrGetActionStateBoolean(g_sess, &gi, &r);
+            fprintf(stderr, "vr: stick clicks bound: left (recenter) %s, right (engine menu) %s\n",
+                    l.isActive ? "yes" : "no", r.isActive ? "yes" : "no");
+        }
         const XrVector2f ls = get_vec2(A_LSTICK), rs = get_vec2(A_RSTICK);
         if (get_float(A_LGRIP) > 0.5f) {     /* left grip held: the left stick is the D-pad */
             if (ls.y > 0.5f) p.buttons |= P_UP;
@@ -439,7 +449,11 @@ static void input_update(int focused) {
          * VR capture instead (F11 doesn't reach the game window while the
          * headset is on). Latched, so the game's slower poll can't miss it. */
         const int lc = get_bool(A_LCLICK);
-        if (lc && !g_lclick_prev) InterlockedExchange(get_float(A_LGRIP) > 0.5f ? &g_shot : &g_recenter, 1);
+        if (lc && !g_lclick_prev) {
+            const int grip = get_float(A_LGRIP) > 0.5f;
+            fprintf(stderr, "vr: left stick click%s\n", grip ? " with the grip: a capture" : ": recenter");
+            InterlockedExchange(grip ? &g_shot : &g_recenter, 1);
+        }
         g_lclick_prev = lc;
     } else {
         g_ltrig_on = g_rtrig_on = g_lclick_prev = 0;
@@ -626,6 +640,15 @@ static void poll_events(void) {
             fprintf(stderr, "vr: the runtime is going away\n");
             g_instance_lost = 1;
             g_session_over = 1;
+        } else if (ev.type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
+            /* The runtime's own recenter (SteamVR's "Reset view") moves LOCAL:
+             * the head's reference from the old LOCAL would then offset the
+             * view instead of centring it, so take the head again. */
+            const XrEventDataReferenceSpaceChangePending *rc = (const XrEventDataReferenceSpaceChangePending *)&ev;
+            if (rc->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL) {
+                fprintf(stderr, "vr: the runtime recentered; recentering too\n");
+                InterlockedExchange(&g_recenter, 1);
+            }
         } else if (ev.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
             const XrEventDataSessionStateChanged *sc = (const XrEventDataSessionStateChanged *)&ev;
             g_state = sc->state;
