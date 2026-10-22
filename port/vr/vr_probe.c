@@ -345,7 +345,18 @@ void vr_probe_init(const char *report_path) {
     psp_gpu_set_draw_observer(observe);
 }
 
-void vr_probe_request(void) { g_report_due = 1; }
+void vr_probe_request(void) {
+    g_report_due = 1;
+    /* PSP2I_VR_PROBE_WATCH=ADDR: (re)arm the write watch on F8, so it starts
+     * where the scene is (the first 32 writes get a stack in game_log.txt)
+     * rather than at boot, when clears use up the hits. */
+    const char *w = getenv("PSP2I_VR_PROBE_WATCH");
+    if (w && *w) {
+        const uint32_t a = (uint32_t)strtoul(w, NULL, 0);
+        psp_mem_watch_write(a);
+        fprintf(stderr, "vr-probe: write watch armed on 0x%08X\n", a);
+    }
+}
 
 void vr_probe_vblank(void) {
     if (g_report_due) { g_report_due = 0; report(); }

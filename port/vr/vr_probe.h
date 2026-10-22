@@ -14,7 +14,8 @@
  * Taking two reports a few steps apart and keeping the addresses whose values
  * followed narrows the candidates down quickly.
  *
- * PSP2I_VR_PROBE_EVERY=N also logs the camera every N frames to the console. */
+ * PSP2I_VR_PROBE_EVERY=N also logs the camera every N frames to the console.
+ * PSP2I_VR_PROBE_WATCH=ADDR arms the write watch on ADDR at each F8. */
 #ifndef PSP2I_VR_PROBE_H
 #define PSP2I_VR_PROBE_H
 

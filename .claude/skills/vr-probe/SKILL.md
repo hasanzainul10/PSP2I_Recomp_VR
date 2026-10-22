@@ -52,6 +52,9 @@ The generic fields (for games that do use the GE view):
 
 - **Compare reports:** keep the addresses whose values changed with the move,
   across the reports.
+- **Watch from the scene:** `PSP2I_VR_PROBE_WATCH=ADDR` arms the write watch
+  at each F8, so the 32 logged writes come from the field and not from boot-time
+  clears.
 - **Confirm with a write watch:** `--watch ADDR`, or `--watch-from-flip ADDR FLIP`.
   It logs the game stack of every writer, which gives the function to hook
   (`port/hooks.txt` plus `psp_hook_set`; see `host/camera.c` for the pattern).

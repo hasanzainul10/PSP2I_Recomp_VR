@@ -77,15 +77,43 @@ Unskinned draws aren't drawn with an identity world matrix either: their GE
 WORLD is the model-view (view x model, with the model's scale; e.g. a
 player-attached model at scale 1.88). So every 3D draw arrives in eye space.
 
-Still to confirm: `--watch 0x08FA98A0` in a field, to get the function that
-builds the view matrix (the place P2 swaps in the per-eye view).
+### Who sets the view (write watch, 2026-10-22)
+
+`PSP2I_VR_PROBE_WATCH=0x08FA98D0` (the matrix's translation x), armed by F8 in
+a field. Every write comes through the same path, 3 times per frame:
+
+`0x08AFDC60` → `0x08AFD474` → `0x08A88E00` → `0x08D81D84` → `0x08D7AE34` (the copy)
+
+The calls reach `0x08AFDC60` from two places: `0x08AFCE6C` (from `0x089F83B4`,
+`0x08A879AC`) and twice from `0x08AFED44` (via `0x08969314` and `0x08969344`).
+Two of the 3 writes carry translation x 262.9 (the scene camera); the one via
+`0x08969314` carries 6.31 (another camera: maybe the sky or a 3D HUD part, not
+checked).
+
+Decoded from the generated code (`port/gen/recomp_funcs.c`):
+
+| Address | What | Status |
+|---|---|---|
+| `0x08D81D84` | **SetViewMatrix(`$a0` = 4x4)**: copies it to `0x08FA98A0` (`0x08D7AE34`, 4 `lv.q`/`sv.q`), then `0x08D81DAC`. `$a0` = 0 takes another path. **The P2 hook point**: swap in the per-eye view here | seen (decoded, not hooked) |
+| `0x08A88E00` | Wrapper: `0x08D81D84($a0)`, then `0x08A88ECC` (marks something dirty: byte +66 = 1 of `0x08A88DE8()`) | seen |
+| `0x08AFD474` | **ApplyCamera(`$a0` = camera object)**: SetViewMatrix(cam+0x10), SetProjection(cam+0x90, 0) (`0x08D7DA78`), `0x08D7D8E0`(cam+0xF4, cam+0xF8), then the viewport (`0x08D7D868`) | seen |
+| `0x08AFD500` | ApplyCamera's default when there's no camera: view `0x08ED9860`, projection `0x08ED98E0` | seen |
+| `0x08AFDC60` | Apply the active camera: index at `0x08ED9920` (-1 = none), slot table at `0x08ED9924` (pointers); slot+4 = the camera object | seen |
+| camera +0x10 | View matrix, 4x4 VFPU column-major. The heap copy at `0x09049170` (above) is likely camera +0x10, so camera object `0x09049160` in that run (not confirmed) | seen |
+| camera +0x90 | Projection matrix 4x4 (`0x08D7DA78` copies 64 bytes to `0x08FA97A0` and checks whether it's orthographic) | seen |
+| camera +0xF4, +0xF8 | Two floats, stored by `0x08D7D8E0` at `0x08FA9784`/`0x08FA9780` and `0x08FA981C`/`0x08FA9818` (likely near/far or depth range) | seen |
+| `0x08FA97A0` | Current projection matrix | seen |
+
+Next: watch camera +0x10's writer (the camera update: eye, target and up, or
+yaw/pitch/distance), which is what VR head tracking and P3's first person
+replace.
 
 ## Needed for VR (todo)
 
 | What | Phase | How to find it |
 |---|---|---|
-| Camera object: eye, target, up, FOV, near/far | P2 | The view matrix is found (`0x08FA98A0`, above). The eye/target floats and the camera object around it: `--watch 0x08FA98A0` for the builder, then its inputs |
-| Code that builds the view matrix (to replace the camera, not just the matrix) | P2 | `PSP2I_GE_MATRIX_FLIP=N` (ge.c) shows where the view upload comes from; then the writer of the hits above |
+| Camera object: eye, target, up, FOV | P2 | Layout started (+0x10 view, +0x90 proj, above). The eye/target or orbit parameters: the writer of camera +0x10 (`PSP2I_VR_PROBE_WATCH`) |
+| Code that builds camera +0x10 from the orbit camera (to replace the camera, not just the matrix) | P2 / P3 | Write watch on camera +0x10 + 0x30; SetViewMatrix itself is found (`0x08D81D84`) |
 | Frustum / LOD culling (objects pop at the headset's wider FOV) | P2 | Objects vanishing at the screen edges; the cull test reads the camera FOV or planes |
 | Bloom / blur passes (signature to skip or redo per eye) | P2 | F12 dump: through-mode full-screen draws sampling a render target |
 | Local player yaw | P4 | Position found (player +0x4B0, above). Yaw: an angle or rotation near +0x4B0 that follows turning |
