@@ -258,6 +258,12 @@ the world; the user found it overwhelming. Those were removed. Now:
   run): VR off turns eye sharing off before `vr_stop`; the modules the
   OpenXR runtime loads are pinned (`mods_pin_new`, after xrCreateSession)
   so hooks it leaves can't point at unloaded code.
+- **Engine menu > VR, asked by the user:** SHARPEN (OFF, 10-100%) and
+  TEXTURE FILTER (OFF, 2X-16X), live: `d3d11_set_quality` at run time
+  flushes the samplers; the sharpening shader is made whenever VR is on at
+  the start; mipmaps only when filtering was on at the start (the item
+  shows RESTART otherwise). test_menu: 458 checks, 0 failed. Not yet
+  used in the headset.
 - **Open:** hiding the player's own head (bone weights, or an eye-forward
   offset), body-relative movement (today the stick moves relative to the
   game camera, which trails behind), the cull behind the game camera.

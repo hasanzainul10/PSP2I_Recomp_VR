@@ -174,6 +174,8 @@ int  d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w
 void d3d11_set_scale(int s);
 void d3d11_set_scale_y(int s);
 void d3d11_set_quality(int aniso, float sharpen);
+int  d3d11_tex_mips(void);
+int  d3d11_sharpen_ready(void);
 const uint32_t *d3d11_present_hires(int *w, int *h);
 const uint32_t *d3d11_present_eye(int eye, int *w, int *h);
 void d3d11_eye_share(int on);
@@ -1660,6 +1662,13 @@ static void menu_step(void) {
     g_menu.vr_first = g_vr_first;
     g_menu.vr_world_pct = (int)lroundf(VR_FP_SCALE_DEFAULT * 100.0f / (g_vr_first ? g_vr_fp_scale : g_vr_world_scale));
     g_menu.vr_hud_dm = (int)lroundf(g_vr_hud_dist * 10.0f);
+    g_menu.vr_sharpen = (int)lroundf(g_vr_sharpen * VR_SHARPEN_STEPS);
+    g_menu.vr_filter = menu_vr_filter_of(g_vr_aniso);
+    /* RESTART: sharpening needs a start in VR (its shader), mipmaps a start
+     * with filtering on (they're made when textures are first loaded). */
+    g_menu.vr_quality_restart = 0;
+    if (g_renderer == REN_D3D11 && g_vr_sharpen > 0 && !d3d11_sharpen_ready()) g_menu.vr_quality_restart |= VR_RESTART_SHARPEN;
+    if (g_renderer == REN_D3D11 && (g_vr_aniso > 0) != d3d11_tex_mips()) g_menu.vr_quality_restart |= VR_RESTART_FILTER;
 #endif
 
     snprintf(g_menu.sega, sizeof g_menu.sega, "%s", online_sega_redirect());
@@ -1748,6 +1757,9 @@ static void menu_step(void) {
         g_vr_dist_dm = g_menu.vr_dist_dm;
         g_vr_width_dm = g_menu.vr_width_dm;
         g_vr_hud_dist = (float)g_menu.vr_hud_dm / 10.0f;
+        g_vr_sharpen = (float)g_menu.vr_sharpen / (float)VR_SHARPEN_STEPS;
+        g_vr_aniso = menu_vr_filter_aniso(g_menu.vr_filter);
+        if (g_renderer == REN_D3D11) d3d11_set_quality(g_vr_aniso, g_vr_sharpen);
         if (g_menu.vr_world_pct > 0) {                   /* the view in use: life size * 100 / percent */
             const float k = VR_FP_SCALE_DEFAULT * 100.0f / (float)g_menu.vr_world_pct;
             if (g_vr_first) g_vr_fp_scale = k; else g_vr_world_scale = k;

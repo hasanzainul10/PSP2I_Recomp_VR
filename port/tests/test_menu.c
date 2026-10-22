@@ -867,6 +867,18 @@ static void test_vr_page(void) {
     for (int i = 0; i < 40; i++) { menu_update(&m, MI_RIGHT, 0); menu_update(&m, 0, 0); }
     CHECK(m.vr_world_pct == VR_WORLD_MAX_PCT);
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_VR_SHARPEN && m.vr_sharpen == 5);         /* sharpening in tenths */
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_VR && m.vr_sharpen == 6);
+    menu_update(&m, 0, 0);
+    for (int i = 0; i < 12; i++) { menu_update(&m, MI_LEFT, 0); menu_update(&m, 0, 0); }
+    CHECK(m.vr_sharpen == 0);                                    /* off */
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_VR_FILTER && m.vr_filter == VR_FILTER_16X);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_VR && m.vr_filter == VR_FILTER_OFF);   /* Confirm wraps to off */
+    menu_update(&m, 0, 0);
+    CHECK(menu_vr_filter_aniso(VR_FILTER_OFF) == 0 && menu_vr_filter_aniso(VR_FILTER_4X) == 4 &&
+          menu_vr_filter_aniso(VR_FILTER_16X) == 16 && menu_vr_filter_of(16) == VR_FILTER_16X && menu_vr_filter_of(0) == VR_FILTER_OFF);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_VR_RECENTER && menu_update(&m, MI_CONFIRM, 0) == MFX_VR_RECENTER);
     menu_update(&m, 0, 0);
     CHECK(menu_update(&m, MI_BACK, 0) == 0 && m.page == MENU_PAGE_MAIN && m.sel == MENU_VR);   /* Cross: back */

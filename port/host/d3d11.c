@@ -157,10 +157,20 @@ void d3d11_set_scale_y(int s) { g_scale_y = s < g_scale ? g_scale : s > 8 ? 8 : 
  * headset's resampling. */
 static int   g_aniso;
 static float g_sharpen;
+static int   g_quality_on;           /* set before d3d11_init: VR is on (the sharpening shader is made) */
+static int   g_tex_mips;             /* the game's textures have mipmaps: decided at d3d11_init (aniso then) */
+static void  sampler_flush(void);
+/* Again at run time (the engine menu): sharpening applies at once, the
+ * filtering to the samplers at once; mipmaps only exist if filtering was
+ * on at the start (d3d11_tex_mips). */
 void d3d11_set_quality(int aniso, float sharpen) {
     g_aniso = aniso < 2 ? 0 : aniso > 16 ? 16 : aniso;
     g_sharpen = sharpen < 0 ? 0 : sharpen > 1 ? 1 : sharpen;
+    if (g_dev) sampler_flush(); else g_quality_on = 1;
 }
+int d3d11_tex_mips(void) { return g_tex_mips; }
+static ID3D11PixelShader *g_sps;
+int d3d11_sharpen_ready(void) { return g_sps != NULL; }
 
 static uint64_t n_draws, n_tris, n_uploads, n_readbacks, n_tex_decodes, n_rt_tex, n_approx;
 
@@ -724,10 +734,10 @@ static tex_entry *tex_get(const psp_gpu_state *st, int allow_rep) {
         if (!e->tex) {
             D3D11_TEXTURE2D_DESC d;
             memset(&d, 0, sizeof d);
-            d.Width = st->tex_w; d.Height = st->tex_h; d.MipLevels = g_aniso ? 0 : 1; d.ArraySize = 1;   /* 0: a full chain */
+            d.Width = st->tex_w; d.Height = st->tex_h; d.MipLevels = g_tex_mips ? 0 : 1; d.ArraySize = 1;   /* 0: a full chain */
             d.Format = DXGI_FORMAT_R8G8B8A8_UNORM; d.SampleDesc.Count = 1;
-            d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_SHADER_RESOURCE | (g_aniso ? D3D11_BIND_RENDER_TARGET : 0);
-            d.MiscFlags = g_aniso ? D3D11_RESOURCE_MISC_GENERATE_MIPS : 0;
+            d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_SHADER_RESOURCE | (g_tex_mips ? D3D11_BIND_RENDER_TARGET : 0);
+            d.MiscFlags = g_tex_mips ? D3D11_RESOURCE_MISC_GENERATE_MIPS : 0;
             if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &d, NULL, &e->tex))) return NULL;
             ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)e->tex, NULL, &e->srv);
         }
@@ -751,7 +761,7 @@ static tex_entry *tex_get(const psp_gpu_state *st, int allow_rep) {
     if (allow_rep && texreplace_on()) texreplace_dump_miss(px, (int)st->tex_w, (int)st->tex_h);
 #endif
     ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)e->tex, 0, NULL, px, st->tex_w * 4, 0);
-    if (g_aniso && e->srv) ID3D11DeviceContext_GenerateMips(g_ctx, e->srv);
+    if (g_tex_mips && e->srv) ID3D11DeviceContext_GenerateMips(g_ctx, e->srv);
     free(px);
     e->hash = h; e->check_frame = f; e->last_use = ++g_use;
     n_tex_decodes++;
@@ -762,6 +772,14 @@ static tex_entry *tex_get(const psp_gpu_state *st, int allow_rep) {
 
 typedef struct { uint64_t key; void *obj; } state_slot;
 static state_slot g_blend[256], g_dss[64], g_samp[16];
+
+/* The samplers again from the next draw (the filtering changed). */
+static void sampler_flush(void) {
+    for (int i = 0; i < 16; i++) {
+        if (g_samp[i].obj) ID3D11SamplerState_Release((ID3D11SamplerState *)g_samp[i].obj);
+        g_samp[i].obj = NULL;
+    }
+}
 
 static void *cache_find(state_slot *c, int n, uint64_t key) {
     for (int i = 0; i < n; i++) if (c[i].obj && c[i].key == key) return c[i].obj;
@@ -1723,7 +1741,6 @@ static const char *SHARPEN_SRC =
 "  return float4(saturate((b * w + d * w + f * w + h * w + e.rgb) / (1.0 + 4.0 * w)), e.a);\n"
 "}\n";
 static ID3D11VertexShader     *g_svs;
-static ID3D11PixelShader      *g_sps;
 static ID3D11Buffer           *g_scb;
 static ID3D11RenderTargetView *g_share_rtv;
 
@@ -1768,7 +1785,7 @@ static int share_eyes_body(rt_entry *t, UINT W, UINT H) {
             return 0;
         }
         IDXGIResource_Release(r);
-        if (g_sharpen > 0 && g_sps) ID3D11Device_CreateRenderTargetView(g_dev, (ID3D11Resource *)g_share, NULL, &g_share_rtv);
+        if (g_sps) ID3D11Device_CreateRenderTargetView(g_dev, (ID3D11Resource *)g_share, NULL, &g_share_rtv);
         g_share_w = 3 * W; g_share_h = H;
         if (g_hud_empty) ID3D11Texture2D_Release(g_hud_empty);
         g_hud_empty = NULL;
@@ -1787,7 +1804,7 @@ static int share_eyes_body(rt_entry *t, UINT W, UINT H) {
     D3D11_BOX box = { 0, 0, 0, W, H, 1 };
     for (int e = 0; e < 2; e++) {
         ID3D11ShaderResourceView *src = e == 0 && g_mono_left ? t->srv : t->eye_srv[e];
-        if (g_share_rtv && src) {                       /* sharpened (d3d11_set_quality) */
+        if (g_sharpen > 0 && g_share_rtv && src) {      /* sharpened (d3d11_set_quality) */
             const float c[4] = { (float)(e * W), g_sharpen, (float)W, (float)H };
             ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)g_scb, 0, NULL, c, 0, 0);
             ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &g_share_rtv, NULL);
@@ -2030,7 +2047,8 @@ int d3d11_init(void) {
     ID3D10Blob_Release(vsb);
     ID3D10Blob_Release(psb);
     {
-        if (g_sharpen > 0) {
+        g_tex_mips = g_quality_on && g_aniso > 0;
+        if (g_quality_on) {                             /* VR: sharpening can be turned on later too */
             ID3DBlob *sv = compile_src(SHARPEN_SRC, "vss", "vs_4_0"), *spb = compile_src(SHARPEN_SRC, "pss", "ps_4_0");
             if (sv) ID3D11Device_CreateVertexShader(g_dev, ID3D10Blob_GetBufferPointer(sv), ID3D10Blob_GetBufferSize(sv), NULL, &g_svs);
             if (spb) ID3D11Device_CreatePixelShader(g_dev, ID3D10Blob_GetBufferPointer(spb), ID3D10Blob_GetBufferSize(spb), NULL, &g_sps);

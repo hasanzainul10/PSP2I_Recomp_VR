@@ -24,6 +24,8 @@ void menu_init(menu_state *m, int fps, int show_fps) {
     m->vr_width_dm = 30;
     m->vr_hud_dm = 25;
     m->vr_world_pct = 100;
+    m->vr_sharpen = 5;
+    m->vr_filter = VR_FILTER_16X;
     /* The touch host shows the touch items; a host built with VR shows VR. */
     m->hidden = MENU_BIT(MENU_TOUCH_COLOR) | MENU_BIT(MENU_TOUCH_ALPHA) | MENU_BIT(MENU_VR);
 }
@@ -180,9 +182,22 @@ static int change(menu_state *m, int dir) {
         else              *v = *v >= hi ? lo : (*v + step > hi ? hi : *v + step);
         return *v != old ? MFX_VR : 0;
     }
+    case MENU_VR_SHARPEN: case MENU_VR_FILTER: {         /* Confirm wraps to off */
+        int *v = m->sel == MENU_VR_SHARPEN ? &m->vr_sharpen : &m->vr_filter;
+        const int hi = m->sel == MENU_VR_SHARPEN ? VR_SHARPEN_STEPS : VR_FILTERS - 1, old = *v;
+        if (dir < 0)      { if (*v > 0) (*v)--; }
+        else if (dir > 0) { if (*v < hi) (*v)++; }
+        else              *v = *v >= hi ? 0 : *v + 1;
+        return *v != old ? MFX_VR : 0;
+    }
     case MENU_VR_RECENTER: return dir == 0 ? MFX_VR_RECENTER : 0;
     default:               return 0;
     }
+}
+
+int menu_vr_filter_aniso(int f) { return f <= VR_FILTER_OFF ? 0 : f >= VR_FILTER_16X ? 16 : 1 << f; }
+int menu_vr_filter_of(int aniso) {
+    return aniso < 2 ? VR_FILTER_OFF : aniso < 4 ? VR_FILTER_2X : aniso < 8 ? VR_FILTER_4X : aniso < 16 ? VR_FILTER_8X : VR_FILTER_16X;
 }
 
 int menu_page_of(int item) {
@@ -464,7 +479,7 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
                                                    "VR", "CLOSE", "RIGHT STICK", "SENSITIVITY", "CIRCLE/CROSS", "TOUCH COLOR",
                                                    "TOUCH OPACITY", "BACK", "TICK PACING", "30 HZ LOGIC", "BACK",
                                                    "VR", "SCREEN DISTANCE", "SCREEN WIDTH", "HUD DISTANCE", "WORLD SIZE",
-                                                   "RECENTER", "BACK" };
+                                                   "SHARPEN", "TEXTURE FILTER", "RECENTER", "BACK" };
     static const char *const ADHOC_MODES[3] = { "< PPSSPP DIRECT >", "< PPSSPP RELAY >", "< MODERN >" };
     char adhoc[32];
     snprintf(adhoc, sizeof adhoc, "%.25s", m->adhoc[0] ? m->adhoc : "NOT SET");
@@ -490,7 +505,7 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
     char tcol[24], talpha[24];
     snprintf(tcol, sizeof tcol, "< %s >", menu_touch_color_name(m->touch_color));
     snprintf(talpha, sizeof talpha, "< %d%% >", m->touch_alpha * 10);
-    char vr_main[32], vr_on[40], vr_dist[24], vr_width[24], vr_hud[24], vr_world[32];
+    char vr_main[32], vr_on[40], vr_dist[24], vr_width[24], vr_hud[24], vr_world[32], vr_sharp[32], vr_filt[32];
     snprintf(vr_main, sizeof vr_main, "> %.22s", m->vr_on ? (m->vr_status[0] ? m->vr_status : "ON") : "OFF");
     snprintf(vr_on, sizeof vr_on, "< %s >%s%.17s", m->vr_on ? "ON" : "OFF", m->vr_on && m->vr_status[0] ? " " : "",
              m->vr_on ? m->vr_status : "");
@@ -498,6 +513,12 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
     snprintf(vr_width, sizeof vr_width, "< %d.%d M >", m->vr_width_dm / 10, m->vr_width_dm % 10);
     snprintf(vr_hud, sizeof vr_hud, "< %d.%d M >", m->vr_hud_dm / 10, m->vr_hud_dm % 10);
     snprintf(vr_world, sizeof vr_world, "< %d%% > %s", m->vr_world_pct, m->vr_first ? "1ST" : "3RD");
+    if (m->vr_sharpen) snprintf(vr_sharp, sizeof vr_sharp, "< %d%% >", m->vr_sharpen * 10);
+    else snprintf(vr_sharp, sizeof vr_sharp, "< OFF >");
+    if (m->vr_quality_restart & VR_RESTART_SHARPEN) strncat(vr_sharp, " RESTART", sizeof vr_sharp - strlen(vr_sharp) - 1);
+    if (m->vr_filter) snprintf(vr_filt, sizeof vr_filt, "< %dX >", menu_vr_filter_aniso(m->vr_filter));
+    else snprintf(vr_filt, sizeof vr_filt, "< OFF >");
+    if (m->vr_quality_restart & VR_RESTART_FILTER) strncat(vr_filt, " RESTART", sizeof vr_filt - strlen(vr_filt) - 1);
     for (int i = 0; i < MENU_ITEMS; i++) {
         if (!shown(m, i)) continue;
         const uint32_t col = i == m->sel ? YELLOW : WHITE;
@@ -518,7 +539,8 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
                       : i == MENU_TOUCH_COLOR ? tcol : i == MENU_TOUCH_ALPHA ? talpha
                       : i == MENU_VR ? vr_main : i == MENU_VR_ON ? vr_on
                       : i == MENU_VR_DISTANCE ? vr_dist : i == MENU_VR_WIDTH ? vr_width
-                      : i == MENU_VR_HUD_DIST ? vr_hud : i == MENU_VR_WORLD ? vr_world : "";
+                      : i == MENU_VR_HUD_DIST ? vr_hud : i == MENU_VR_WORLD ? vr_world
+                      : i == MENU_VR_SHARPEN ? vr_sharp : i == MENU_VR_FILTER ? vr_filt : "";
         menu_text(img, x0 + VALUE_X, y, v, col);
         y += ROW_H;
     }
