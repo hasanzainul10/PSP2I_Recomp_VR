@@ -1399,24 +1399,30 @@ static void hook_apply_camera(void (*original)(void)) {
             if (n_fp_cam++ == 0) fprintf(stderr, "vr: first person: the game camera at the player's head\n");
         }
     }
-    if (!g_fp_cam) { original(); return; }
     original();
-    /* The global projection the scene walk culls with (0x08FA97A0, set by
-     * SetProjection inside ApplyCamera) made wider after it: widening the
-     * camera object's copy (cam+0x90) never reached it; measured 2026-10-23,
-     * the walk saw x 1.368 every frame, and the edges of the eyes' view were
-     * culled (in the ship, looking up: no floor). The walk follows this apply
-     * directly; the frame's later applies set their own. The cull planes are
-     * built inside, already wider (vr_cull_scale). */
+}
+
+/* SetProjection (0x08D7DA78): in first person with the camera at the head, a
+ * field-like perspective projection (x scale 1.15..2.5) is made wider after
+ * it is set, by the eyes' view times VR_FP_VIEW_MARGIN, so everything the
+ * game culls with sees past the edges of the eyes' view. Widening it after
+ * ApplyCamera didn't hold (the scene walk still saw x 1.368: the projection
+ * is set again before the walk), so it is done wherever it is set. The cull
+ * planes (built inside, from the narrow one) are wider by vr_cull_scale. */
+#define FN_SET_PROJECTION 0x08D7DA78u
+static uint64_t n_proj_wide;
+static void hook_set_projection(void (*original)(void)) {
+    original();
+    if (!g_head_on || !g_vr_first || !g_fp_cam || psp_read32(PSP2I_PROJ_ORTHO) == 1) return;
+    const float p0 = psp_read_f32(PSP2I_PROJ_MATRIX), p5 = psp_read_f32(PSP2I_PROJ_MATRIX + 20);
+    if (!(fabsf(p0) > 1.15f && fabsf(p0) < 2.5f)) return;
     const float fx = g_vr_fov > 1.0f ? g_vr_fov : 1.0f, fy = g_vr_fov_y > 1.0f ? g_vr_fov_y : 1.0f;
     g_fp_kx = fx * VR_FP_VIEW_MARGIN;
     g_fp_ky = fy * VR_FP_VIEW_MARGIN;
-    const float p0 = psp_read_f32(PSP2I_PROJ_MATRIX), p5 = psp_read_f32(PSP2I_PROJ_MATRIX + 20);
     g_fp_p0 = fabsf(p0); g_fp_p5 = fabsf(p5);
-    if (psp_read32(PSP2I_PROJ_ORTHO) != 1) {
-        psp_write_f32(PSP2I_PROJ_MATRIX, p0 / g_fp_kx);
-        psp_write_f32(PSP2I_PROJ_MATRIX + 20, p5 / g_fp_ky);
-    }
+    psp_write_f32(PSP2I_PROJ_MATRIX, p0 / g_fp_kx);
+    psp_write_f32(PSP2I_PROJ_MATRIX + 20, p5 / g_fp_ky);
+    if (n_proj_wide++ == 0) fprintf(stderr, "vr: first person: the game's projection %.1fx / %.1fx wider\n", (double)g_fp_kx, (double)g_fp_ky);
 }
 
 #ifndef PSP2I_PROD
@@ -3552,6 +3558,7 @@ int main(int argc, char **argv) {
     g_menu.vr_width_dm = g_vr_width_dm;
     psp_hook_set(FN_FRUSTUM_PLANES, hook_frustum_planes);   /* a no-op unless head tracking is on */
     psp_hook_set(FN_APPLY_CAMERA, hook_apply_camera);       /* a no-op unless first person is on */
+    psp_hook_set(FN_SET_PROJECTION, hook_set_projection);   /* a no-op unless first person is on */
 #ifndef PSP2I_PROD
     psp_hook_set(FN_NODE_VIS, hook_node_vis);               /* counts only */
 #endif
