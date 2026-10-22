@@ -1325,6 +1325,16 @@ static void stereo_update(void) {
 }
 
 #ifndef PSP2I_PROD
+/* The capture folder with its parents (a missing parent lost every capture:
+ * "cannot write", 2026-10-23). */
+static void capture_dir_make(void) {
+    char p[sizeof g_capture_dir];
+    snprintf(p, sizeof p, "%s", g_capture_dir);
+    for (char *c = p + 1; *c; c++)
+        if (*c == '/' || *c == '\\') { const char k = *c; *c = '\0'; CreateDirectoryA(p, NULL); *c = k; }
+    CreateDirectoryA(p, NULL);
+}
+
 /* Each vblank, after the eye pictures are fetched: start a capture, save its
  * pictures, close its report when psprecomp's trace is done. */
 static void vrshot_vblank(uint64_t vb) {
@@ -1333,7 +1343,7 @@ static void vrshot_vblank(uint64_t vb) {
     if (!g_vrshot_vb && InterlockedExchange(&g_vrshot_req, 0)) {
         if (!g_stereo_on) { fprintf(stderr, "vr: capture: no stereo now\n"); return; }
         char path[700];
-        CreateDirectoryA(g_capture_dir, NULL);
+        capture_dir_make();
         snprintf(path, sizeof path, "%s/vrshot_%06llu.txt", g_capture_dir, (unsigned long long)vb);
         g_vrshot_txt = fopen(path, "w");
         if (!g_vrshot_txt) { fprintf(stderr, "vr: capture: cannot write %s\n", path); return; }
