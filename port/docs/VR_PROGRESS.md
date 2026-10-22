@@ -138,13 +138,13 @@ the world; the user found it overwhelming. Those were removed. Now:
 - **Fourth run, the user in the headset: "all looks working now".** Log:
   4209 of 5119 frames reached the headset with their HUD; the other 910
   had none drawn (menu scenes, loading). Every capture's HUD picture had
-  alpha. The user didn't report on each item separately (panel distance and
-  follow, NPC talk, the minimap's enemies), and still no F11 captures.
+  alpha. Asked after, the user confirmed the HUD panel's distance and
+  follow, NPC talk (portrait and text) and the minimap's enemies all work.
+  Still no F11 captures.
 
 **Next (in order):**
 1. **The reticle / label / effect check with F11 captures** at those moments
-   (lock-on, technique, names), as agreed; ask how the HUD panel's distance,
-   size and follow feel, and whether the minimap shows enemies again.
+   (lock-on, technique, names), as agreed.
 2. **Sharpness:** try `render_scale=4`; the real fix is eye pictures taller
    than 480:272 (the vertical scale stretches pixels).
 3. Engine-menu items for `vr_stereo` and `vr_world_scale` (the menu has 31
