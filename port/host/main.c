@@ -1097,7 +1097,9 @@ static void head_frame(psp_gpu_stereo *s) {
                     hw[cc] = prev_v[cc * 4] * pr[3] + prev_v[cc * 4 + 1] * pr[4] + prev_v[cc * 4 + 2] * pr[5];
                 hw[1] = 0.0f;                                   /* +Y is up: only across */
                 if (hw[0] * hw[0] + hw[2] * hw[2] < 3.0f * 3.0f) {
-                    for (int cc = 0; cc < 3; cc += 2) head_off[cc] = head_ok ? 0.5f * (head_off[cc] + hw[cc]) : hw[cc];
+                    /* A fifth of the way each frame (~0.2 s to follow at 30 fps):
+                     * half was shaky with the run's sway (user, for comfort). */
+                    for (int cc = 0; cc < 3; cc += 2) head_off[cc] = head_ok ? head_off[cc] + 0.2f * (hw[cc] - head_off[cc]) : hw[cc];
                     head_ok = 1;
                 }
             }
@@ -2061,9 +2063,20 @@ static void on_vblank(void) {
             /* Stereo: each eye's own picture, for each new game frame, and
              * every vblank while the overlay (engine menu) is up so it stays
              * live. On the GPU when it can be (no overlay). */
+            /* Head tracking: a picture drawn without the head (tag 0: a menu
+             * scene, or a frame of the game's loading transitions) goes on the
+             * flat screen only once that has lasted a second. Until then the
+             * headset keeps the last 3D picture at its pose (user: "the flat
+             * game sometimes appears floating on top of VR for a short
+             * moment": the area changes' loading frames). */
+            static uint64_t tracked_vb;                  /* the last picture drawn from the head */
+            if (g_vr_live && g_eye_shared && g_eye_shared_tag) tracked_vb = vb;
+            if (g_vr_live && !g_eye_shared && g_eye_px[0] && g_eye_px_tag) tracked_vb = vb;
+            const int hold_flat = tracked_vb && vb - tracked_vb < 60;
             if (g_vr_live && g_eye_shared) {
-                vr_submit_stereo_shared(g_eye_shared, g_eye_shared_w, g_eye_shared_h, eye_tan(g_eye_shared_tag),
-                                        eye_tan_y(g_eye_shared_tag), g_eye_shared_tag);
+                if (g_eye_shared_tag || !hold_flat)
+                    vr_submit_stereo_shared(g_eye_shared, g_eye_shared_w, g_eye_shared_h, eye_tan(g_eye_shared_tag),
+                                            eye_tan_y(g_eye_shared_tag), g_eye_shared_tag);
                 g_eye_shared_vb = vb;
             }
             if (g_vr_live && g_stereo_on && vb - g_eye_shared_vb < 8) {
@@ -2082,11 +2095,11 @@ static void on_vblank(void) {
             if (g_vr_live && !g_eye_shared && g_eye_px[0]) {
                 if (g_eye_new || g_overlay_up) {
                     compose_eyes();
-                    if (g_eye_rgba[0] && g_eye_rgba[1])
+                    if (g_eye_rgba[0] && g_eye_rgba[1] && (g_eye_px_tag || !hold_flat))
                         vr_submit_stereo(g_eye_rgba[0], g_eye_rgba[1], g_eye_w, g_eye_h, eye_tan(g_eye_px_tag),
                                          eye_tan_y(g_eye_px_tag), g_eye_px_tag);
                 }
-            } else if (g_vr_live && have_frame && !(g_stereo_on && vb - g_eye_shared_vb < 8)) {
+            } else if (g_vr_live && have_frame && !(g_stereo_on && vb - g_eye_shared_vb < 8) && !hold_flat) {
                 /* the same picture, in the headset (not between shared stereo frames) */
                 if (g_hi_s > 1) vr_submit_frame(g_hi_rgba, SCREEN_W * g_hi_s, SCREEN_H * g_hi_s);
                 else vr_submit_frame(g_rgba, SCREEN_W, SCREEN_H);

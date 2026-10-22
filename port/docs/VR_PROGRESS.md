@@ -189,6 +189,14 @@ the world; the user found it overwhelming. Those were removed. Now:
   up) measures the head; the next frame turns it into world axes, keeps
   the level part, smooths it (half) and adds it to the feet. The height
   stays `vr_fp_eye` (no run bob). Dev log: `vr: fp head: ... across`.
+- **Fifth and sixth runs (`vr_fp5/6.log`):** user: "that works" (the head
+  is hidden), "maybe less shaky for comfort", and "the flat game sometimes
+  appears floating on top of VR for a short moment". The head measured up
+  to ~2.4 units across from the feet. The flat moments were all menu-scene
+  switches at the game's loading transitions (area changes). Fixes (built,
+  not run): the head follow moves a fifth of the way per frame (was half);
+  a picture without the head (tag 0) goes to the flat screen only after
+  a second of them, until then the headset keeps the last 3D picture.
 - **Open:** hiding the player's own head (bone weights, or an eye-forward
   offset), body-relative movement (today the stick moves relative to the
   game camera, which trails behind), the cull behind the game camera.
