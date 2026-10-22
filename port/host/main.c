@@ -924,6 +924,11 @@ static int psp2i_hud_panel(float w, float frac) {
 #define PSP2I_PROJ_MATRIX_G     0x08FA97A0u
 static int      g_vr_menu_screen = 1;
 static int      g_menu_scene = -1;          /* the last frame was a menu scene (logged on change) */
+/* The menu scene is a loading transition (an unturned view with the field's
+ * centred projection, between areas): the headset keeps the last 3D picture
+ * up to 5 s through it instead of 1 s (user: "the flat screen blips still
+ * occur"). Real menus are off-centre or much wider. */
+static int      g_menu_loading;
 /* P4 first person (vr_view=first, vr_fp_eye=, vr_fp_scale=): with head
  * tracking the eyes sit in the local player's head instead of at the game
  * camera, rendering only (the camera, and what other players see, stay the
@@ -1142,8 +1147,13 @@ static void head_frame(psp_gpu_stereo *s) {
                              fabsf(v[1]) < 1e-4f && fabsf(v[2]) < 1e-4f && fabsf(v[4]) < 1e-4f &&
                              fabsf(v[6]) < 1e-4f && fabsf(v[8]) < 1e-4f && fabsf(v[9]) < 1e-4f;
         const int off_centre = fabsf(pr[8]) > 1e-3f || fabsf(pr[9]) > 1e-3f;
-        const int other_fov = fabsf(pr[0] - PSP2I_FIELD_PROJ_X) > 0.03f * PSP2I_FIELD_PROJ_X;
+        /* Another FOV only counts when it's far from the field's: mission
+         * select is 0.98 (wider), close-up cutscenes 5.67. A boss fight's
+         * camera was 1.30-1.34 and the whole fight went flat (user) when
+         * this allowed 3%. */
+        const int other_fov = pr[0] < 1.15f || pr[0] > 2.5f;
         menu = unturned || off_centre || other_fov;
+        g_menu_loading = menu && unturned && !off_centre && !other_fov;
         if (menu != g_menu_scene)
             fprintf(stderr, "vr: %s (view %s, projection x %.4f%s)\n",
                     menu ? "a menu scene: on the flat screen" : "a 3D scene: from the head",
@@ -2072,7 +2082,7 @@ static void on_vblank(void) {
             static uint64_t tracked_vb;                  /* the last picture drawn from the head */
             if (g_vr_live && g_eye_shared && g_eye_shared_tag) tracked_vb = vb;
             if (g_vr_live && !g_eye_shared && g_eye_px[0] && g_eye_px_tag) tracked_vb = vb;
-            const int hold_flat = tracked_vb && vb - tracked_vb < 60;
+            const int hold_flat = tracked_vb && vb - tracked_vb < (g_menu_loading ? 300u : 60u);
             if (g_vr_live && g_eye_shared) {
                 if (g_eye_shared_tag || !hold_flat)
                     vr_submit_stereo_shared(g_eye_shared, g_eye_shared_w, g_eye_shared_h, eye_tan(g_eye_shared_tag),

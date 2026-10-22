@@ -212,6 +212,16 @@ the world; the user found it overwhelming. Those were removed. Now:
   gl_ge.c `rep_wait`) look the texture up again once `texreplace_pending`
   is 0. Checked headless at the title (the brand logos PNG: loaded by a
   worker, swapped in, clean exit); not yet seen in the headset.
+- **User, after the profile run:** "the flat screen blips still occur";
+  in a boss battle, after a cutscene the game went flat and stayed so (the
+  first/third toggle didn't bring VR back) until the boss was beaten. The
+  log (`vr_perf1.log`): the boss fight's projection x was 1.3036 / 1.3353
+  against the field's 1.3684, and the menu check took any FOV 3% off for a
+  menu; a close-up cutscene was 5.67. Fix (built, not run): another FOV is
+  a menu only below 1.15 (mission select 0.98) or above 2.5; an unturned
+  view with the field's centred projection is a loading transition
+  (`g_menu_loading`), held on the last 3D picture up to 5 s (real menus:
+  1 s).
 - **Open:** hiding the player's own head (bone weights, or an eye-forward
   offset), body-relative movement (today the stick moves relative to the
   game camera, which trails behind), the cull behind the game camera.
