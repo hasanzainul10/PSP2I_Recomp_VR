@@ -163,8 +163,18 @@ the world; the user found it overwhelming. Those were removed. Now:
    (`vr: the runtime recentered`), a log line on each left stick click, and
    one at focus saying whether the stick clicks are bound. Built, not run:
    the next run's log tells whether the click arrives.
-2. **Sharpness:** try `render_scale=4`; the real fix is eye pictures taller
-   than 480:272 (the vertical scale stretches pixels).
+2. **Sharpness: taller eye pictures, built, not yet seen in the headset.**
+   The user: "blurry and pixelated in VR". The eyes see 1.6x the game's
+   view across but 2.6x up and down (about 99 x 94 degrees), on 1440x816:
+   pixels 1.7x taller than wide. Now, with VR + stereo + head tracking and
+   render_scale > 1, d3d11.c renders `g_scale_y` rows per PSP row (main.c
+   picks it for the same pixels per degree both ways: 5 at 3x), so the eyes
+   are 1440x1360; the VR swapchain follows (`vr_config.scale_y`). VRAM
+   readback, the window and the S-times picture stay S x S; the transfer
+   shader takes the scale down in `rng.w`. One start-up check:
+   `d3d11: VR eye pictures 1440x1360`, swapchain 4320x1360 (`vr_sharp1.log`;
+   the headset wasn't on, so no frames judged). Next: the user's verdict
+   and the frame rate; then `render_scale=4` (1920 x about 1800) if wanted.
 3. Engine-menu items for `vr_stereo` and `vr_world_scale` (the menu has 31
    items and a 32-bit hidden mask: widen it first, see Gotchas). The world
    scale 10 units/m is a guess the user hasn't judged yet.

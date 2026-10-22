@@ -172,6 +172,7 @@ int  d3d11_init(void);
 void d3d11_report(FILE *out);
 int  d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w, int h);
 void d3d11_set_scale(int s);
+void d3d11_set_scale_y(int s);
 const uint32_t *d3d11_present_hires(int *w, int *h);
 const uint32_t *d3d11_present_eye(int eye, int *w, int *h);
 void d3d11_eye_share(int on);
@@ -307,6 +308,7 @@ static int      g_have_frame;
  * renderer's S-times picture and g_hi_rgba that picture with the overlay,
  * for the window (present.c) and the headset. */
 static int       g_hi_s = 1;                /* the scale in use: 1 = off */
+static int       g_hi_sy = 1;               /* ... down, for the VR eye pictures (g_hi_s.. 8) */
 static uint32_t *g_hi_frame, *g_hi_rgba;
 static int       g_hi_valid;                /* g_hi_frame holds the frame g_frame holds */
 
@@ -956,7 +958,8 @@ static void vr_apply(void) {
     /* The HUD panel: vr_hud_size of the game's view width (fovy 45 at 480:272) at its distance. */
     const vr_config cfg = { g_vr_dist_dm / 10.0f, g_vr_width_dm / 10.0f, g_hi_s > 1 ? g_hi_s : VR_SCALE_DEFAULT,
                             g_vr_stereo && g_renderer == REN_D3D11, g_vr_hud_dist, VR_HUD_DROP_DEFAULT,
-                            2.0f * g_vr_hud_dist * 0.7311f * g_vr_hud_size, g_vr_hud_follow };
+                            2.0f * g_vr_hud_dist * 0.7311f * g_vr_hud_size, g_vr_hud_follow,
+                            g_hi_s > 1 ? g_hi_sy : 0 };
     if (g_vr_on && !g_vr_live && !g_headless) {
         vr_set_swap_circle_cross(g_swap_oc);
         g_vr_live = vr_start(g_exe_dir, &cfg) == 0;
@@ -1243,18 +1246,18 @@ static float eye_tan_y(uint32_t tag) {
 /* The eye pictures with the overlay (menus, FPS) on top, as compose() does
  * for the S-times picture: each overlay pixel covers its block. */
 static void compose_eyes(void) {
-    const int S = g_eye_w / SCREEN_W, W = g_eye_w;
+    const int S = g_eye_w / SCREEN_W, SY = g_eye_h / SCREEN_H, W = g_eye_w;
     for (int e = 0; e < 2; e++) {
-        if (!g_eye_rgba[e]) g_eye_rgba[e] = (uint32_t *)malloc((size_t)SCREEN_W * 4 * SCREEN_H * 4 * 4);
+        if (!g_eye_rgba[e]) g_eye_rgba[e] = (uint32_t *)malloc((size_t)SCREEN_W * 4 * SCREEN_H * 8 * 4);
         if (!g_eye_rgba[e]) return;
         for (int y = 0; y < SCREEN_H; y++)
             for (int x = 0; x < SCREEN_W; x++) {
                 const int i = y * SCREEN_W + x;
                 const int flat = g_rgba[i] != g_frame[i];
-                for (int k = 0; k < S; k++) {
-                    uint32_t *dst = g_eye_rgba[e] + (size_t)(y * S + k) * W + (size_t)x * S;
+                for (int k = 0; k < SY; k++) {
+                    uint32_t *dst = g_eye_rgba[e] + (size_t)(y * SY + k) * W + (size_t)x * S;
                     if (flat) for (int j = 0; j < S; j++) dst[j] = g_rgba[i];
-                    else memcpy(dst, g_eye_px[e] + (size_t)(y * S + k) * W + (size_t)x * S, (size_t)S * 4);
+                    else memcpy(dst, g_eye_px[e] + (size_t)(y * SY + k) * W + (size_t)x * S, (size_t)S * 4);
                 }
             }
     }
@@ -2985,6 +2988,22 @@ int main(int argc, char **argv) {
         int sc = g_render_scale_arg ? g_render_scale_arg : g_render_scale;
         sc = sc < 1 ? 1 : sc > 4 ? 4 : sc;
         d3d11_set_scale(sc);
+#ifdef PSP2I_VR
+        /* VR head tracking: the eyes see vr_fov_scale times the game's view
+         * across but vr_fov_scale_y times up and down, so the same rows
+         * would make pixels about 1.7x taller than wide in the headset (the
+         * blur and pixelation up and down). Rows for the same pixels per
+         * degree both ways. The window and VRAM still get S x S. */
+        if (sc > 1 && (vr_arg >= 0 ? vr_arg : g_vr_on) && g_vr_stereo && g_vr_head) {
+            const float tx = 1.0f / PSP2I_FIELD_PROJ_X, ty = tx * (float)SCREEN_H / (float)SCREEN_W;
+            const float fx = g_vr_fov > 1.0f ? g_vr_fov : 1.0f, fy = g_vr_fov_y > 1.0f ? g_vr_fov_y : 1.0f;
+            const float k = ((float)SCREEN_W / (float)SCREEN_H) * atanf(fy * ty) / atanf(fx * tx);
+            int sy = (int)lroundf((float)sc * k);
+            sy = sy < sc ? sc : sy > 8 ? 8 : sy;
+            d3d11_set_scale_y(sy);
+            g_hi_sy = sy;
+        }
+#endif
         if (d3d11_init() != 0) {
             fprintf(stderr, "psp2i: falling back to the software renderer\n");
             g_renderer = REN_SOFTWARE;
@@ -2993,6 +3012,9 @@ int main(int argc, char **argv) {
             g_hi_rgba = (uint32_t *)calloc((size_t)SCREEN_W * sc * SCREEN_H * sc, 4);
             if (g_hi_frame && g_hi_rgba) g_hi_s = sc;
             fprintf(stderr, "d3d11: internal resolution %dx (%dx%d)\n", sc, SCREEN_W * sc, SCREEN_H * sc);
+            if (g_hi_sy > sc)
+                fprintf(stderr, "d3d11: VR eye pictures %dx%d (%dx down, for square pixels in the headset)\n",
+                        SCREEN_W * sc, SCREEN_H * g_hi_sy, g_hi_sy);
         }
     }
 #endif

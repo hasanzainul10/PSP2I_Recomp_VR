@@ -83,8 +83,8 @@ static float     g_tan_fov_y;               /* ... and vertical; 0 = from the pi
 static SRWLOCK  g_frame_lock = SRWLOCK_INIT;
 /* The latest picture (0xAARRGGBB): 480x272, or k times that when the game
  * renders at a higher internal resolution (up to 4x). */
-static uint32_t g_frame[GAME_W * 4 * GAME_H * 4];
-static uint32_t g_frame_r[GAME_W * 4 * GAME_H * 4];   /* the right eye's (vr_submit_stereo) */
+static uint32_t g_frame[GAME_W * 4 * GAME_H * 8];      /* up to 8 rows per game row (vr_config.scale_y) */
+static uint32_t g_frame_r[GAME_W * 4 * GAME_H * 8];   /* the right eye's (vr_submit_stereo) */
 static int      g_frame_w = GAME_W, g_frame_h = GAME_H;
 static int      g_frame_stereo;             /* g_frame is the left eye and g_frame_r the right */
 static LONG     g_frame_seq;                /* bumped per vr_submit_frame / vr_submit_stereo(_shared) */
@@ -466,7 +466,7 @@ static void input_update(int focused) {
 
 /* ---- session ---------------------------------------------------------------- */
 
-static int swapchain_create(int scale) {
+static int swapchain_create(int scale, int scale_y) {
     uint32_t n = 0;
     XR_CHECK(p_xrEnumerateSwapchainFormats(g_sess, 0, &n, NULL), "xrEnumerateSwapchainFormats");
     int64_t *fmts = (int64_t *)calloc(n ? n : 1, sizeof *fmts);
@@ -486,7 +486,7 @@ static int swapchain_create(int scale) {
     if (!PREF[pick].srgb) fprintf(stderr, "vr: no sRGB swapchain format; colours will look washed out\n");
     g_chain_bgra = PREF[pick].bgra;
     g_chain_w = GAME_W * scale * 3;                     /* left eye | right eye | HUD */
-    g_chain_h = GAME_H * scale;
+    g_chain_h = GAME_H * scale_y;                       /* the eye pictures' rows (vr_config.scale_y) */
     XrSwapchainCreateInfo ci = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
     ci.usageFlags = XR_SWAPCHAIN_USAGE_SAMPLED_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT | XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
     ci.format = PREF[pick].f;
@@ -540,11 +540,13 @@ static int session_create(void) {
     rs.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
     XR_CHECK(p_xrCreateReferenceSpace(g_sess, &rs, &g_view), "xrCreateReferenceSpace(VIEW)");
     AcquireSRWLockShared(&g_cfg_lock);
-    int scale = g_cfg.scale;
+    int scale = g_cfg.scale, scale_y = g_cfg.scale_y;
     ReleaseSRWLockShared(&g_cfg_lock);
     if (scale < 1) scale = 1;
     if (scale > 4) scale = 4;
-    if (swapchain_create(scale) != 0) return -1;
+    if (scale_y < scale) scale_y = scale;
+    if (scale_y > 8) scale_y = 8;
+    if (swapchain_create(scale, scale_y) != 0) return -1;
     if (actions_create() != 0) return -1;
     XrSessionActionSetsAttachInfo at = { XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO };
     at.countActionSets = 1;
@@ -733,21 +735,27 @@ static void upload(void) {
     if (shared) { g_uploaded_seq = seq; upload_shared(shared); return; }
     AcquireSRWLockShared(&g_frame_lock);
     const int fw = g_frame_w, fh = g_frame_h, half = g_chain_w / 3;   /* one eye's part */
-    const int s = half / fw;                                     /* swapchain pixels per picture pixel */
+    const int s = half / fw;                                     /* swapchain pixels per picture pixel across */
     if (s >= 1)                                                  /* no HUD picture on this path */
         for (int y = 0; y < g_chain_h; y++) memset(&g_upload[(size_t)y * g_chain_w + 2 * (size_t)half], 0, (size_t)half * 4);
-    if (s < 1 || g_chain_h / fh != s) { ReleaseSRWLockShared(&g_frame_lock); g_uploaded_seq = seq; return; }
+    if (s < 1 || fw * s != half || fh < 1 || fh > g_chain_h) { ReleaseSRWLockShared(&g_frame_lock); g_uploaded_seq = seq; return; }
+    /* Down, the nearest picture row for each swapchain row: the chain may
+     * have more rows than the picture's scale (taller eye pictures,
+     * vr_config.scale_y) while a mono picture is S x S. */
     for (int eye = 0; eye < 2; eye++) {                          /* mono: the same picture twice */
         const uint32_t *pic = eye && g_frame_stereo ? g_frame_r : g_frame;
-        for (int y = 0; y < fh; y++) {
+        int prev = -1;
+        for (int Y = 0; Y < g_chain_h; Y++) {
+            const int y = (int)((int64_t)Y * fh / g_chain_h);
+            uint32_t *row = &g_upload[(size_t)Y * g_chain_w + (size_t)eye * half];
+            if (y == prev) { memcpy(row, row - g_chain_w, (size_t)half * 4); continue; }
+            prev = y;
             const uint32_t *src = &pic[(size_t)y * fw];
-            uint32_t *row = &g_upload[(size_t)y * s * g_chain_w + (size_t)eye * half];
             for (int x = 0; x < fw; x++) {
                 uint32_t c = src[x] | 0xFF000000u;               /* 0xAARRGGBB = BGRA bytes */
                 if (!g_chain_bgra) c = (c & 0xFF00FF00u) | ((c >> 16) & 0xFFu) | ((c & 0xFFu) << 16);
                 for (int k = 0; k < s; k++) row[x * s + k] = c;
             }
-            for (int k = 1; k < s; k++) memcpy(row + (size_t)k * g_chain_w, row, (size_t)half * 4);
         }
     }
     ReleaseSRWLockShared(&g_frame_lock);
@@ -1096,7 +1104,7 @@ int vr_start(const char *exe_dir, const vr_config *cfg) {
     if (g_thread) return 0;
     snprintf(g_dir, sizeof g_dir, "%s", exe_dir ? exe_dir : ".");
     if (cfg) vr_configure(cfg);
-    if (cfg) { AcquireSRWLockExclusive(&g_cfg_lock); g_cfg.scale = cfg->scale; ReleaseSRWLockExclusive(&g_cfg_lock); }
+    if (cfg) { AcquireSRWLockExclusive(&g_cfg_lock); g_cfg.scale = cfg->scale; g_cfg.scale_y = cfg->scale_y; ReleaseSRWLockExclusive(&g_cfg_lock); }
     g_quit = 0;
     g_thread = CreateThread(NULL, 0, vr_thread, NULL, 0, NULL);
     if (!g_thread) { fprintf(stderr, "vr: cannot start the VR thread\n"); return -1; }
@@ -1150,7 +1158,7 @@ void vr_submit_frame(const uint32_t *argb, int w, int h) {
 
 void vr_submit_stereo(const uint32_t *left, const uint32_t *right, int w, int h, float tan_half_fov_x,
                       float tan_half_fov_y, uint32_t head) {
-    if (!g_thread || w < GAME_W || w % GAME_W || h * GAME_W != w * GAME_H || w > GAME_W * 4) return;
+    if (!g_thread || w < GAME_W || w % GAME_W || w > GAME_W * 4 || h < GAME_H || h % GAME_H || h > GAME_H * 8) return;
     AcquireSRWLockExclusive(&g_frame_lock);
     memcpy(g_frame, left, (size_t)w * h * 4);
     memcpy(g_frame_r, right, (size_t)w * h * 4);

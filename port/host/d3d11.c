@@ -40,6 +40,9 @@
  * the sample nearest each PSP pixel's centre; GPU transfers between targets
  * keep the sub-pixel position. d3d11_present also hands out the S-times
  * picture (d3d11_present_hires) for the window and the headset.
+ * The scale down (g_scale_y, d3d11_set_scale_y) may be larger than across,
+ * for VR eye pictures with square pixels; the S-times picture is then
+ * resampled to S x S, and only the eye pictures keep the extra rows.
  */
 #ifdef _WIN32
 
@@ -134,9 +137,15 @@ static ID3D11ShaderResourceView *g_scratch_srv;
 static uint32_t g_scratch_w, g_scratch_h;
 static uint64_t g_use;
 static int g_scale = 1;                  /* internal resolution: GPU pixels per PSP pixel (1..4) */
+static int g_scale_y = 1;                /* ... down (g_scale..8): taller for the VR eyes */
 
 /* Before d3d11_init: the internal resolution scale. */
-void d3d11_set_scale(int s) { g_scale = s < 1 ? 1 : s > 4 ? 4 : s; }
+void d3d11_set_scale(int s) { g_scale = g_scale_y = s < 1 ? 1 : s > 4 ? 4 : s; }
+/* After d3d11_set_scale, before d3d11_init: GPU pixels per PSP pixel down,
+ * when it isn't the same as across. VR head tracking widens the eyes' view
+ * up and down more than across (vr_fov_scale_y), so the eye pictures need
+ * more rows for square pixels in the headset. */
+void d3d11_set_scale_y(int s) { g_scale_y = s < g_scale ? g_scale : s > 8 ? 8 : s; }
 
 static uint64_t n_draws, n_tris, n_uploads, n_readbacks, n_tex_decodes, n_rt_tex, n_approx;
 
@@ -291,7 +300,7 @@ static const char *SHADER_SRC =
  * reading src back to VRAM and seeding dst from VRAM would produce
  * (pack16/expand16 below are the C ones), without the round trip. */
 static const char *XFER_SRC =
-"cbuffer X : register(b2) { uint4 dst; uint4 src; uint4 rng; };\n"   /* off, stride, fmt, bpp; ...; lo, hi, scale */
+"cbuffer X : register(b2) { uint4 dst; uint4 src; uint4 rng; };\n"   /* off, stride, fmt, bpp; ...; lo, hi, scale, scale down */
 "Texture2D<float4> Y : register(t1);\n"
 "float4 vsx(uint id : SV_VertexID) : SV_Position {\n"
 "  float2 p = float2((id << 1) & 2, id & 2);\n"
@@ -299,7 +308,7 @@ static const char *XFER_SRC =
 "}\n"
 "static uint2 sub;\n"                                    /* the GPU pixel within its PSP pixel */
 "uint ld(uint i) {\n"
-"  uint4 b = (uint4)round(saturate(Y.Load(int3((i % src.y) * rng.z + sub.x, (i / src.y) * rng.z + sub.y, 0))) * 255.0);\n"
+"  uint4 b = (uint4)round(saturate(Y.Load(int3((i % src.y) * rng.z + sub.x, (i / src.y) * rng.w + sub.y, 0))) * 255.0);\n"
 "  return b.x | (b.y << 8) | (b.z << 16) | (b.w << 24);\n"
 "}\n"
 "uint pack16(uint f, uint c) {\n"
@@ -319,8 +328,8 @@ static const char *XFER_SRC =
 "}\n"
 "float4 bytes4(uint w) { return float4(w & 255, (w >> 8) & 255, (w >> 16) & 255, w >> 24) / 255.0; }\n"
 "float4 psx(float4 pos : SV_Position) : SV_Target {\n"
-"  uint x = (uint)pos.x / rng.z, y = (uint)pos.y / rng.z;\n"
-"  sub = uint2((uint)pos.x % rng.z, (uint)pos.y % rng.z);\n"
+"  uint x = (uint)pos.x / rng.z, y = (uint)pos.y / rng.w;\n"
+"  sub = uint2((uint)pos.x % rng.z, (uint)pos.y % rng.w);\n"
 "  uint A = dst.x + (y * dst.y + x) * dst.w;\n"
 "  if (A < rng.x || A + dst.w > rng.y) discard;\n"
 "  uint rel = A - src.x;\n"
@@ -396,8 +405,9 @@ static void rt_readback_inner(rt_entry *t) {
         if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &d, NULL, &t->staging))) return;
     }
     const uint32_t S = (uint32_t)g_scale, c = S / 2;     /* the GPU sample nearest a PSP pixel's centre */
-    D3D11_BOX box = { 0, y0 * S, 0, t->w * S, y1 * S, 1 };
-    ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)t->staging, 0, 0, y0 * S, 0,
+    const uint32_t SY = (uint32_t)g_scale_y, cy = SY / 2;
+    D3D11_BOX box = { 0, y0 * SY, 0, t->w * S, y1 * SY, 1 };
+    ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)t->staging, 0, 0, y0 * SY, 0,
                                               (ID3D11Resource *)t->tex, 0, &box);
     D3D11_MAPPED_SUBRESOURCE m;
     if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)t->staging, 0, D3D11_MAP_READ, 0, &m))) return;
@@ -406,7 +416,7 @@ static void rt_readback_inner(rt_entry *t) {
         if (!row_dirty(t, y)) continue;                 /* not ours: another target or VRAM has it */
         uint32_t o = t->off + y * t->stride * (uint32_t)bpp;
         if (o + t->stride * (uint32_t)bpp > VRAM_SIZE) break;
-        const uint32_t *src = (const uint32_t *)((const uint8_t *)m.pData + (size_t)(y * S + c) * m.RowPitch);
+        const uint32_t *src = (const uint32_t *)((const uint8_t *)m.pData + (size_t)(y * SY + cy) * m.RowPitch);
         if (S == 1 && bpp == 4) memcpy(v + o, src, t->stride * 4u);
         else if (bpp == 4) for (uint32_t x = 0; x < t->stride; x++) memcpy(v + o + x * 4, &src[x * S + c], 4);
         else for (uint32_t x = 0; x < t->stride; x++) {
@@ -451,20 +461,20 @@ static void rt_upload(rt_entry *t) {
             px[y * t->stride + x] = c;
         }
     }
-    if (g_scale > 1) {                                  /* each PSP pixel as S x S GPU pixels */
-        const uint32_t S = (uint32_t)g_scale, W = t->stride * S;
-        uint32_t *big = (uint32_t *)malloc((size_t)W * t->rows * S * 4);
+    if (g_scale > 1 || g_scale_y > 1) {                /* each PSP pixel as S x SY GPU pixels */
+        const uint32_t S = (uint32_t)g_scale, SY = (uint32_t)g_scale_y, W = t->stride * S;
+        uint32_t *big = (uint32_t *)malloc((size_t)W * t->rows * SY * 4);
         if (!big) { free(px); return; }
         for (uint32_t y = 0; y < t->rows; y++) {
-            uint32_t *row = big + (size_t)y * S * W;
+            uint32_t *row = big + (size_t)y * SY * W;
             for (uint32_t x = 0; x < t->stride; x++)
                 for (uint32_t k = 0; k < S; k++) row[x * S + k] = px[y * t->stride + x];
-            for (uint32_t k = 1; k < S; k++) memcpy(row + (size_t)k * W, row, (size_t)W * 4);
+            for (uint32_t k = 1; k < SY; k++) memcpy(row + (size_t)k * W, row, (size_t)W * 4);
         }
         free(px);
         px = big;
     }
-    D3D11_BOX box = { 0, 0, 0, t->stride * (uint32_t)g_scale, t->rows * (uint32_t)g_scale, 1 };
+    D3D11_BOX box = { 0, 0, 0, t->stride * (uint32_t)g_scale, t->rows * (uint32_t)g_scale_y, 1 };
     ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)t->tex, 0, &box, px, t->stride * (uint32_t)g_scale * 4, 0);
     free(px);
     for (int e = 0; e < 2; e++)                         /* the eyes see the same new bytes */
@@ -501,7 +511,7 @@ static rt_entry *rt_get(uint32_t off, uint32_t stride, int fmt, uint32_t rows) {
         t->w = stride; t->h = 512;
         D3D11_TEXTURE2D_DESC d;
         memset(&d, 0, sizeof d);
-        d.Width = t->w * (uint32_t)g_scale; d.Height = t->h * (uint32_t)g_scale; d.MipLevels = 1; d.ArraySize = 1;
+        d.Width = t->w * (uint32_t)g_scale; d.Height = t->h * (uint32_t)g_scale_y; d.MipLevels = 1; d.ArraySize = 1;
         d.Format = DXGI_FORMAT_R8G8B8A8_UNORM; d.SampleDesc.Count = 1;
         d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
         if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &d, NULL, &t->tex))) { memset(t, 0, sizeof *t); return NULL; }
@@ -559,7 +569,7 @@ static depth_entry *depth_get(uint32_t off, uint32_t w, uint32_t h) {
         }
         D3D11_TEXTURE2D_DESC td;
         memset(&td, 0, sizeof td);
-        td.Width = w * (uint32_t)g_scale; td.Height = h * (uint32_t)g_scale; td.MipLevels = 1; td.ArraySize = 1;
+        td.Width = w * (uint32_t)g_scale; td.Height = h * (uint32_t)g_scale_y; td.MipLevels = 1; td.ArraySize = 1;
         td.Format = DXGI_FORMAT_D16_UNORM; td.SampleDesc.Count = 1;
         td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
         if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &d->tex))) return NULL;
@@ -1011,7 +1021,7 @@ static uint64_t n_xv_checked, n_xv_bad_px, n_xv_bad_xfers, n_xv_overlap;
 static int xverify(void) {
     static int on = -1;
     if (on < 0) on = getenv("PSP2I_XFER_VERIFY") != NULL;
-    return on && g_scale == 1;                          /* it compares PSP pixels 1:1 */
+    return on && g_scale == 1 && g_scale_y == 1;                         /* it compares PSP pixels 1:1 */
 }
 
 static int map_rows(rt_entry *t, uint32_t y0, uint32_t y1, D3D11_MAPPED_SUBRESOURCE *m) {
@@ -1101,13 +1111,13 @@ static void rt_xfer(rt_entry *t, rt_entry *o, uint32_t a, uint32_t b, int own) {
     xfer_consts xc = {
         { t->off, t->stride, (uint32_t)t->fmt, (uint32_t)bpp_of(t->fmt) },
         { o->off, o->stride, (uint32_t)o->fmt, (uint32_t)bpp_of(o->fmt) },
-        { i0, i1, (uint32_t)g_scale, 0 } };
+        { i0, i1, (uint32_t)g_scale, (uint32_t)g_scale_y } };
     ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)g_xcb, 0, NULL, &xc, 0, 0);
     ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &t->rtv, NULL);
-    const LONG S = g_scale;
-    D3D11_VIEWPORT vp = { 0, 0, (float)(t->w * S), (float)(t->h * S), 0, 1 };
+    const LONG S = g_scale, SY = g_scale_y;
+    D3D11_VIEWPORT vp = { 0, 0, (float)(t->w * S), (float)(t->h * SY), 0, 1 };
     ID3D11DeviceContext_RSSetViewports(g_ctx, 1, &vp);
-    D3D11_RECT sc = { 0, (LONG)y0 * S, (LONG)t->w * S, (LONG)y1 * S };
+    D3D11_RECT sc = { 0, (LONG)y0 * SY, (LONG)t->w * S, (LONG)y1 * SY };
     ID3D11DeviceContext_RSSetScissorRects(g_ctx, 1, &sc);
     ID3D11DeviceContext_RSSetState(g_ctx, g_rs);
     ID3D11DeviceContext_OMSetBlendState(g_ctx, NULL, NULL, 0xFFFFFFFFu);
@@ -1205,11 +1215,11 @@ static int submit_draw(const psp_gpu_state *st, const psp_gpu_vertex *v, int nve
 
     ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &rtv, dsv);
     /* The vertex shader maps PSP pixels (vc.vp) to the target; the viewport
-     * and scissor are the target's own, S times larger. */
-    const LONG S = g_scale;
-    D3D11_VIEWPORT vp = { 0, 0, (float)(tw * S), (float)(th * S), 0, 1 };
+     * and scissor are the target's own, S times larger (SY down). */
+    const LONG S = g_scale, SY = g_scale_y;
+    D3D11_VIEWPORT vp = { 0, 0, (float)(tw * S), (float)(th * SY), 0, 1 };
     ID3D11DeviceContext_RSSetViewports(g_ctx, 1, &vp);
-    D3D11_RECT sc = { st->sx0 * S, st->sy0 * S, (st->sx1 + 1) * S, (st->sy1 + 1) * S };
+    D3D11_RECT sc = { st->sx0 * S, st->sy0 * SY, (st->sx1 + 1) * S, (st->sy1 + 1) * SY };
     ID3D11DeviceContext_RSSetScissorRects(g_ctx, 1, &sc);
     ID3D11DeviceContext_RSSetState(g_ctx, g_rs);
     ID3D11DeviceContext_OMSetBlendState(g_ctx, bs, bf, 0xFFFFFFFFu);
@@ -1422,7 +1432,7 @@ static int hud_target(UINT w, UINT h) {
     }
     D3D11_TEXTURE2D_DESC d;
     memset(&d, 0, sizeof d);
-    d.Width = w * (UINT)g_scale; d.Height = h * (UINT)g_scale; d.MipLevels = 1; d.ArraySize = 1;
+    d.Width = w * (UINT)g_scale; d.Height = h * (UINT)g_scale_y; d.MipLevels = 1; d.ArraySize = 1;
     d.Format = DXGI_FORMAT_R8G8B8A8_UNORM; d.SampleDesc.Count = 1;
     d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
     for (int i = 0; i < HUD_RING; i++)
@@ -1741,14 +1751,14 @@ int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w,
             if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &d, NULL, &g_present[k]))) return 0;
             g_present_w[k] = t->w;
         }
-        D3D11_BOX box = { 0, 0, 0, (UINT)(w * g_scale), (UINT)(h * g_scale), 1 };
+        D3D11_BOX box = { 0, 0, 0, (UINT)(w * g_scale), (UINT)(h * g_scale_y), 1 };
         ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)g_present[k], 0, 0, 0, 0,
                                                   (ID3D11Resource *)t->tex, 0, &box);
         /* Stereo: the eye copies too, when this frame was drawn for the eyes. */
         g_present_eyes[k] = eye_picture(t, 0) && eye_picture(t, 1) && t->eye_frame + 2 >= frame_no();
         g_present_stereo[k] = g_present_eyes[k];
         g_present_tag[k] = t->eye_tag;
-        if (g_present_eyes[k] && g_share_on && share_eyes(t, (UINT)(w * g_scale), (UINT)(h * g_scale)))
+        if (g_present_eyes[k] && g_share_on && share_eyes(t, (UINT)(w * g_scale), (UINT)(h * g_scale_y)))
             g_present_eyes[k] = 0;                     /* the headset has them already */
         for (int e = 0; e < 2 && g_present_eyes[k]; e++) {
             if (!g_eye_present[k][e]) {
@@ -1812,9 +1822,9 @@ int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w,
             lut_ready = 1;
         }
         const uint32_t (*L)[256] = lut[f & 3];
-        const int S = g_scale, c0 = S / 2;
+        const int S = g_scale, c0 = S / 2, SY = g_scale_y;
         for (int y = 0; y < h; y++) {                   /* PSP pixels: the sample nearest each centre */
-            const uint32_t *src = (const uint32_t *)((const uint8_t *)m.pData + (size_t)(y * S + c0) * m.RowPitch);
+            const uint32_t *src = (const uint32_t *)((const uint8_t *)m.pData + (size_t)(y * SY + SY / 2) * m.RowPitch);
             uint32_t *dst = out + (size_t)y * (size_t)w;
             for (int x = 0; x < w; x++) {
                 dst[x] = present_px(src[x * S + c0], f, L);
@@ -1823,8 +1833,8 @@ int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w,
         /* And the whole S-times picture -- not with stereo, where the eyes
          * are the headset's pictures and the window makes do with 480x272. */
         if (S > 1 && !g_present_stereo[best] && hires_buffer(w * S, h * S)) {
-            for (int y = 0; y < h * S; y++) {
-                const uint32_t *src = (const uint32_t *)((const uint8_t *)m.pData + (size_t)y * m.RowPitch);
+            for (int y = 0; y < h * S; y++) {           /* S x S: the nearest of SY rows */
+                const uint32_t *src = (const uint32_t *)((const uint8_t *)m.pData + (size_t)(y * SY / S) * m.RowPitch);
                 uint32_t *dst = g_hires + (size_t)y * (size_t)(w * S);
                 for (int x = 0; x < w * S; x++) dst[x] = present_px(src[x], f, L);
             }
@@ -1832,7 +1842,7 @@ int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w,
         }
         ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_present[best], 0);
         if (g_present_eyes[best]) {                       /* copied just after: done or nearly */
-            const int W = w * S, H = h * S;
+            const int W = w * S, H = h * SY;              /* the eyes keep their SY rows */
             int ok = 1;
             for (int e = 0; e < 2 && ok; e++) {
                 if (!g_eye_px[e] || g_eye_w != W || g_eye_h != H) {

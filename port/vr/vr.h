@@ -28,6 +28,7 @@ typedef struct {
      * turning only to follow the heading once the head has looked more than
      * hud_follow_deg away (0: it stays where recenter put it). */
     float hud_distance_m, hud_drop_m, hud_width_m, hud_follow_deg;
+    int   scale_y;      /* swapchain pixels per game pixel down, scale..8 (taller eye pictures); 0 = scale */
 } vr_config;
 
 #define VR_DISTANCE_DEFAULT 2.5f
