@@ -1329,12 +1329,6 @@ static void hook_cull_test(void (*original)(void)) {
  * field camera is the one with the field's projection (x scale 1.15..2.5). */
 static uint64_t n_fp_cam;
 #define FN_APPLY_CAMERA 0x08AFD474u
-/* The camera left widened by the last apply (its projection x / y as
- * written, and as they were): the game reads the camera object's projection
- * during the frame too, so it stays widened until the next apply, which puts
- * the original back first. */
-static uint32_t g_wide_cam;
-static float    g_wide_w0, g_wide_w5, g_wide_o0, g_wide_o5;
 #ifndef PSP2I_PROD
 /* Dev: each ApplyCamera of a frame and the global projection when the
  * scene walk starts (hook_node_vis), logged every ~5 s: is the widened
@@ -1346,11 +1340,6 @@ static uint64_t g_apply_log_flip;
 
 static void hook_apply_camera(void (*original)(void)) {
     const uint32_t cam = psp_cpu.r[4], pl = gamelog_local_player();
-    if (cam && cam == g_wide_cam && psp_read_f32(cam + 0x90u) == g_wide_w0 && psp_read_f32(cam + 0xA4u) == g_wide_w5) {
-        psp_write_f32(cam + 0x90u, g_wide_o0);           /* ours from the last frame: the original first */
-        psp_write_f32(cam + 0xA4u, g_wide_o5);
-    }
-    if (cam == g_wide_cam) g_wide_cam = 0;
     const float px = cam ? psp_read_f32(cam + 0x90u) : 0.0f;
 #ifndef PSP2I_PROD
     {
@@ -1411,21 +1400,23 @@ static void hook_apply_camera(void (*original)(void)) {
         }
     }
     if (!g_fp_cam) { original(); return; }
-    /* Its projection wider (SetProjection copies it to the global and builds
-     * the cull planes from it), and the camera object's own left widened for
-     * the frame: put back for SetProjection only, the edges of the eyes' view
-     * were still culled (2026-10-23 capture in the ship: looking up, no floor). */
+    original();
+    /* The global projection the scene walk culls with (0x08FA97A0, set by
+     * SetProjection inside ApplyCamera) made wider after it: widening the
+     * camera object's copy (cam+0x90) never reached it; measured 2026-10-23,
+     * the walk saw x 1.368 every frame, and the edges of the eyes' view were
+     * culled (in the ship, looking up: no floor). The walk follows this apply
+     * directly; the frame's later applies set their own. The cull planes are
+     * built inside, already wider (vr_cull_scale). */
     const float fx = g_vr_fov > 1.0f ? g_vr_fov : 1.0f, fy = g_vr_fov_y > 1.0f ? g_vr_fov_y : 1.0f;
     g_fp_kx = fx * VR_FP_VIEW_MARGIN;
     g_fp_ky = fy * VR_FP_VIEW_MARGIN;
-    const float p0 = psp_read_f32(cam + 0x90u), p5 = psp_read_f32(cam + 0xA4u);
+    const float p0 = psp_read_f32(PSP2I_PROJ_MATRIX), p5 = psp_read_f32(PSP2I_PROJ_MATRIX + 20);
     g_fp_p0 = fabsf(p0); g_fp_p5 = fabsf(p5);
-    g_wide_o0 = p0; g_wide_o5 = p5;
-    g_wide_w0 = p0 / g_fp_kx; g_wide_w5 = p5 / g_fp_ky;
-    psp_write_f32(cam + 0x90u, g_wide_w0);
-    psp_write_f32(cam + 0xA4u, g_wide_w5);
-    g_wide_cam = cam;
-    original();
+    if (psp_read32(PSP2I_PROJ_ORTHO) != 1) {
+        psp_write_f32(PSP2I_PROJ_MATRIX, p0 / g_fp_kx);
+        psp_write_f32(PSP2I_PROJ_MATRIX + 20, p5 / g_fp_ky);
+    }
 }
 
 #ifndef PSP2I_PROD
