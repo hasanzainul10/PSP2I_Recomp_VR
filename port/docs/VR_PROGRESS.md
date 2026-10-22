@@ -232,6 +232,11 @@ the world; the user found it overwhelming. Those were removed. Now:
   units (`PSP2I_FP_FX_AHEAD`). The flat moments: suspected a full-screen
   HUD-pass effect taken by the panel's size rule (frac > 0.2); dev log
   `vr: a big HUD-pass sheet on the panel` added to catch it. Built, not run.
+- **The flat moments while moving, found (`vr_blip2.log`):** big HUD-pass
+  sheets at w 90-220, 20-209% of the screen, their depth changing frame to
+  frame (things moving in the world drawn in the HUD pass), went to the
+  panel by the size rule. Fix (built, not run): the size rule only below
+  w 89 (the labels' depth, where portraits are).
 - **Open:** hiding the player's own head (bone weights, or an eye-forward
   offset), body-relative movement (today the stick moves relative to the
   game camera, which trails behind), the cull behind the game camera.

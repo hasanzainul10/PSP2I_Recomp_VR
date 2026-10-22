@@ -918,12 +918,18 @@ static int psp2i_hud_panel(float w, float frac) {
         while (k < n && seen[k] != key) k++;
         if (k == n && n < 64) {
             seen[n++] = key;
-            fprintf(stderr, "vr: a big HUD-pass sheet on the panel: w %.2f, %.0f%% of the screen (vblank %llu)\n", (double)w,
-                    (double)(frac * 100.0f), (unsigned long long)psp_sched_vblank_count());
+            fprintf(stderr, "vr: a big HUD-pass sheet: w %.2f, %.0f%% of the screen (vblank %llu): %s\n", (double)w,
+                    (double)(frac * 100.0f), (unsigned long long)psp_sched_vblank_count(),
+                    w < 89.0f ? "on the panel" : "in the world");
         }
     }
 #endif
-    return frac > 0.2f || layer;
+    /* By size only at the labels' depth (the portraits, w 86): big sheets
+     * deeper than that are things in the world the game draws in its HUD
+     * pass (w 90-220, 20-209% of the screen, depth changing as they move:
+     * VR log 2026-10-23), which on the panel put a flat sheet in front of
+     * the user while moving. */
+    return (frac > 0.2f && w < 89.0f) || layer;
 }
 /* Screen-space effects (hit sparks, techniques: small orthographic draws in
  * the scene pass) are placed this far along the camera's ray: about where
