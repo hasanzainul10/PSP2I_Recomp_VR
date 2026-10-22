@@ -59,6 +59,20 @@ void vr_submit_frame(const uint32_t *argb, int w, int h);
  * picture again. */
 void vr_submit_stereo(const uint32_t *left, const uint32_t *right, int w, int h, float tan_half_fov_x);
 
+/* The same on the GPU: `handle` is a DXGI shared handle (keyed mutex, key 0)
+ * of an RGBA8 texture 2w x h holding left | right, at the swapchain's size.
+ * The VR thread copies it into the swapchain. If it can't (another GPU, a
+ * size or format mismatch) vr_share_failed() turns 1 for good: then send
+ * pixels with vr_submit_stereo. */
+void vr_submit_stereo_shared(void *handle, int w, int h, float tan_half_fov_x);
+int  vr_share_failed(void);
+
+/* The port's overlay (engine menu, FPS counter: what it draws over the game)
+ * as its own layer on the screen, 480x272 0xAARRGGBB with alpha 0 where it
+ * draws nothing; NULL = none. Used with the shared stereo pictures, which
+ * don't carry it. Copied; send it only when it changes. */
+void vr_submit_overlay(const uint32_t *argb);
+
 /* The headset's IPD in metres (the distance between the two eye poses), or
  * VR_IPD_DEFAULT until the session reports it. */
 #define VR_IPD_DEFAULT 0.064f

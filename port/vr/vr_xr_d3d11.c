@@ -85,7 +85,9 @@ static uint32_t g_frame[GAME_W * 4 * GAME_H * 4];
 static uint32_t g_frame_r[GAME_W * 4 * GAME_H * 4];   /* the right eye's (vr_submit_stereo) */
 static int      g_frame_w = GAME_W, g_frame_h = GAME_H;
 static int      g_frame_stereo;             /* g_frame is the left eye and g_frame_r the right */
-static LONG     g_frame_seq;                /* bumped per vr_submit_frame / vr_submit_stereo */
+static LONG     g_frame_seq;                /* bumped per vr_submit_frame / vr_submit_stereo(_shared) */
+static void    *g_frame_shared;             /* the game's shared texture holds the newest frame (vr_submit_stereo_shared) */
+static volatile LONG g_share_failed;        /* it can't be used here: the game sends pixels instead */
 
 static SRWLOCK  g_pad_lock = SRWLOCK_INIT;
 static vr_pad   g_pad = { 0, 128, 128, 128, 128, 0 };
@@ -112,6 +114,17 @@ static int   g_placed;                       /* the screen has a pose */
 static XrPosef g_screen_pose;
 static LONG  g_uploaded_seq = -1;
 static uint32_t *g_upload;                   /* the converted, scaled picture */
+
+/* The port's overlay (engine menu, FPS counter) as its own layer over the
+ * screen (vr_submit_overlay): then the stereo pictures can stay on the GPU. */
+static uint32_t g_ovl[GAME_W * GAME_H];      /* 0xAARRGGBB, alpha 0 = nothing (under g_frame_lock) */
+static int      g_ovl_on;                    /* it has something to show */
+static LONG     g_ovl_seq, g_ovl_uploaded = -1;
+static XrSwapchain g_ochain;
+static XrSwapchainImageD3D11KHR g_oimages[8];
+static uint32_t g_noimages;
+static int      g_ochain_s, g_ochain_filled;
+static uint32_t *g_oupload;
 
 /* Actions */
 static XrActionSet g_aset;
@@ -424,10 +437,11 @@ static int swapchain_create(int scale) {
     int64_t *fmts = (int64_t *)calloc(n ? n : 1, sizeof *fmts);
     p_xrEnumerateSwapchainFormats(g_sess, n, &n, fmts);
     /* sRGB first: the picture's bytes are sRGB, and a UNORM swapchain is taken
-     * as linear by the compositor (washed out). BGRA matches the pixels. */
+     * as linear by the compositor (washed out). RGBA first: the game's eye
+     * textures are RGBA and are copied in as they are (vr_submit_stereo_shared). */
     static const struct { int64_t f; int bgra, srgb; } PREF[] = {
-        { DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, 1, 1 }, { DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, 0, 1 },
-        { DXGI_FORMAT_B8G8R8A8_UNORM, 1, 0 },      { DXGI_FORMAT_R8G8B8A8_UNORM, 0, 0 },
+        { DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, 0, 1 }, { DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, 1, 1 },
+        { DXGI_FORMAT_R8G8B8A8_UNORM, 0, 0 },      { DXGI_FORMAT_B8G8R8A8_UNORM, 1, 0 },
     };
     int pick = -1;
     for (int k = 0; k < 4 && pick < 0; k++)
@@ -459,7 +473,22 @@ static int swapchain_create(int scale) {
     g_chain_filled = 0;
     g_uploaded_seq = -1;
     fprintf(stderr, "vr: screen swapchain %dx%d (one picture per eye), %d images\n", g_chain_w, g_chain_h, (int)g_nimages);
-    return g_upload ? 0 : -1;
+    /* The overlay's: the same scale, so its pixels stay sharp. */
+    g_ochain_s = scale;
+    ci.width = (uint32_t)(GAME_W * scale);
+    ci.height = (uint32_t)(GAME_H * scale);
+    XR_CHECK(p_xrCreateSwapchain(g_sess, &ci, &g_ochain), "xrCreateSwapchain (overlay)");
+    g_noimages = 0;
+    XR_CHECK(p_xrEnumerateSwapchainImages(g_ochain, 0, &g_noimages, NULL), "xrEnumerateSwapchainImages");
+    if (g_noimages > 8) g_noimages = 8;
+    for (uint32_t i = 0; i < g_noimages; i++) g_oimages[i].type = XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
+    XR_CHECK(p_xrEnumerateSwapchainImages(g_ochain, g_noimages, &g_noimages, (XrSwapchainImageBaseHeader *)g_oimages),
+             "xrEnumerateSwapchainImages");
+    free(g_oupload);
+    g_oupload = (uint32_t *)malloc((size_t)GAME_W * scale * GAME_H * scale * 4);
+    g_ochain_filled = 0;
+    g_ovl_uploaded = -1;
+    return g_upload && g_oupload ? 0 : -1;
 }
 
 static int session_create(void) {
@@ -497,13 +526,63 @@ static void session_destroy(void) {
     if (g_aset) { p_xrDestroyActionSet(g_aset); g_aset = XR_NULL_HANDLE; }
     memset(g_act, 0, sizeof g_act);
     if (g_chain) { p_xrDestroySwapchain(g_chain); g_chain = XR_NULL_HANDLE; }
+    if (g_ochain) { p_xrDestroySwapchain(g_ochain); g_ochain = XR_NULL_HANDLE; }
     if (g_view) { p_xrDestroySpace(g_view); g_view = XR_NULL_HANDLE; }
     if (g_local) { p_xrDestroySpace(g_local); g_local = XR_NULL_HANDLE; }
     if (g_sess) { p_xrDestroySession(g_sess); g_sess = XR_NULL_HANDLE; }
     g_running = 0;
 }
 
+/* The game's shared eye texture, opened on this thread's device. */
+static void *g_shared_src;
+static ID3D11Texture2D *g_shared_tex;
+static IDXGIKeyedMutex *g_shared_mx;
+
+static void shared_close(void) {
+    if (g_shared_mx) IDXGIKeyedMutex_Release(g_shared_mx);
+    if (g_shared_tex) ID3D11Texture2D_Release(g_shared_tex);
+    g_shared_mx = NULL; g_shared_tex = NULL; g_shared_src = NULL;
+}
+
+static void share_fail(const char *why) {
+    fprintf(stderr, "vr: the game's eye texture can't be used (%s); pictures go through the CPU\n", why);
+    InterlockedExchange(&g_share_failed, 1);
+    shared_close();
+}
+
+/* Copy the shared texture into a swapchain image: the GPU path of upload(). */
+static void upload_shared(void *handle) {
+    if (handle != g_shared_src) {
+        shared_close();
+        if (FAILED(ID3D11Device_OpenSharedResource(g_dev, (HANDLE)handle, &IID_ID3D11Texture2D, (void **)&g_shared_tex)) ||
+            FAILED(ID3D11Texture2D_QueryInterface(g_shared_tex, &IID_IDXGIKeyedMutex, (void **)&g_shared_mx))) {
+            share_fail("OpenSharedResource failed: another GPU?");
+            return;
+        }
+        D3D11_TEXTURE2D_DESC d;
+        ID3D11Texture2D_GetDesc(g_shared_tex, &d);
+        if ((int)d.Width != g_chain_w || (int)d.Height != g_chain_h || g_chain_bgra) {
+            share_fail("size or format differs from the swapchain");
+            return;
+        }
+        g_shared_src = handle;
+    }
+    uint32_t idx;
+    XrSwapchainImageAcquireInfo ai = { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
+    if (XR_FAILED(p_xrAcquireSwapchainImage(g_chain, &ai, &idx))) return;
+    XrSwapchainImageWaitInfo wi = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
+    wi.timeout = XR_INFINITE_DURATION;
+    if (XR_SUCCEEDED(p_xrWaitSwapchainImage(g_chain, &wi)) && IDXGIKeyedMutex_AcquireSync(g_shared_mx, 0, 50) == S_OK) {
+        ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)g_images[idx].texture, (ID3D11Resource *)g_shared_tex);
+        IDXGIKeyedMutex_ReleaseSync(g_shared_mx, 0);
+        g_chain_filled = 1;
+    }
+    XrSwapchainImageReleaseInfo ri = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+    p_xrReleaseSwapchainImage(g_chain, &ri);
+}
+
 static void device_destroy(void) {
+    shared_close();
     if (g_ctx) { ID3D11DeviceContext_ClearState(g_ctx); ID3D11DeviceContext_Release(g_ctx); g_ctx = NULL; }
     if (g_dev) { ID3D11Device_Release(g_dev); g_dev = NULL; }
 }
@@ -593,6 +672,10 @@ static void upload(void) {
     const LONG seq = InterlockedCompareExchange(&g_frame_seq, 0, 0);
     if (seq == g_uploaded_seq || !g_upload) return;
     AcquireSRWLockShared(&g_frame_lock);
+    void *shared = g_frame_shared;
+    ReleaseSRWLockShared(&g_frame_lock);
+    if (shared) { g_uploaded_seq = seq; upload_shared(shared); return; }
+    AcquireSRWLockShared(&g_frame_lock);
     const int fw = g_frame_w, fh = g_frame_h, half = g_chain_w / 2;
     const int s = half / fw;                                     /* swapchain pixels per picture pixel */
     if (s < 1 || g_chain_h / fh != s) { ReleaseSRWLockShared(&g_frame_lock); g_uploaded_seq = seq; return; }
@@ -649,6 +732,37 @@ static void update_ipd(XrTime t) {
     ReleaseSRWLockExclusive(&g_cfg_lock);
 }
 
+/* The latest overlay into its swapchain, when it changed. */
+static void upload_overlay(void) {
+    const LONG seq = InterlockedCompareExchange(&g_ovl_seq, 0, 0);
+    if (seq == g_ovl_uploaded || !g_oupload || !g_ochain) return;
+    const int s = g_ochain_s, W = GAME_W * s;
+    AcquireSRWLockShared(&g_frame_lock);
+    for (int y = 0; y < GAME_H; y++) {
+        uint32_t *row = &g_oupload[(size_t)y * s * W];
+        for (int x = 0; x < GAME_W; x++) {
+            uint32_t c = g_ovl[y * GAME_W + x];
+            if (!g_chain_bgra) c = (c & 0xFF00FF00u) | ((c >> 16) & 0xFFu) | ((c & 0xFFu) << 16);
+            for (int k = 0; k < s; k++) row[x * s + k] = c;
+        }
+        for (int k = 1; k < s; k++) memcpy(row + (size_t)k * W, row, (size_t)W * 4);
+    }
+    ReleaseSRWLockShared(&g_frame_lock);
+    g_ovl_uploaded = seq;
+    uint32_t idx;
+    XrSwapchainImageAcquireInfo ai = { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
+    if (XR_FAILED(p_xrAcquireSwapchainImage(g_ochain, &ai, &idx))) return;
+    XrSwapchainImageWaitInfo wi = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
+    wi.timeout = XR_INFINITE_DURATION;
+    if (XR_SUCCEEDED(p_xrWaitSwapchainImage(g_ochain, &wi))) {
+        ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)g_oimages[idx].texture, 0, NULL,
+                                              g_oupload, (UINT)W * 4, 0);
+        g_ochain_filled = 1;
+    }
+    XrSwapchainImageReleaseInfo ri = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+    p_xrReleaseSwapchainImage(g_ochain, &ri);
+}
+
 static void frame(void) {
     XrFrameWaitInfo wi = { XR_TYPE_FRAME_WAIT_INFO };
     XrFrameState fs = { XR_TYPE_FRAME_STATE };
@@ -659,13 +773,15 @@ static void frame(void) {
     if (XR_FAILED(r)) { fprintf(stderr, "vr: xrBeginFrame failed: %s\n", res_name(r)); g_session_over = 1; return; }
 
     input_update(g_state == XR_SESSION_STATE_FOCUSED);
-    XrCompositionLayerQuad quad[2] = { { XR_TYPE_COMPOSITION_LAYER_QUAD }, { XR_TYPE_COMPOSITION_LAYER_QUAD } };
-    const XrCompositionLayerBaseHeader *layers[2];
+    XrCompositionLayerQuad quad[3] = { { XR_TYPE_COMPOSITION_LAYER_QUAD }, { XR_TYPE_COMPOSITION_LAYER_QUAD },
+                                       { XR_TYPE_COMPOSITION_LAYER_QUAD } };
+    const XrCompositionLayerBaseHeader *layers[3];
     uint32_t nl = 0;
     if (fs.shouldRender) {
         if (InterlockedExchange(&g_recenter, 0) || !g_placed) place_screen(fs.predictedDisplayTime);
         update_ipd(fs.predictedDisplayTime);
         upload();
+        upload_overlay();
         if (g_placed && g_chain_filled) {
             AcquireSRWLockShared(&g_cfg_lock);
             /* The stereo window is as wide as the game's FOV at its distance:
@@ -683,6 +799,21 @@ static void frame(void) {
                 q->pose = g_screen_pose;
                 q->size.width = w;
                 q->size.height = w * (float)GAME_H / (float)GAME_W;
+                layers[nl++] = (const XrCompositionLayerBaseHeader *)q;
+            }
+            AcquireSRWLockShared(&g_frame_lock);
+            const int ovl = g_ovl_on;
+            ReleaseSRWLockShared(&g_frame_lock);
+            if (ovl && g_ochain_filled) {                /* the overlay on top, both eyes, at screen depth */
+                XrCompositionLayerQuad *q = &quad[2];
+                *q = quad[0];
+                q->layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
+                                XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+                q->eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                q->subImage.swapchain = g_ochain;
+                q->subImage.imageRect.offset.x = 0;
+                q->subImage.imageRect.extent.width = GAME_W * g_ochain_s;
+                q->subImage.imageRect.extent.height = GAME_H * g_ochain_s;
                 layers[nl++] = (const XrCompositionLayerBaseHeader *)q;
             }
         }
@@ -791,6 +922,7 @@ void vr_submit_frame(const uint32_t *argb, int w, int h) {
     memcpy(g_frame, argb, (size_t)w * h * 4);
     g_frame_w = w; g_frame_h = h;
     g_frame_stereo = 0;
+    g_frame_shared = NULL;
     ReleaseSRWLockExclusive(&g_frame_lock);
     InterlockedIncrement(&g_frame_seq);
 }
@@ -802,6 +934,7 @@ void vr_submit_stereo(const uint32_t *left, const uint32_t *right, int w, int h,
     memcpy(g_frame_r, right, (size_t)w * h * 4);
     g_frame_w = w; g_frame_h = h;
     g_frame_stereo = 1;
+    g_frame_shared = NULL;
     ReleaseSRWLockExclusive(&g_frame_lock);
     if (tan_half_fov_x > 0.1f && tan_half_fov_x < 10.0f) {
         AcquireSRWLockExclusive(&g_cfg_lock);
@@ -810,6 +943,34 @@ void vr_submit_stereo(const uint32_t *left, const uint32_t *right, int w, int h,
     }
     InterlockedIncrement(&g_frame_seq);
 }
+
+void vr_submit_stereo_shared(void *handle, int w, int h, float tan_half_fov_x) {
+    if (!g_thread || !handle || g_share_failed) return;
+    AcquireSRWLockExclusive(&g_frame_lock);
+    g_frame_shared = handle;
+    g_frame_w = w; g_frame_h = h;
+    g_frame_stereo = 1;
+    ReleaseSRWLockExclusive(&g_frame_lock);
+    if (tan_half_fov_x > 0.1f && tan_half_fov_x < 10.0f) {
+        AcquireSRWLockExclusive(&g_cfg_lock);
+        g_tan_fov = tan_half_fov_x;
+        ReleaseSRWLockExclusive(&g_cfg_lock);
+    }
+    InterlockedIncrement(&g_frame_seq);
+}
+
+void vr_submit_overlay(const uint32_t *argb) {
+    if (!g_thread) return;
+    int on = 0;
+    if (argb) for (int i = 0; i < GAME_W * GAME_H && !on; i++) on = (argb[i] >> 24) != 0;
+    AcquireSRWLockExclusive(&g_frame_lock);
+    if (on) memcpy(g_ovl, argb, sizeof g_ovl);
+    g_ovl_on = on;
+    ReleaseSRWLockExclusive(&g_frame_lock);
+    InterlockedIncrement(&g_ovl_seq);
+}
+
+int vr_share_failed(void) { return (int)InterlockedCompareExchange(&g_share_failed, 0, 0); }
 
 float vr_ipd(void) {
     AcquireSRWLockShared(&g_cfg_lock);

@@ -170,6 +170,8 @@ int  d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w
 void d3d11_set_scale(int s);
 const uint32_t *d3d11_present_hires(int *w, int *h);
 const uint32_t *d3d11_present_eye(int eye, int *w, int *h);
+void d3d11_eye_share(int on);
+void *d3d11_present_eye_shared(int *w, int *h);
 #endif
 #include "gl_ge.h"
 
@@ -861,6 +863,14 @@ static int      g_stereo_on;                /* the eyes are drawn now */
 static const uint32_t *g_eye_px[2];         /* the latest eye pictures (d3d11.c), or NULL */
 static int      g_eye_w, g_eye_h;
 static int      g_eye_new;                  /* g_eye_px changed this vblank */
+/* The headset takes the eyes on the GPU (d3d11_eye_share) unless sharing
+ * failed; the overlay then goes as its own layer (vr_submit_overlay). */
+static int      g_overlay_up;               /* the last compose() drew something */
+static uint32_t g_ovl_px[SCREEN_W * SCREEN_H], g_ovl_sent[SCREEN_W * SCREEN_H];
+static int      g_ovl_sent_valid;
+static void    *g_eye_shared;               /* this vblank's shared eye texture, or NULL */
+static int      g_eye_shared_w, g_eye_shared_h;
+static uint64_t g_eye_shared_vb;            /* the last vblank one was sent */
 static uint32_t *g_eye_rgba[2];             /* ... with the overlay, for the headset */
 static int      g_vr_live;                  /* vr_start ran */
 static uint32_t g_vr_host;                  /* VR_HOST_* held */
@@ -901,6 +911,7 @@ static void stereo_update(void) {
     }
     if (on != g_stereo_on) fprintf(stderr, "vr: stereo %s\n", on ? "on (each eye drawn at the GE)" : "off");
     psp_gpu_set_stereo(&st);
+    d3d11_eye_share(on && g_vr_live && !vr_share_failed());
     g_stereo_on = on;
 }
 
@@ -1495,6 +1506,7 @@ static void on_vblank(void) {
          * frame shows for 2+ vblanks; d3d11_present then returns 2). A
          * picture from VRAM (p 0: movies) has no eyes. */
         g_eye_new = 0;
+        g_eye_shared = g_stereo_on && g_renderer == REN_D3D11 ? d3d11_present_eye_shared(&g_eye_shared_w, &g_eye_shared_h) : NULL;
         if (!g_stereo_on || p == 0) g_eye_px[0] = g_eye_px[1] = NULL;
         if (p == 1 && g_stereo_on && g_renderer == REN_D3D11) {
             int w1, h1, w2, h2;
@@ -1529,15 +1541,35 @@ static void on_vblank(void) {
         if (g_have_frame) {
             compose();
 #ifdef PSP2I_VR
+            g_overlay_up = memcmp(g_rgba, g_frame, sizeof g_rgba) != 0;
             /* Stereo: each eye's own picture, for each new game frame, and
-             * every vblank while the overlay (engine menu) is up so it stays live. */
-            if (g_vr_live && g_eye_px[0]) {
-                if (g_eye_new || memcmp(g_rgba, g_frame, sizeof g_rgba) != 0) {
+             * every vblank while the overlay (engine menu) is up so it stays
+             * live. On the GPU when it can be (no overlay). */
+            if (g_vr_live && g_eye_shared) {
+                vr_submit_stereo_shared(g_eye_shared, g_eye_shared_w, g_eye_shared_h, psp_gpu_stereo_tan_half_fov());
+                g_eye_shared_vb = vb;
+            }
+            if (g_vr_live && g_stereo_on && vb - g_eye_shared_vb < 8) {
+                /* The overlay as its own layer: the pixels compose() changed. */
+                for (int i = 0; i < SCREEN_W * SCREEN_H; i++)
+                    g_ovl_px[i] = g_rgba[i] != g_frame[i] ? g_rgba[i] | 0xFF000000u : 0;
+                if (!g_ovl_sent_valid || memcmp(g_ovl_px, g_ovl_sent, sizeof g_ovl_px) != 0) {
+                    vr_submit_overlay(g_ovl_px);
+                    memcpy(g_ovl_sent, g_ovl_px, sizeof g_ovl_sent);
+                    g_ovl_sent_valid = 1;
+                }
+            } else if (g_ovl_sent_valid) {               /* the CPU pictures carry it again */
+                vr_submit_overlay(NULL);
+                g_ovl_sent_valid = 0;
+            }
+            if (g_vr_live && !g_eye_shared && g_eye_px[0]) {
+                if (g_eye_new || g_overlay_up) {
                     compose_eyes();
                     if (g_eye_rgba[0] && g_eye_rgba[1])
                         vr_submit_stereo(g_eye_rgba[0], g_eye_rgba[1], g_eye_w, g_eye_h, psp_gpu_stereo_tan_half_fov());
                 }
-            } else if (g_vr_live && have_frame) {            /* the same picture, in the headset */
+            } else if (g_vr_live && have_frame && !(g_stereo_on && vb - g_eye_shared_vb < 8)) {
+                /* the same picture, in the headset (not between shared stereo frames) */
                 if (g_hi_s > 1) vr_submit_frame(g_hi_rgba, SCREEN_W * g_hi_s, SCREEN_H * g_hi_s);
                 else vr_submit_frame(g_rgba, SCREEN_W, SCREEN_H);
             }

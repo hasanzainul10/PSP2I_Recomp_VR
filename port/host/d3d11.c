@@ -48,6 +48,7 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
+#include <dxgi.h>
 
 #include <stdio.h>
 #include <stdint.h>
@@ -1481,6 +1482,72 @@ static int g_present_eyes[PRESENT_RING];
 static uint32_t *g_eye_px[2];
 static int g_eye_w, g_eye_h, g_eye_fresh;
 static uint64_t n_present_eyes;
+static int g_present_stereo[PRESENT_RING];   /* the frame had eyes: no mono S-times picture */
+
+/* Stereo to the headset on the GPU (d3d11_eye_share): both eyes copied side
+ * by side into one texture the VR thread's device opens (a DXGI shared
+ * handle, keyed mutex 0 on both sides), instead of read back, converted and
+ * uploaded again. The copy keeps the GPU's 8-bit colour (the CPU path
+ * quantizes to the framebuffer's format, 5551 for PSP2i's display). */
+static int g_share_on, g_share_fresh;
+static ID3D11Texture2D *g_share;
+static IDXGIKeyedMutex *g_share_mx;
+static HANDLE g_share_handle;
+static UINT g_share_w, g_share_h;
+static uint64_t n_share, n_share_busy;
+
+void d3d11_eye_share(int on) { g_share_on = on; }
+
+void *d3d11_present_eye_shared(int *w, int *h) {
+    if (!g_share_fresh) return NULL;
+    *w = (int)g_share_w / 2; *h = (int)g_share_h;
+    return g_share_handle;
+}
+
+static void share_free(void) {
+    if (g_share_mx) IDXGIKeyedMutex_Release(g_share_mx);
+    if (g_share) ID3D11Texture2D_Release(g_share);
+    g_share_mx = NULL; g_share = NULL; g_share_handle = NULL; g_share_w = g_share_h = 0;
+}
+
+/* Copy t's eye pictures (W x H each, at the internal resolution) into the
+ * shared texture. 0 if it can't (then the CPU path is used). */
+static int share_eyes(rt_entry *t, UINT W, UINT H) {
+    if (!g_share || g_share_w != 2 * W || g_share_h != H) {
+        share_free();
+        D3D11_TEXTURE2D_DESC d;
+        memset(&d, 0, sizeof d);
+        d.Width = 2 * W; d.Height = H; d.MipLevels = 1; d.ArraySize = 1;
+        d.Format = DXGI_FORMAT_R8G8B8A8_UNORM; d.SampleDesc.Count = 1;
+        d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        d.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+        IDXGIResource *r = NULL;
+        if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &d, NULL, &g_share)) ||
+            FAILED(ID3D11Texture2D_QueryInterface(g_share, &IID_IDXGIKeyedMutex, (void **)&g_share_mx)) ||
+            FAILED(ID3D11Texture2D_QueryInterface(g_share, &IID_IDXGIResource, (void **)&r)) ||
+            FAILED(IDXGIResource_GetSharedHandle(r, &g_share_handle))) {
+            if (r) IDXGIResource_Release(r);
+            fprintf(stderr, "d3d11: no shared texture for the headset; eyes go through the CPU\n");
+            share_free();
+            g_share_on = 0;
+            return 0;
+        }
+        IDXGIResource_Release(r);
+        g_share_w = 2 * W; g_share_h = H;
+    }
+    /* The VR thread holds it while it copies out: skip this frame then
+     * (it keeps showing the previous one). */
+    if (IDXGIKeyedMutex_AcquireSync(g_share_mx, 0, 0) != S_OK) { n_share_busy++; return 1; }
+    D3D11_BOX box = { 0, 0, 0, W, H, 1 };
+    for (int e = 0; e < 2; e++)
+        ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)g_share, 0, (UINT)e * W, 0, 0,
+                                                  (ID3D11Resource *)t->eye_tex[e], 0, &box);
+    IDXGIKeyedMutex_ReleaseSync(g_share_mx, 0);
+    ID3D11DeviceContext_Flush(g_ctx);
+    g_share_fresh = 1;
+    n_share++;
+    return 1;
+}
 
 const uint32_t *d3d11_present_eye(int eye, int *w, int *h) {
     if (!g_eye_fresh || eye < 0 || eye > 1 || !g_eye_px[eye]) return NULL;
@@ -1498,6 +1565,7 @@ static inline uint32_t present_px(uint32_t c, int f, const uint32_t (*L)[256]) {
 int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w, int h) {
     g_hires_fresh = 0;
     g_eye_fresh = 0;
+    g_share_fresh = 0;
     if (!g_dev || (addr & 0x0F000000u) != 0x04000000u) return 0;
     rt_entry *t = rt_find(vram_off(addr), stride, fmt);
     const int ahead = t && t->dirty && t->stride == stride && t->fmt == fmt && t->w >= (uint32_t)w;
@@ -1530,6 +1598,9 @@ int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w,
                                                   (ID3D11Resource *)t->tex, 0, &box);
         /* Stereo: the eye copies too, when this frame was drawn for the eyes. */
         g_present_eyes[k] = t->eye_tex[0] && t->eye_tex[1] && t->eye_frame + 2 >= frame_no();
+        g_present_stereo[k] = g_present_eyes[k];
+        if (g_present_eyes[k] && g_share_on && share_eyes(t, (UINT)(w * g_scale), (UINT)(h * g_scale)))
+            g_present_eyes[k] = 0;                     /* the headset has them already */
         for (int e = 0; e < 2 && g_present_eyes[k]; e++) {
             if (!g_eye_present[k][e]) {
                 D3D11_TEXTURE2D_DESC d;
@@ -1602,7 +1673,7 @@ int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w,
         }
         /* And the whole S-times picture -- not with stereo, where the eyes
          * are the headset's pictures and the window makes do with 480x272. */
-        if (S > 1 && !g_present_eyes[best] && hires_buffer(w * S, h * S)) {
+        if (S > 1 && !g_present_stereo[best] && hires_buffer(w * S, h * S)) {
             for (int y = 0; y < h * S; y++) {
                 const uint32_t *src = (const uint32_t *)((const uint8_t *)m.pData + (size_t)y * m.RowPitch);
                 uint32_t *dst = g_hires + (size_t)y * (size_t)(w * S);
@@ -1728,8 +1799,9 @@ void d3d11_report(FILE *out) {
                 (unsigned long long)n_xv_checked, (unsigned long long)n_xv_bad_xfers,
                 (unsigned long long)n_xv_bad_px, (unsigned long long)n_xv_overlap);
     if (n_eye_draws)
-        fprintf(out, "  d3d11 stereo        %llu eye draws, %llu frames read back for both eyes\n",
-                (unsigned long long)n_eye_draws, (unsigned long long)n_present_eyes);
+        fprintf(out, "  d3d11 stereo        %llu eye draws, %llu frames read back for both eyes, %llu shared on the GPU (%llu skipped: busy)\n",
+                (unsigned long long)n_eye_draws, (unsigned long long)n_present_eyes,
+                (unsigned long long)n_share, (unsigned long long)n_share_busy);
     fprintf(out, "  d3d11 present       %llu frames from asynchronous copies, %llu from VRAM, %llu vblanks kept the last picture\n",
             (unsigned long long)n_present_async, (unsigned long long)n_present_vram, (unsigned long long)n_present_kept);
 }

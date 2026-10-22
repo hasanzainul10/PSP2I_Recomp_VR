@@ -119,6 +119,24 @@ _Last updated: 2026-10-22 (P2 stereo window)._
     the VR device on the GPU (shared textures) instead of read back +
     convert + upload, and replay only the eyes (skip the mono draws while the
     window isn't needed).
+  - **GPU handoff (done, 2026-10-22):** d3d11.c copies both eye copies side
+    by side into one texture with a DXGI shared handle and keyed mutex 0
+    (`share_eyes`, `d3d11_eye_share`, `d3d11_present_eye_shared`); the VR
+    thread opens it on its own device and `CopyResource`s it into the
+    swapchain image (`upload_shared`). The swapchain prefers
+    R8G8B8A8_UNORM_SRGB now (same family as the game's targets). If the open
+    fails (another GPU, size or format) `vr_share_failed()` turns on and the
+    CPU path is used. The port's overlay (FPS counter, engine menu) is its
+    own quad layer with source alpha at screen depth (`vr_submit_overlay`),
+    since the shared pictures don't carry it. Colour: the shared copy keeps
+    8 bits per channel (the CPU path quantized to the 5551 display format).
+  - Headset run with it (user: "looks right"): 1984 frames shared, 3 via the
+    CPU. While stereo was on (first ~60 s, 30 fps target): 28.2 fps average,
+    game thread 60% idle (13% on the CPU path), some frames still 3-4
+    vblanks. Then the user set 60 fps in the menu and the session went to
+    WAITING (stereo off) for the rest, so stereo at 60 fps and longer stereo
+    play are **not measured yet**. Next for speed: skip the mono draws while
+    only the headset needs pictures (the GPU draws everything 3 times).
   - Not done: the window doesn't follow the head (P3: head tracking +
     projection layer); objects nearer than the screen distance come out of
     the window and may cross its edge; world-space name labels in the HUD
@@ -185,6 +203,9 @@ Build and run steps: the `psp2i-build-run` skill (`.claude/skills/`).
 
 ## Gotchas learned
 
+- **The `3ds_port` branch** (origin, made 2026-10-22 from vr-theater at
+  fd149a1) is the user's placeholder for a later 3DS port with stereo 3D,
+  separate from VR. It shares the per-eye GE replay. Nothing on it yet.
 - **Headless runs stall in the intro movie** (flips stop at 2739, mpeg ring
   buffer loop), with or without audio (SDL dummy driver). Windowed runs with
   the same `--press` script reach town (usually; one windowed run stalled
