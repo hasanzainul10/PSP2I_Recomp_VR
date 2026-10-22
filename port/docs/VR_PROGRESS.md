@@ -182,6 +182,13 @@ the world; the user found it overwhelming. Those were removed. Now:
   (~30 cm): psprecomp `psp_gpu_stereo.near_w` moves emit_tri's clip plane
   from w = W_EPS to it for the eyes' moved 3D draws, so whatever is that
   close in front of the eyes is cut, the head included.
+- **Fourth run (`vr_fp4.log`, 30 fps):** user: "we can still see head
+  albeit a bit better". Fix (built, not run): the eyes follow where the
+  model's head really is across: each first-person frame the GE probe
+  (now `this_frame`, with the centre of the vertices from `vr_fp_eye` - 1
+  up) measures the head; the next frame turns it into world axes, keeps
+  the level part, smooths it (half) and adds it to the feet. The height
+  stays `vr_fp_eye` (no run bob). Dev log: `vr: fp head: ... across`.
 - **Open:** hiding the player's own head (bone weights, or an eye-forward
   offset), body-relative movement (today the stick moves relative to the
   game camera, which trails behind), the cull behind the game camera.

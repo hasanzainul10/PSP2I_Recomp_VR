@@ -1068,8 +1068,15 @@ static void head_frame(psp_gpu_stereo *s) {
     quat_mat3(h.q, hr);
     mat3_mul(lev, hr, q);                                       /* the head's axes in the game camera's view space */
     /* First person: the head's origin is the player's head, seen from the
-     * game camera (its position through the view matrix, plus vr_fp_eye
-     * along world up); else the game camera itself. */
+     * game camera: the feet (player +0x4B0 through the view matrix), plus
+     * vr_fp_eye along world up, plus where the model's head really is
+     * across (psp_gpu_stereo_probe, measured each frame: the run animation
+     * throws it forward, user: "still see head"), plus vr_fp_forward along
+     * the gaze. The measured height is not used, so the eyes don't bob with
+     * the run. Else the head's origin is the game camera itself. */
+    static float head_off[3];                                   /* the head's centre across from the feet, world axes */
+    static float prev_v[16];
+    static int   head_ok;
     float base[3] = { 0, 0, 0 };
     int first = 0;
     if (g_vr_first) {
@@ -1081,10 +1088,32 @@ static void head_frame(psp_gpu_stereo *s) {
         const float ul = sqrtf(v[4] * v[4] + v[5] * v[5] + v[6] * v[6]);
         /* A sane position: in front of the camera, within the orbit's reach. */
         if (pl && ul > 0.5f && ul < 2.0f && c[2] < 0.0f && c[0] * c[0] + c[1] * c[1] + c[2] * c[2] < 200.0f * 200.0f) {
-            for (int r = 0; r < 3; r++) base[r] = c[r] + g_vr_fp_eye * v[4 + r] / ul - g_vr_fp_fwd * q[6 + r];   /* ahead: -z */
+            /* The last frame's head, from its own camera into world axes
+             * (the view's rotation transposed), level. */
+            float pr[6];
+            if (psp_gpu_stereo_probe_result(pr) && pr[2] > 20.0f && (pr[3] != 0 || pr[4] != 0 || pr[5] != 0)) {
+                float hw[3];
+                for (int cc = 0; cc < 3; cc++)
+                    hw[cc] = prev_v[cc * 4] * pr[3] + prev_v[cc * 4 + 1] * pr[4] + prev_v[cc * 4 + 2] * pr[5];
+                hw[1] = 0.0f;                                   /* +Y is up: only across */
+                if (hw[0] * hw[0] + hw[2] * hw[2] < 3.0f * 3.0f) {
+                    for (int cc = 0; cc < 3; cc += 2) head_off[cc] = head_ok ? 0.5f * (head_off[cc] + hw[cc]) : hw[cc];
+                    head_ok = 1;
+                }
+            }
+            /* This frame's: within 3 units of the feet's vertical, the head
+             * from 1 unit below the eye height up (ceilings above 8 left out). */
+            const float un[3] = { v[4] / ul, v[5] / ul, v[6] / ul };
+            psp_gpu_stereo_probe(c, un, 3.0f, 8.0f, g_vr_fp_eye - 1.0f, 1);
+            memcpy(prev_v, v, sizeof prev_v);
+            float hv[3];                                        /* the head's offset, in this view */
+            for (int r = 0; r < 3; r++) hv[r] = head_ok ? v[r] * head_off[0] + v[8 + r] * head_off[2] : 0.0f;
+            for (int r = 0; r < 3; r++)
+                base[r] = c[r] + g_vr_fp_eye * un[r] + hv[r] - g_vr_fp_fwd * q[6 + r];   /* ahead: -z */
             first = 1;
         }
     }
+    if (!first) head_ok = 0;
     static int was_first = -1;
     if (g_vr_first && first != was_first)
         fprintf(stderr, "vr: first person %s\n", first ? "on (the eyes in the player's head)" : "waiting for the player");
@@ -1122,37 +1151,12 @@ static void head_frame(psp_gpu_stereo *s) {
     s->flat_frame = menu;
     if (menu) s->tag = 0;
 #ifndef PSP2I_PROD
-    /* P4 first person, measuring (dev): where the local player stands from
-     * the game camera, and how high above that position the camera aims (the
-     * point on its forward ray nearest the player: the orbit camera looks at
-     * the upper body). Gives the head height and the camera distance in game
-     * units before the eye is moved there. */
+    /* First person (dev): every ~4 s, where the measured head is across from
+     * the feet (world axes, game units). */
     static unsigned n_fp;
-    const uint32_t pl = gamelog_local_player();
-    if (!menu && pl && ++n_fp % 120 == 0) {
-        float v[16], w[3], c[3];
-        for (int i = 0; i < 16; i++) v[i] = psp_read_f32(PSP2I_VIEW_MATRIX + 4u * (uint32_t)i);
-        for (int i = 0; i < 3; i++) w[i] = psp_read_f32(pl + 0x4B0u + 4u * (uint32_t)i);
-        for (int r = 0; r < 3; r++) c[r] = v[r] * w[0] + v[4 + r] * w[1] + v[8 + r] * w[2] + v[12 + r];
-        const float u[3] = { v[4], v[5], v[6] };                /* world up in view space: the view's second column */
-        const float off[3] = { -c[0], -c[1], 0.0f };            /* the ray point (0, 0, c.z) minus the player */
-        const float aim_h = off[0] * u[0] + off[1] * u[1] + off[2] * u[2];
-        const float dist = sqrtf(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]);
-        float pr[3];                                            /* the last probe: the model around the position */
-        const int got = psp_gpu_stereo_probe_result(pr);
-        fprintf(stderr, "vr: fp measure: player 0x%08X at (%.2f, %.2f, %.2f) world, (%.2f, %.2f, %.2f) from the camera; "
-                        "distance %.2f, the camera aims %.2f above the position; last probe: %.0f vertices from %.2f to %.2f\n",
-                pl, (double)w[0], (double)w[1], (double)w[2], (double)c[0], (double)c[1], (double)c[2], (double)dist,
-                (double)aim_h, got ? (double)pr[2] : 0.0, got ? (double)pr[0] : 0.0, got ? (double)pr[1] : 0.0);
-        /* The 3D vertices within 1.5 units of the vertical line through the
-         * position, up to 30 above it: the top is the head (if nothing else
-         * stands that close). */
-        const float ul = sqrtf(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
-        if (ul > 0.5f) {
-            const float un[3] = { u[0] / ul, u[1] / ul, u[2] / ul };
-            psp_gpu_stereo_probe(c, un, 1.5f, 30.0f);
-        }
-    }
+    if (first && ++n_fp % 120 == 0)
+        fprintf(stderr, "vr: fp head: %s, %.2f / %.2f across from the feet (world x / z)\n",
+                head_ok ? "measured" : "not measured", (double)head_off[0], (double)head_off[2]);
 #endif
 }
 
