@@ -141,10 +141,17 @@ the world; the user found it overwhelming. Those were removed. Now:
   alpha. Asked after, the user confirmed the HUD panel's distance and
   follow, NPC talk (portrait and text) and the minimap's enemies all work.
   Still no F11 captures.
+- **Fifth run (`testwork/p3/cap7`, `vr_f11.log`), the user in the headset:
+  the lock-on reticle sits on the enemy, names stay put in the world, and
+  technique effects stay in the world.** P3's HUD / world split is done.
+  F11 still gave no captures (no "no stereo now" either): the key likely
+  never reaches the game window while the headset is on. The timed
+  captures agree: the reticle (w 90) placed over the shark in both eyes,
+  labels (86 / 88) placed in the world (off view with the head turned 80°).
 
 **Next (in order):**
-1. **The reticle / label / effect check with F11 captures** at those moments
-   (lock-on, technique, names), as agreed.
+1. **A controller shortcut for VR captures** (F11 doesn't reach the window
+   in the headset), so the user can capture a moment without the keyboard.
 2. **Sharpness:** try `render_scale=4`; the real fix is eye pictures taller
    than 480:272 (the vertical scale stretches pixels).
 3. Engine-menu items for `vr_stereo` and `vr_world_scale` (the menu has 31
@@ -164,7 +171,7 @@ unless the user asks.
 | P0 RE tooling | **Done, run in town and field:** the GE gets identity view matrices (camera folded into bones / world on the CPU). View matrix found in RAM at `0x08FA98A0`, player world position at player object +0x4B0 (2 reports each; writer not yet watched) |
 | P1 PCVR theater | **Done, checked in the headset** by the user (2026-10-22): screen size, sharpness, colours, recenter and the button mapping in VR.md all right. Nothing to fix |
 | P2 stereo third person | **Stereo window done and checked in the PS VR2 (2026-10-22):** each GE draw replayed per eye, both pictures on one world-locked screen, HUD at screen depth. User: "looks pretty good", "3D looks right and it's steadier". 3x at 60 fps in town: 59.7 fps average (min 55.9). Still open for P2: world-scale tuning, wider culling, menu items, cutscene handling |
-| P3 head-rate decoupling | **Head tracking works in the PS VR2 (2026-10-22):** each eye drawn from the head at the GE (`psp_gpu_stereo.eye_views`, one pose per frame by tag), a projection layer at that pose with the game's FOV, the horizon levelled. User: the world stays still, leaning and recenter work; 30 fps steady. Since then: a view of about 99 x 94° (border almost gone, but pixelated), the game's cull widened 8x (hook on `0x08D7D63C`), and the HUD and menus the PSUEx-VR way: a body-following HUD panel (user: "all looks working now"), labels, reticle and effects in the world, menu scenes on the flat screen. Still open: the F11 check of the reticle / labels / effects, sharpness, the FramePacket replay at headset rate |
+| P3 head-rate decoupling | **Head tracking works in the PS VR2 (2026-10-22):** each eye drawn from the head at the GE (`psp_gpu_stereo.eye_views`, one pose per frame by tag), a projection layer at that pose with the game's FOV, the horizon levelled. User: the world stays still, leaning and recenter work; 30 fps steady. Since then: a view of about 99 x 94° (border almost gone, but pixelated), the game's cull widened 8x (hook on `0x08D7D63C`), and the HUD and menus the PSUEx-VR way: a body-following HUD panel (user: "all looks working now"), labels, reticle and effects in the world (user-confirmed), menu scenes on the flat screen. Still open: sharpness, the FramePacket replay at headset rate |
 | P4 to P8 | Not started |
 
 ## Branches and PR
