@@ -1256,6 +1256,22 @@ static void vrshot_ppm(const char *path, const uint32_t *px, int w, int h) {
 #define PSP2I_PROJ_MATRIX 0x08FA97A0u
 #define PSP2I_PROJ_ORTHO  0x08FA9830u   /* 1 = the current projection is orthographic */
 static uint64_t n_cull_wide;
+/* VR head tracking (vr_cull_all=on): the game's frustum tests of its
+ * objects' bounding shapes (0x08D7CAEC and its neighbours, ADDRESS_MAP.md
+ * "The frustum cull": 16 = outside, 2 = inside) all answer "inside", so
+ * everything the game has loaded is drawn. The cull is the game camera's,
+ * and in first person that camera is ~16 m behind the player: looking back
+ * showed an empty world (user), which widening the side planes can't fix
+ * (nothing behind a camera is in any view through it). Only what this
+ * game draws changes; the GPU clips what is behind the eyes. */
+static int      g_vr_cull_all = 1;
+static uint64_t n_cull_all;
+static void hook_cull_test(void (*original)(void)) {
+    if (!g_head_on || !g_vr_cull_all) { original(); return; }
+    psp_cpu.r[2] = 2;                                           /* inside */
+    if (n_cull_all++ == 0) fprintf(stderr, "vr: every object drawn (the game's frustum tests answer inside)\n");
+}
+
 static void hook_frustum_planes(void (*original)(void)) {
     const float k = g_head_on ? g_vr_cull : 1.0f;
     if (k <= 1.0f || psp_read32(PSP2I_PROJ_ORTHO) == 1) { original(); return; }
@@ -1515,6 +1531,7 @@ static int display_load(void) {
             const float k = (float)atof(line + 10);
             if (k >= 1.0f && k <= 20.0f) g_vr_fp_eye = k;
         }
+        else if (!strncmp(line, "vr_cull_all=", 12)) g_vr_cull_all = strncmp(line + 12, "off", 3) != 0;
         else if (!strncmp(line, "vr_aniso=", 9)) {
             const int k = atoi(line + 9);
             if (k >= 0 && k <= 16) g_vr_aniso = k;
@@ -1595,6 +1612,9 @@ static void display_save(int res) {
                " wider = less sharp); cull scale = the game's object culling that much wider (1 = the game's)\n");
     fprintf(f, "vr_fov_scale=%.1f\nvr_fov_scale_y=%.1f\nvr_cull_scale=%.1f\n", (double)g_vr_fov, (double)g_vr_fov_y,
             (double)g_vr_cull);
+    fprintf(f, "; with head tracking: cull all = on: every object the game has loaded is drawn (nothing missing behind you"
+               " or far away; costs some speed), off = the game's own culling (widened by cull scale)\n");
+    fprintf(f, "vr_cull_all=%s\n", g_vr_cull_all ? "on" : "off");
     fprintf(f, "; with head tracking: the HUD and menus on a panel this many metres away, this size of the game's view (0.2..1.0);"
                " follow = how many degrees you can look away before it glides back in front of you (0 = it stays where recenter put it)\n");
     fprintf(f, "vr_hud_distance=%.1f\nvr_hud_size=%.2f\nvr_hud_follow=%.0f\n", (double)g_vr_hud_dist, (double)g_vr_hud_size,
@@ -3328,6 +3348,10 @@ int main(int argc, char **argv) {
     g_menu.vr_dist_dm = g_vr_dist_dm;
     g_menu.vr_width_dm = g_vr_width_dm;
     psp_hook_set(FN_FRUSTUM_PLANES, hook_frustum_planes);   /* a no-op unless head tracking is on */
+    {
+        static const uint32_t CULL_TESTS[] = { 0x08D7C934u, 0x08D7CAECu, 0x08D7CD88u, 0x08D7CE6Cu, 0x08D7CF90u };
+        for (int i = 0; i < (int)(sizeof CULL_TESTS / sizeof CULL_TESTS[0]); i++) psp_hook_set(CULL_TESTS[i], hook_cull_test);
+    }
 #ifndef PSP2I_PROD
     {   /* PSP2I_VR_FAKE_HEAD=yaw,pitch (degrees; with --stereo): the eyes drawn from a turned head, no headset */
         const char *e = getenv("PSP2I_VR_FAKE_HEAD");

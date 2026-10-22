@@ -264,6 +264,15 @@ the world; the user found it overwhelming. Those were removed. Now:
   the start; mipmaps only when filtering was on at the start (the item
   shows RESTART otherwise). test_menu: 458 checks, 0 failed. Not yet
   used in the headset.
+- **Draw distance / "the back is empty" (user):** the game culls with its
+  camera, ~16 m behind the player in first person, and nothing behind a
+  camera is in any frustum through it, so the side planes' widening can't
+  help. The five frustum tests are hooked (hooks.txt, gen regenerated):
+  with head tracking and `vr_cull_all=on` (default) they answer "inside",
+  so everything loaded is drawn. Built; headless with VR off unchanged;
+  not yet seen in the headset (frame rate to watch). Texture pop-in: the
+  async PNG decode shows the original for a frame or two; with everything
+  drawn, textures behind should be requested before they're looked at.
 - **Open:** hiding the player's own head (bone weights, or an eye-forward
   offset), body-relative movement (today the stick moves relative to the
   game camera, which trails behind), the cull behind the game camera.
