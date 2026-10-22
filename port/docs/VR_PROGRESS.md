@@ -175,6 +175,17 @@ the world; the user found it overwhelming. Those were removed. Now:
    `d3d11: VR eye pictures 1440x1360`, swapchain 4320x1360 (`vr_sharp1.log`;
    the headset wasn't on, so no frames judged). Next: the user's verdict
    and the frame rate; then `render_scale=4` (1920 x about 1800) if wanted.
+   **Headset run (`vr_sharp2.log`, `cap9`):** the user: "it's smooth", but
+   "from time to time it freezes to flat for a moment". 24-28 fps (30
+   cap; the run before ~29). Captures: 1440x1360 eyes, drawn right.
+   The flat moments were mostly the timed captures: a capture sent its
+   frame's eyes through the CPU instead of sharing them, and the headset
+   showed it flat. Fixed (built, not run): the eyes stay shared and are
+   also read back (`d3d11_eye_readback`). The run also had 3325 frames from
+   VRAM (8 the run before): not explained yet (the intro movie?).
+   **Stick clicks:** at focus SteamVR reported both stick-click actions
+   unbound (`stick clicks bound: ... no, ... no`), and no click arrived,
+   though the generated binding maps them. The binding is the next fix.
 3. Engine-menu items for `vr_stereo` and `vr_world_scale` (the menu has 31
    items and a 32-bit hidden mask: widen it first, see Gotchas). The world
    scale 10 units/m is a guess the user hasn't judged yet.

@@ -1635,6 +1635,11 @@ static uint32_t g_share_tag;
 static uint64_t n_share, n_share_busy;
 
 void d3d11_eye_share(int on) { g_share_on = on; }
+/* Also read the eyes back to the CPU while they are shared (a VR capture):
+ * the headset keeps its GPU pictures, so a capture no longer shows as a
+ * flat frame in the headset. */
+static int g_eye_readback;
+void d3d11_eye_readback(int on) { g_eye_readback = on; }
 
 void *d3d11_present_eye_shared(int *w, int *h, uint32_t *tag) {
     if (!g_share_fresh) return NULL;
@@ -1758,7 +1763,8 @@ int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w,
         g_present_eyes[k] = eye_picture(t, 0) && eye_picture(t, 1) && t->eye_frame + 2 >= frame_no();
         g_present_stereo[k] = g_present_eyes[k];
         g_present_tag[k] = t->eye_tag;
-        if (g_present_eyes[k] && g_share_on && share_eyes(t, (UINT)(w * g_scale), (UINT)(h * g_scale_y)))
+        if (g_present_eyes[k] && g_share_on && share_eyes(t, (UINT)(w * g_scale), (UINT)(h * g_scale_y)) &&
+            !g_eye_readback)
             g_present_eyes[k] = 0;                     /* the headset has them already */
         for (int e = 0; e < 2 && g_present_eyes[k]; e++) {
             if (!g_eye_present[k][e]) {

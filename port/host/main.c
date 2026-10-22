@@ -176,6 +176,7 @@ void d3d11_set_scale_y(int s);
 const uint32_t *d3d11_present_hires(int *w, int *h);
 const uint32_t *d3d11_present_eye(int eye, int *w, int *h);
 void d3d11_eye_share(int on);
+void d3d11_eye_readback(int on);
 void d3d11_set_mono_left(int on);
 void *d3d11_present_eye_shared(int *w, int *h, uint32_t *tag);
 uint32_t d3d11_present_eye_tag(void);
@@ -1074,7 +1075,8 @@ static void head_frame(psp_gpu_stereo *s) {
 
 #ifndef PSP2I_PROD
 /* VR captures (dev): F11, or every PSP2I_VR_SHOT_EVERY=N seconds. For one
- * frame the eyes come back through the CPU (not shared on the GPU), and
+ * frame the eyes also come back through the CPU (still shared on the GPU
+ * with the headset: through the CPU only, that frame showed flat), and
  * <capture dir>/vrshot_<vblank>_L.ppm / _R.ppm get the pictures the headset
  * gets; vrshot_<vblank>.txt the head pose, the HUD frame, the settings and
  * psprecomp's trace of that frame (psp_gpu_stereo_trace: each draw that isn't
@@ -1083,7 +1085,7 @@ static volatile LONG g_vrshot_req;
 static uint64_t g_vrshot_every;             /* vblanks; 0 = only F11 */
 static uint64_t g_vrshot_vb, g_vrshot_last; /* the capture in progress (0 = none), the last one */
 static FILE    *g_vrshot_txt;
-static int      g_vrshot_noshare;           /* the eyes through the CPU until saved */
+static int      g_vrshot_noshare;           /* the eyes also read back to the CPU until saved */
 static char     g_vrshot_eyes[160];         /* the report's last line, once the eyes are saved */
 static void vrshot_request(void) { InterlockedExchange(&g_vrshot_req, 1); }
 
@@ -1157,11 +1159,7 @@ static void stereo_update(void) {
     g_head_on = head;
     psp_gpu_set_stereo(&st);
     d3d11_set_mono_left(st.mono_is_left);
-#ifndef PSP2I_PROD
-    d3d11_eye_share(on && g_vr_live && !vr_share_failed() && !g_vrshot_noshare);
-#else
     d3d11_eye_share(on && g_vr_live && !vr_share_failed());
-#endif
     g_stereo_on = on;
 }
 
@@ -1169,6 +1167,7 @@ static void stereo_update(void) {
 /* Each vblank, after the eye pictures are fetched: start a capture, save its
  * pictures, close its report when psprecomp's trace is done. */
 static void vrshot_vblank(uint64_t vb) {
+    d3d11_eye_readback(g_vrshot_noshare);
     if (g_vrshot_every && g_stereo_on && vb - g_vrshot_last >= g_vrshot_every) vrshot_request();
     if (!g_vrshot_vb && InterlockedExchange(&g_vrshot_req, 0)) {
         if (!g_stereo_on) { fprintf(stderr, "vr: capture: no stereo now\n"); return; }
