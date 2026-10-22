@@ -72,15 +72,19 @@ Build and run steps: the `psp2i-build-run` skill (`.claude/skills/`).
 
 ## Next steps
 
-1. **The orbit controller:** the camera is found down to its inputs
-   (ADDRESS_MAP.md "The camera object and its look-at update"). UpdateCamera
-   `0x08AFD3FC` rebuilds the view by LookAt `0x08D8969C` from the **eye at
-   camera +0xFC** and the **target at +0x108** (roll +0x114, dirty flags
-   +0x130). Next, find who writes the eye/target: F8 in a field with
-   `PSP2I_VR_PROBE_WATCH=camera+0xFC` (the probe resolves `camera` through the
-   slot table `0x08ED9924[*0x08ED9920] + 4`). That's the orbit controller
-   that follows the player and the right stick. Also: which camera the
-   `0x08969314` write (translation x 6.31) is.
+1. **The camera chain is mapped** (ADDRESS_MAP.md, from "Who sets the view"
+   down to "The orbit controller"):
+   - orbit controller → **OrbitCamera_Apply `0x08AFA598`(ctrl, eye*, target*)**;
+   - → SetEye `0x08AFD598` / SetTarget `0x08AFD5C0` (camera +0xFC / +0x108,
+     dirty +0x130);
+   - → UpdateCamera `0x08AFD3FC` → LookAt `0x08D8969C` (view at camera +0x10);
+   - → ApplyCamera `0x08AFD474` → SetViewMatrix `0x08D81D84` (the global
+     `0x08FA98A0`) → bones and world matrices on the CPU.
+
+   The hook points: `0x08AFA598` for head tracking and first person (P3/P4),
+   and `0x08D81D84` (or LookAt) for the per-eye view (P2). Not hooked yet; all
+   decoded from the code plus write watches in one field. Still open: which
+   camera the `0x08969314` SetViewMatrix call (translation x 6.31) is.
 2. **Player yaw:** near player +0x4B0 (position), find the angle or rotation
    that follows turning (two F8 reports with a turn, or `--log-floats`).
 3. **The 120 fps crash:** at the 120 fps target the game read a bad object

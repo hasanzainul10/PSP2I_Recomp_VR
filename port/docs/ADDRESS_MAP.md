@@ -136,15 +136,38 @@ eye per eye after LookAt (or hook SetViewMatrix); P3/P4 head tracking can
 either write eye/target and set +0x130 |= 1, or replace the LookAt result in
 `0x08AFCE90`.
 
-Next: who writes camera +0xFC / +0x108 (the orbit controller that follows the
-player and the right stick): `PSP2I_VR_PROBE_WATCH=camera+0xFC`. The F8 dump
-now covers up to +0x140.
+### The orbit controller (write watch on camera +0xFC, 2026-10-22)
+
+`PSP2I_VR_PROBE_WATCH=camera+0xFC`, F8 in a field, then the right stick. All 32
+writes had one stack, and the eye x moved smoothly with the stick (-24.8 →
++18.8):
+
+`0x08AF8250` → `0x08AF962C` → `0x08AF986C` → `0x08AF98C0` → `0x08AF9BCC` → `0x08AFA714` → `0x08AFA8E0` → **`0x08AFA598`** → `0x08AFE0A0` → **`0x08AFD598`**
+
+(from the game update `0x08A87988` → `0x089F8308`. The port's existing camera
+hooks `0x08AFA530` and `0x08A16794` are in the same area.)
+
+The F8 dump in that run: camera `0x0942FE60` again, eye +0xFC = (-24.82, 21.94,
+-363.26) (= +0x80), target +0x108 = (-5.00, 14.37, -307.13), so the eye is
+about 60 units behind and above the target. Roll +0x114 = 0. +0x118 = 0.6388,
++0x11C = 0.7694 (projection inputs, not decoded), +0x128 = +0x12C = 1.0.
+
+| Address | What | Status |
+|---|---|---|
+| **`0x08AFA598`** | **OrbitCamera_Apply(ctrl `$a0`, eye* `$a1`, target* `$a2`)**: saves the camera's current eye to ctrl+0xB4 and target to ctrl+0xC0 (GetEye `0x08AFDEC8`, GetTarget `0x08AFDF30`), then SetEye (`0x08AFE0A0`) and the target (`0x08AF615C`), then a loop that calls `0x08AF4AC8` (listeners, table at `0x08E40F50`; not decoded). **The P3/P4 hook point**: change eye/target here for head tracking or first person | seen (decoded) |
+| `0x08AFA8E0`, `0x08AFA714` | The callers that compute the eye and target (the orbit maths: yaw, pitch, distance around the player); not decoded | seen |
+| ctrl +0x30 | The camera slot (slot+4 = camera object) | seen |
+| ctrl +0xB4, +0xC0 | Previous eye, previous target | seen |
+| `0x08AFE0A0` | SetEye on a slot: converts `$a1` (`0x08D3389C`), then `0x08AFD598`(slot+4) | seen |
+| `0x08AFD598` | **Camera_SetEye(cam, vec3*)**: +0xFC..+0x104, +0x130 \|= 1 | seen |
+| `0x08AFD5C0` | **Camera_SetTarget(cam, vec3*)**: +0x108..+0x110, +0x130 \|= 1 | seen |
+| `0x08AFDEC8`, `0x08AFDF30` | GetEye / GetTarget of a slot (defaults when the slot has no camera; the target default is at `0x08E41020`) | seen |
 
 ## Needed for VR (todo)
 
 | What | Phase | How to find it |
 |---|---|---|
-| The orbit controller that writes camera +0xFC (eye) / +0x108 (target) | P3 / P4 | `PSP2I_VR_PROBE_WATCH=camera+0xFC`; the camera object and LookAt are found (above) |
+| The orbit maths (yaw, pitch, distance) in `0x08AFA8E0` / `0x08AFA714` | P3 / P4 | The apply point `0x08AFA598` is found (above); decode its callers, or hook `0x08AFA598` and leave them alone |
 | Frustum / LOD culling (objects pop at the headset's wider FOV) | P2 | Objects vanishing at the screen edges; the cull test reads the camera FOV or planes |
 | Bloom / blur passes (signature to skip or redo per eye) | P2 | F12 dump: through-mode full-screen draws sampling a render target |
 | Local player yaw | P4 | Position found (player +0x4B0, above). Yaw: an angle or rotation near +0x4B0 that follows turning |
