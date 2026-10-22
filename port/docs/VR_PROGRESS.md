@@ -176,6 +176,12 @@ the world; the user found it overwhelming. Those were removed. Now:
   `vr_fp_forward` 1.2 units (~35 cm) ahead of the head along the gaze, so
   the head stays behind them (the user asked for more than 0.6, for the
   run animation's lean).
+- **Third run (`vr_fp3.log`):** user: "running, still see back of head"
+  (the run animation throws the head ahead of eyes placed from the feet).
+  Fix (built, not run): a first-person near clip, `vr_fp_near` 1.0 unit
+  (~30 cm): psprecomp `psp_gpu_stereo.near_w` moves emit_tri's clip plane
+  from w = W_EPS to it for the eyes' moved 3D draws, so whatever is that
+  close in front of the eyes is cut, the head included.
 - **Open:** hiding the player's own head (bone weights, or an eye-forward
   offset), body-relative movement (today the stick moves relative to the
   game camera, which trails behind), the cull behind the game camera.
