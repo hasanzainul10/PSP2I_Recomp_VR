@@ -101,6 +101,7 @@ typedef struct {
     ID3D11RenderTargetView *eye_rtv[2];
     ID3D11ShaderResourceView *eye_srv[2];
     uint64_t eye_frame;
+    uint64_t gen;                        /* bumped whenever its GPU pixels change (d3d11_present) */
 } rt_entry;
 
 typedef struct {
@@ -470,6 +471,7 @@ static void rt_upload(rt_entry *t) {
     if (t->off + bytes > VRAM_SIZE) bytes = VRAM_SIZE - t->off;
     t->synced_hash = hash_bytes(v + t->off, bytes);
     pages_set(g_pg_armed, t->off, t->off + bytes);
+    t->gen++;
     n_uploads++;
 }
 
@@ -1114,6 +1116,7 @@ static void rt_xfer(rt_entry *t, rt_entry *o, uint32_t a, uint32_t b, int own) {
     ID3D11DeviceContext_PSSetShaderResources(g_ctx, 1, 1, &none);
     if (xverify()) xverify_xfer(t, o, a, b, y0, y1);
     if (own) rows_mark(t, y0, y1);
+    t->gen++;
     n_xfer++;
 }
 
@@ -1309,6 +1312,7 @@ static int d3d_draw(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts
     g_last.t = t; g_last.d = d; g_last.srv = srv;
     g_last.src = st->tex ? g_tv_src : NULL; g_last.self = st->tex && g_tv_self;
     g_last.uvs[0] = uvs[0]; g_last.uvs[1] = uvs[1];
+    t->gen++;
 
     /* Rows touched: the scissor, narrowed to the geometry's extent. */
     float ymin = 1e9f, ymax = -1e9f;
@@ -1365,6 +1369,7 @@ static int d3d_draw_eye(int e, const psp_gpu_state *st, const psp_gpu_vertex *v,
     }
     if (submit_draw(st, v, nverts, t->eye_rtv[e], dsv, srv, t->w, t->h, g_last.uvs) != 0) return 1;
     t->eye_frame = frame_no();
+    t->gen++;
     n_eye_draws++;
     return 0;
 }
@@ -1483,13 +1488,29 @@ const uint32_t *d3d11_present_eye(int eye, int *w, int *h) {
     return g_eye_px[eye];
 }
 
+/* One GPU pixel (RGBA8) as the window shows it: 0xAARRGGBB, quantized to
+ * the framebuffer format through the lookup tables; 8888 needs no table. */
+static inline uint32_t present_px(uint32_t c, int f, const uint32_t (*L)[256]) {
+    if (f == 3) return 0xFF000000u | ((c & 0xFFu) << 16) | (c & 0xFF00u) | ((c >> 16) & 0xFFu);
+    return L[0][c & 0xFF] | L[1][(c >> 8) & 0xFF] | L[2][(c >> 16) & 0xFF];
+}
+
 int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w, int h) {
     g_hires_fresh = 0;
     g_eye_fresh = 0;
     if (!g_dev || (addr & 0x0F000000u) != 0x04000000u) return 0;
     rt_entry *t = rt_find(vram_off(addr), stride, fmt);
     const int ahead = t && t->dirty && t->stride == stride && t->fmt == fmt && t->w >= (uint32_t)w;
-    if (ahead) {                                       /* queue a copy of this frame */
+    /* Nothing drawn since the last copy (the game shows a frame for two or
+     * more vblanks): no new copy, so no readback and no conversion. With
+     * stereo at 3x that was three 1440x816 pictures every vblank, and the
+     * game got a few frames a second. */
+    static rt_entry *copied_t;
+    static uint64_t copied_gen;
+    if (ahead && t == copied_t && t->gen == copied_gen) {
+        /* still show a copy that finishes now (below) */
+    } else if (ahead) {                                /* queue a copy of this frame */
+        copied_t = t; copied_gen = t->gen;
         const int k = g_present_head;
         g_present_head = (g_present_head + 1) % PRESENT_RING;
         if (g_present[k] && g_present_w[k] != t->w) {
@@ -1525,6 +1546,7 @@ int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w,
         g_present_seq[k] = ++g_present_next;
     } else {
         /* VRAM is current: drop queued copies (they are older) and say so. */
+        copied_t = NULL;
         for (int k = 0; k < PRESENT_RING; k++) g_present_pending[k] = 0;
         n_present_vram++;
         return 0;
@@ -1575,18 +1597,16 @@ int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w,
             const uint32_t *src = (const uint32_t *)((const uint8_t *)m.pData + (size_t)(y * S + c0) * m.RowPitch);
             uint32_t *dst = out + (size_t)y * (size_t)w;
             for (int x = 0; x < w; x++) {
-                const uint32_t c = src[x * S + c0];
-                dst[x] = L[0][c & 0xFF] | L[1][(c >> 8) & 0xFF] | L[2][(c >> 16) & 0xFF];
+                dst[x] = present_px(src[x * S + c0], f, L);
             }
         }
-        if (S > 1 && hires_buffer(w * S, h * S)) {        /* and the whole S-times picture */
+        /* And the whole S-times picture -- not with stereo, where the eyes
+         * are the headset's pictures and the window makes do with 480x272. */
+        if (S > 1 && !g_present_eyes[best] && hires_buffer(w * S, h * S)) {
             for (int y = 0; y < h * S; y++) {
                 const uint32_t *src = (const uint32_t *)((const uint8_t *)m.pData + (size_t)y * m.RowPitch);
                 uint32_t *dst = g_hires + (size_t)y * (size_t)(w * S);
-                for (int x = 0; x < w * S; x++) {
-                    const uint32_t c = src[x];
-                    dst[x] = L[0][c & 0xFF] | L[1][(c >> 8) & 0xFF] | L[2][(c >> 16) & 0xFF];
-                }
+                for (int x = 0; x < w * S; x++) dst[x] = present_px(src[x], f, L);
             }
             g_hires_fresh = 1;
         }
@@ -1604,10 +1624,7 @@ int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w,
                 for (int y = 0; y < H; y++) {
                     const uint32_t *src = (const uint32_t *)((const uint8_t *)em.pData + (size_t)y * em.RowPitch);
                     uint32_t *dst = g_eye_px[e] + (size_t)y * W;
-                    for (int x = 0; x < W; x++) {
-                        const uint32_t c = src[x];
-                        dst[x] = L[0][c & 0xFF] | L[1][(c >> 8) & 0xFF] | L[2][(c >> 16) & 0xFF];
-                    }
+                    for (int x = 0; x < W; x++) dst[x] = present_px(src[x], f, L);
                 }
                 ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_eye_present[best][e], 0);
             }

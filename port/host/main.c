@@ -858,8 +858,9 @@ static int      g_vr_stereo = 1;
 static float    g_vr_world_scale = VR_WORLD_SCALE_DEFAULT;
 static int      g_stereo_arg;               /* --stereo: the eyes without a headset (dev) */
 static int      g_stereo_on;                /* the eyes are drawn now */
-static const uint32_t *g_eye_px[2];         /* this vblank's eye pictures (d3d11.c), or NULL */
+static const uint32_t *g_eye_px[2];         /* the latest eye pictures (d3d11.c), or NULL */
 static int      g_eye_w, g_eye_h;
+static int      g_eye_new;                  /* g_eye_px changed this vblank */
 static uint32_t *g_eye_rgba[2];             /* ... with the overlay, for the headset */
 static int      g_vr_live;                  /* vr_start ran */
 static uint32_t g_vr_host;                  /* VR_HOST_* held */
@@ -1490,12 +1491,18 @@ static void on_vblank(void) {
         }
         if (p == 0) g_hi_valid = 0;                      /* from VRAM: 480x272 only */
 #ifdef PSP2I_VR
-        g_eye_px[0] = g_eye_px[1] = NULL;
+        /* The eye pictures stay until the next game frame replaces them (a
+         * frame shows for 2+ vblanks; d3d11_present then returns 2). A
+         * picture from VRAM (p 0: movies) has no eyes. */
+        g_eye_new = 0;
+        if (!g_stereo_on || p == 0) g_eye_px[0] = g_eye_px[1] = NULL;
         if (p == 1 && g_stereo_on && g_renderer == REN_D3D11) {
             int w1, h1, w2, h2;
             const uint32_t *l = d3d11_present_eye(0, &w1, &h1), *r = d3d11_present_eye(1, &w2, &h2);
+            g_eye_px[0] = g_eye_px[1] = NULL;
             if (l && r && w1 == w2 && h1 == h2 && w1 % SCREEN_W == 0 && w1 <= SCREEN_W * 4) {
                 g_eye_px[0] = l; g_eye_px[1] = r; g_eye_w = w1; g_eye_h = h1;
+                g_eye_new = 1;
             }
         }
 #endif
@@ -1522,10 +1529,14 @@ static void on_vblank(void) {
         if (g_have_frame) {
             compose();
 #ifdef PSP2I_VR
-            if (g_vr_live && have_frame && g_eye_px[0]) {    /* stereo: each eye's own picture */
-                compose_eyes();
-                if (g_eye_rgba[0] && g_eye_rgba[1])
-                    vr_submit_stereo(g_eye_rgba[0], g_eye_rgba[1], g_eye_w, g_eye_h, psp_gpu_stereo_tan_half_fov());
+            /* Stereo: each eye's own picture, for each new game frame, and
+             * every vblank while the overlay (engine menu) is up so it stays live. */
+            if (g_vr_live && g_eye_px[0]) {
+                if (g_eye_new || memcmp(g_rgba, g_frame, sizeof g_rgba) != 0) {
+                    compose_eyes();
+                    if (g_eye_rgba[0] && g_eye_rgba[1])
+                        vr_submit_stereo(g_eye_rgba[0], g_eye_rgba[1], g_eye_w, g_eye_h, psp_gpu_stereo_tan_half_fov());
+                }
             } else if (g_vr_live && have_frame) {            /* the same picture, in the headset */
                 if (g_hi_s > 1) vr_submit_frame(g_hi_rgba, SCREEN_W * g_hi_s, SCREEN_H * g_hi_s);
                 else vr_submit_frame(g_rgba, SCREEN_W, SCREEN_H);
