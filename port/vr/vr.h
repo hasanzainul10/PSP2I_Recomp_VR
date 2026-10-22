@@ -117,7 +117,10 @@ typedef struct {
     uint8_t  ax, ay, rx, ry;
     uint32_t host;
 } vr_pad;
-enum { VR_HOST_MENU = 1 << 0 };   /* the engine menu's toggle (right stick click) */
+enum {
+    VR_HOST_MENU = 1 << 0,        /* the engine menu's toggle (right stick click) */
+    VR_HOST_SHOT = 1 << 1         /* a VR capture (left grip + left stick click): once per press */
+};
 int  vr_pad_get(vr_pad *out);
 void vr_set_swap_circle_cross(int on);
 

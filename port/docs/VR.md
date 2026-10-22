@@ -90,6 +90,7 @@ swaps them for VR controllers too.
 | Right grip | Select |
 | Left menu button | Start |
 | Left stick click | Recenter the screen |
+| Left grip + left stick click | VR capture, like F11 (dev builds only) |
 | Right stick click | Engine menu |
 
 Index: left A / B are Square / Triangle; Start is a firm squeeze of the left

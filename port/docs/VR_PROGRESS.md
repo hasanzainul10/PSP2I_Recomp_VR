@@ -150,8 +150,10 @@ the world; the user found it overwhelming. Those were removed. Now:
   labels (86 / 88) placed in the world (off view with the head turned 80°).
 
 **Next (in order):**
-1. **A controller shortcut for VR captures** (F11 doesn't reach the window
-   in the headset), so the user can capture a moment without the keyboard.
+1. **Try the controller capture in the headset:** left grip + left stick
+   click (added after the fifth run; built, not yet pressed in the headset).
+   It latches in the VR thread (`g_shot`) and reaches `vrshot_request` through
+   `VR_HOST_SHOT`; without the grip the click still recenters.
 2. **Sharpness:** try `render_scale=4`; the real fix is eye pictures taller
    than 480:272 (the vertical scale stretches pixels).
 3. Engine-menu items for `vr_stereo` and `vr_world_scale` (the menu has 31

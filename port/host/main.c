@@ -1628,6 +1628,9 @@ static void poll_controllers(void) {
         if (stick_off_centre(vp.ax, vp.ay) || !stick_off_centre(ax, ay)) { ax = vp.ax; ay = vp.ay; }
         g_vr_host = vp.host;
         g_vr_rx = vp.rx; g_vr_ry = vp.ry;
+#ifndef PSP2I_PROD
+        if (vp.host & VR_HOST_SHOT) vrshot_request();   /* left grip + left stick click: like F11 */
+#endif
     }
 #endif
     if (b != g_pad_bits || ax != g_pad_ax || ay != g_pad_ay) {

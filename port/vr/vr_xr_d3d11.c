@@ -69,7 +69,7 @@ static HMODULE g_loader;
 /* ---- shared with the game thread -------------------------------------------- */
 
 static volatile LONG g_status = VR_OFF;
-static volatile LONG g_quit, g_recenter, g_swap_oc;
+static volatile LONG g_quit, g_recenter, g_swap_oc, g_shot;
 static HANDLE g_thread;
 static char g_dir[600];
 
@@ -435,8 +435,11 @@ static void input_update(int focused) {
         if (get_float(A_RGRIP) > 0.5f) p.buttons |= P_SELECT;
         if (get_bool(A_START)) p.buttons |= P_START;
         if (get_bool(A_RCLICK)) p.host |= VR_HOST_MENU;
+        /* Left stick click recenters; with the left grip held it asks for a
+         * VR capture instead (F11 doesn't reach the game window while the
+         * headset is on). Latched, so the game's slower poll can't miss it. */
         const int lc = get_bool(A_LCLICK);
-        if (lc && !g_lclick_prev) InterlockedExchange(&g_recenter, 1);
+        if (lc && !g_lclick_prev) InterlockedExchange(get_float(A_LGRIP) > 0.5f ? &g_shot : &g_recenter, 1);
         g_lclick_prev = lc;
     } else {
         g_ltrig_on = g_rtrig_on = g_lclick_prev = 0;
@@ -1192,6 +1195,7 @@ int vr_pad_get(vr_pad *out) {
     *out = g_pad;
     ReleaseSRWLockShared(&g_pad_lock);
     if (!live) { out->buttons = 0; out->ax = out->ay = out->rx = out->ry = 128; out->host = 0; }
+    if (InterlockedExchange(&g_shot, 0) && live) out->host |= VR_HOST_SHOT;
     return live;
 }
 
