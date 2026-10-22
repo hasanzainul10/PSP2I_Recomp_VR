@@ -936,8 +936,14 @@ static int      g_menu_scene = -1;          /* the last frame was a menu scene (
  * game camera's (it follows behind the player; the right stick turns it). */
 #define VR_FP_EYE_DEFAULT   5.3f
 #define VR_FP_SCALE_DEFAULT 3.4f
+/* vr_fp_forward=: the eyes that many game units ahead of the head along the
+ * gaze, so the player's own head is always behind them (user, first run: "I
+ * am inside the head"). 1.2 is ~35 cm: past a head's radius (~0.4) even
+ * when the run animation leans the head forward (the user asked for more
+ * than 0.6 for running). */
+#define VR_FP_FORWARD_DEFAULT 1.2f
 static int      g_vr_first;
-static float    g_vr_fp_eye = VR_FP_EYE_DEFAULT, g_vr_fp_scale = VR_FP_SCALE_DEFAULT;
+static float    g_vr_fp_eye = VR_FP_EYE_DEFAULT, g_vr_fp_scale = VR_FP_SCALE_DEFAULT, g_vr_fp_fwd = VR_FP_FORWARD_DEFAULT;
 #define VR_HUD_DIST_INI_DEFAULT   2.5f          /* = vr.h VR_HUD_DISTANCE_DEFAULT (vr.h is VR builds only) */
 #define VR_HUD_FOLLOW_INI_DEFAULT 35.0f         /* = vr.h VR_HUD_FOLLOW_DEFAULT */
 static float    g_vr_hud_dist = VR_HUD_DIST_INI_DEFAULT, g_vr_hud_size = VR_HUD_SIZE_DEFAULT;
@@ -1068,7 +1074,7 @@ static void head_frame(psp_gpu_stereo *s) {
         const float ul = sqrtf(v[4] * v[4] + v[5] * v[5] + v[6] * v[6]);
         /* A sane position: in front of the camera, within the orbit's reach. */
         if (pl && ul > 0.5f && ul < 2.0f && c[2] < 0.0f && c[0] * c[0] + c[1] * c[1] + c[2] * c[2] < 200.0f * 200.0f) {
-            for (int r = 0; r < 3; r++) base[r] = c[r] + g_vr_fp_eye * v[4 + r] / ul;
+            for (int r = 0; r < 3; r++) base[r] = c[r] + g_vr_fp_eye * v[4 + r] / ul - g_vr_fp_fwd * q[6 + r];   /* ahead: -z */
             first = 1;
         }
     }
@@ -1439,6 +1445,10 @@ static int display_load(void) {
             const float k = (float)atof(line + 10);
             if (k >= 1.0f && k <= 20.0f) g_vr_fp_eye = k;
         }
+        else if (!strncmp(line, "vr_fp_forward=", 14)) {
+            const float k = (float)atof(line + 14);
+            if (k >= 0.0f && k <= 3.0f) g_vr_fp_fwd = k;
+        }
         else if (!strncmp(line, "vr_fp_scale=", 12)) {
             const float k = (float)atof(line + 12);
             if (k >= 0.5f && k <= 20.0f) g_vr_fp_scale = k;
@@ -1508,9 +1518,10 @@ static void display_save(int res) {
     fprintf(f, "vr_hud_distance=%.1f\nvr_hud_size=%.2f\nvr_hud_follow=%.0f\n", (double)g_vr_hud_dist, (double)g_vr_hud_size,
             (double)g_vr_hud_follow);
     fprintf(f, "; with head tracking: view first = you are in your character's head (gamepad: L3 twice quickly toggles), third = behind it;"
-               " fp eye = the eye height in game units (the character is ~5.8 tall); fp scale = game units per metre in first person\n");
-    fprintf(f, "vr_view=%s\nvr_fp_eye=%.1f\nvr_fp_scale=%.1f\n", g_vr_first ? "first" : "third", (double)g_vr_fp_eye,
-            (double)g_vr_fp_scale);
+               " fp eye = the eye height in game units (the character is ~5.8 tall); fp forward = the eyes this far ahead of the"
+               " head along your gaze (so your own head stays behind you); fp scale = game units per metre in first person\n");
+    fprintf(f, "vr_view=%s\nvr_fp_eye=%.1f\nvr_fp_forward=%.1f\nvr_fp_scale=%.1f\n", g_vr_first ? "first" : "third",
+            (double)g_vr_fp_eye, (double)g_vr_fp_fwd, (double)g_vr_fp_scale);
     fprintf(f, "; menu screen: on = the game's menu scenes (continue, mission select, loading) on a flat screen instead of in 3D around you\n");
     fprintf(f, "vr_menu_screen=%s\n", g_vr_menu_screen ? "on" : "off");
     fprintf(f, "; PPSSPP texture packs: folders holding a textures.ini, ';'-separated, later ones win (relative to the exe); empty = off\n");

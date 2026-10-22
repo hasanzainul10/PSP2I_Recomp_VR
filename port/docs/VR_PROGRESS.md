@@ -171,6 +171,11 @@ the world; the user found it overwhelming. Those were removed. Now:
   the stack. The motion controllers' stick clicks are bound after all
   (`bound to recenter: .../left_stick/click`): the earlier "no" was
   checked before the runtime's binding.
+- **Second run (`vr_fp2.log`):** L3 twice turned first person on (30 fps).
+  User: "I am inside the head". Fix (built, not run): the eyes
+  `vr_fp_forward` 1.2 units (~35 cm) ahead of the head along the gaze, so
+  the head stays behind them (the user asked for more than 0.6, for the
+  run animation's lean).
 - **Open:** hiding the player's own head (bone weights, or an eye-forward
   offset), body-relative movement (today the stick moves relative to the
   game camera, which trails behind), the cull behind the game camera.
