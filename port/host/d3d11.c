@@ -1398,30 +1398,44 @@ static int d3d_draw_eye(int e, const psp_gpu_state *st, const psp_gpu_vertex *v,
     return 0;
 }
 
-/* The HUD picture (psp_gpu_backend.draw_hud): the HUD pass's panel draws, as
+/* The HUD pictures (psp_gpu_backend.draw_hud): the HUD pass's panel draws, as
  * the game drew them, on a transparent target the size of the 3D target, for
- * the VR HUD panel (shared with the eyes, share_eyes). Cleared at the first
- * HUD draw of each frame; g_hud_frame names that frame. */
-static ID3D11Texture2D *g_hud_tex, *g_hud_empty;
-static ID3D11RenderTargetView *g_hud_rtv;
+ * the VR HUD panel (shared with the eyes, share_eyes). One per frame in a
+ * ring, each named by its frame: the eyes of frame N go to the headset at the
+ * vblank after its flip, when the game has often begun frame N+1's HUD
+ * already, so share_eyes takes the picture of the eyes' own frame. (With one
+ * picture the frames never matched and the headset got no HUD.) */
+#define HUD_RING 3
+static ID3D11Texture2D *g_hud_tex[HUD_RING], *g_hud_empty;
+static ID3D11RenderTargetView *g_hud_rtv[HUD_RING];
+static uint64_t g_hud_fr[HUD_RING] = { (uint64_t)-1, (uint64_t)-1, (uint64_t)-1 };
+static int g_hud_cur;
 static UINT g_hud_w, g_hud_h;                   /* PSP pixels */
-static uint64_t g_hud_frame = (uint64_t)-1, n_hud_draws;
+static uint64_t n_hud_draws, n_hud_shared, n_hud_none;
 
 static int hud_target(UINT w, UINT h) {
-    if (g_hud_tex && g_hud_w == w && g_hud_h == h) return 1;
-    if (g_hud_rtv) ID3D11RenderTargetView_Release(g_hud_rtv);
-    if (g_hud_tex) ID3D11Texture2D_Release(g_hud_tex);
-    g_hud_rtv = NULL; g_hud_tex = NULL;
+    if (g_hud_tex[0] && g_hud_w == w && g_hud_h == h) return 1;
+    for (int i = 0; i < HUD_RING; i++) {
+        if (g_hud_rtv[i]) ID3D11RenderTargetView_Release(g_hud_rtv[i]);
+        if (g_hud_tex[i]) ID3D11Texture2D_Release(g_hud_tex[i]);
+        g_hud_rtv[i] = NULL; g_hud_tex[i] = NULL; g_hud_fr[i] = (uint64_t)-1;
+    }
     D3D11_TEXTURE2D_DESC d;
     memset(&d, 0, sizeof d);
     d.Width = w * (UINT)g_scale; d.Height = h * (UINT)g_scale; d.MipLevels = 1; d.ArraySize = 1;
     d.Format = DXGI_FORMAT_R8G8B8A8_UNORM; d.SampleDesc.Count = 1;
     d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &d, NULL, &g_hud_tex)) ||
-        FAILED(ID3D11Device_CreateRenderTargetView(g_dev, (ID3D11Resource *)g_hud_tex, NULL, &g_hud_rtv))) return 0;
+    for (int i = 0; i < HUD_RING; i++)
+        if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &d, NULL, &g_hud_tex[i])) ||
+            FAILED(ID3D11Device_CreateRenderTargetView(g_dev, (ID3D11Resource *)g_hud_tex[i], NULL, &g_hud_rtv[i]))) return 0;
     g_hud_w = w; g_hud_h = h;
-    g_hud_frame = (uint64_t)-1;
     return 1;
+}
+
+/* The ring slot holding frame f's HUD, or -1. */
+static int hud_slot(uint64_t f) {
+    for (int i = 0; i < HUD_RING; i++) if (g_hud_tex[i] && g_hud_fr[i] == f) return i;
+    return -1;
 }
 
 static int d3d_draw_hud(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts) {
@@ -1430,16 +1444,17 @@ static int d3d_draw_hud(const psp_gpu_state *st, const psp_gpu_vertex *v, int nv
     if (rows > 512) rows = 512;
     rt_entry *t = rt_get(vram_off(st->fb_addr), st->fb_stride, st->fb_fmt, rows);
     if (!t || !hud_target(t->w, t->h)) return 1;
-    if (g_hud_frame != frame_no()) {
+    if (g_hud_fr[g_hud_cur] != frame_no()) {             /* a new frame: the next slot, cleared */
         static const float CLEAR[4] = { 0, 0, 0, 0 };
-        ID3D11DeviceContext_ClearRenderTargetView(g_ctx, g_hud_rtv, CLEAR);
-        g_hud_frame = frame_no();
+        g_hud_cur = (g_hud_cur + 1) % HUD_RING;
+        ID3D11DeviceContext_ClearRenderTargetView(g_ctx, g_hud_rtv[g_hud_cur], CLEAR);
+        g_hud_fr[g_hud_cur] = frame_no();
     }
     ID3D11ShaderResourceView *srv = NULL;
     float uvs[2] = { 1, 1 };
     if (st->tex && !(srv = texture_view(st, t, uvs))) return 1;
     g_hud_draw = 1;
-    const int r = submit_draw(st, v, nverts, g_hud_rtv, NULL, srv, t->w, t->h, uvs);
+    const int r = submit_draw(st, v, nverts, g_hud_rtv[g_hud_cur], NULL, srv, t->w, t->h, uvs);
     g_hud_draw = 0;
     if (r != 0) return 1;
     n_hud_draws++;
@@ -1452,27 +1467,33 @@ static int d3d_draw_hud(const psp_gpu_state *st, const psp_gpu_vertex *v, int nv
 const uint32_t *d3d11_hud_picture(int *w, int *h) {
     static uint32_t *px;
     static size_t cap;
-    if (!g_hud_tex) return NULL;
+    ID3D11Texture2D *src = g_hud_tex[g_hud_cur];
+    if (!src) return NULL;
     D3D11_TEXTURE2D_DESC d;
-    ID3D11Texture2D_GetDesc(g_hud_tex, &d);
+    ID3D11Texture2D_GetDesc(src, &d);
     d.Usage = D3D11_USAGE_STAGING; d.BindFlags = 0; d.CPUAccessFlags = D3D11_CPU_ACCESS_READ; d.MiscFlags = 0;
     ID3D11Texture2D *st = NULL;
     if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &d, NULL, &st))) return NULL;
-    ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)st, (ID3D11Resource *)g_hud_tex);
+    ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)st, (ID3D11Resource *)src);
     D3D11_MAPPED_SUBRESOURCE m;
     const uint32_t *out = NULL;
     if ((size_t)d.Width * d.Height > cap) { free(px); cap = (size_t)d.Width * d.Height; px = (uint32_t *)malloc(cap * 4); }
+    uint64_t n_col = 0, n_alpha = 0;                  /* the panel layer needs alpha: count both */
     if (px && SUCCEEDED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)st, 0, D3D11_MAP_READ, 0, &m))) {
         for (UINT y = 0; y < d.Height; y++) {
             const uint8_t *src = (const uint8_t *)m.pData + (size_t)y * m.RowPitch;
             for (UINT x = 0; x < d.Width; x++) {
                 const uint32_t r = src[x * 4], g = src[x * 4 + 1], b = src[x * 4 + 2], a = src[x * 4 + 3];
+                if (r | g | b) n_col++;
+                if (a) n_alpha++;
                 const uint32_t k = 40 * (255 - a) / 255;   /* premultiplied over grey 40 */
                 px[(size_t)y * d.Width + x] = 0xFF000000u | ((r + k > 255 ? 255 : r + k) << 16) |
                                               ((g + k > 255 ? 255 : g + k) << 8) | (b + k > 255 ? 255 : b + k);
             }
         }
         ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)st, 0);
+        fprintf(stderr, "vr: capture: HUD picture (frame %llu): %llu pixels coloured, %llu with alpha\n",
+                (unsigned long long)g_hud_fr[g_hud_cur], (unsigned long long)n_col, (unsigned long long)n_alpha);
         *w = (int)d.Width; *h = (int)d.Height;
         out = px;
     }
@@ -1662,8 +1683,9 @@ static int share_eyes(rt_entry *t, UINT W, UINT H) {
     for (int e = 0; e < 2; e++)
         ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)g_share, 0, (UINT)e * W, 0, 0,
                                                   (ID3D11Resource *)eye_picture(t, e), 0, &box);
-    const int hud = g_hud_tex && g_hud_frame == t->eye_frame;
-    ID3D11Resource *third = hud ? (ID3D11Resource *)g_hud_tex : (ID3D11Resource *)g_hud_empty;
+    const int hs = hud_slot(t->eye_frame);
+    if (hs >= 0) n_hud_shared++; else n_hud_none++;
+    ID3D11Resource *third = hs >= 0 ? (ID3D11Resource *)g_hud_tex[hs] : (ID3D11Resource *)g_hud_empty;
     if (third) ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)g_share, 0, 2 * W, 0, 0, third, 0, &box);
     IDXGIKeyedMutex_ReleaseSync(g_share_mx, 0);
     ID3D11DeviceContext_Flush(g_ctx);
@@ -1928,7 +1950,8 @@ void d3d11_report(FILE *out) {
                 (unsigned long long)n_xv_checked, (unsigned long long)n_xv_bad_xfers,
                 (unsigned long long)n_xv_bad_px, (unsigned long long)n_xv_overlap);
     if (n_eye_draws)
-        fprintf(out, "  d3d11 stereo        %llu HUD panel draws\n", (unsigned long long)n_hud_draws);
+        fprintf(out, "  d3d11 stereo        %llu HUD panel draws; frames shared with their HUD %llu, without (none drawn) %llu\n",
+                (unsigned long long)n_hud_draws, (unsigned long long)n_hud_shared, (unsigned long long)n_hud_none);
         fprintf(out, "  d3d11 stereo        %llu eye draws, %llu frames read back for both eyes, %llu shared on the GPU (%llu skipped: busy)\n",
                 (unsigned long long)n_eye_draws, (unsigned long long)n_present_eyes,
                 (unsigned long long)n_share, (unsigned long long)n_share_busy);

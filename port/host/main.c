@@ -898,9 +898,11 @@ static float    g_vr_fov = VR_FOV_SCALE_DEFAULT, g_vr_fov_y = VR_FOV_SCALE_Y_DEF
  * and the menu background layer 92 (the white sheet behind dialogs such as
  * "Abandon mission?": VR capture 2026-10-22). Everything else stays in the
  * world: the place and enemy labels (86, 88), the lock-on reticle (90).
- * Unknown layers stay in the world. */
-static int psp2i_hud_panel(float w) {
-    return w < 80.0f || (w >= 84.0f && w < 85.995f) || (w >= 86.85f && w <= 87.05f) || (w >= 91.5f && w <= 92.5f) ||
+ * Unknown layers stay in the world. Any sheet covering more than a fifth of
+ * the screen goes on the panel too: NPC portraits share the labels' layer
+ * (86: the shop's portrait, GE dump 2026-10-22), and labels are small. */
+static int psp2i_hud_panel(float w, float frac) {
+    return frac > 0.2f || w < 80.0f || (w >= 84.0f && w < 85.995f) || (w >= 86.85f && w <= 87.05f) || (w >= 91.5f && w <= 92.5f) ||
            w > 1000.0f;
 }
 /* Screen-space effects (hit sparks, techniques: small orthographic draws in
