@@ -45,6 +45,12 @@ _Last updated: 2026-10-22._
   `PSP2I_VR_PROBE_WATCH=ADDR` (or `camera+OFF`, the active camera object)
   arms the write watch at each F8 (the first 32 writes with their game stacks, in the console and
   `game_log.txt`). F8 also dumps the active camera object.
+- Texture packs (merged from `texture-packs`, 2026-10-22): `port/host/texreplace.c`,
+  `texture_packs=` in `psp2i_display.ini`. The user's packs are extracted in
+  `FinalBuild/texture_packs/{base,extra}`. Headless check: both load (2934 keys);
+  the brand logo is replaced. Not yet looked at in a window or the headset. The
+  extra pack's `textures.ini` names `HighRes-UI/*.png` files the archive doesn't
+  contain (a separate download), so those stay original.
 - `port/tests/vr_test.c`: the theater with a test picture, without the game.
 - Menu tests: `test_menu` (445 checks), including `test_vr_page`.
 
