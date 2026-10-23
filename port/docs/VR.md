@@ -110,8 +110,8 @@ R once again.
 | Stick | Move (in manual aim: aim) | Camera / turn |
 | Stick click | Manual aim (the game's L + D-pad down) | Start |
 | Face buttons | Square / Triangle | Cross / Circle |
-| Swing, or pull the trigger | Attack (Square) | Attack (Square) |
-| Grip held + swing / trigger | Photon Art (Triangle) | Photon Art (Triangle) |
+| Swing, or pull the trigger | Sub weapon attack (R + Square) | Attack (Square) |
+| Grip held + swing / trigger | Sub weapon Photon Art / technique (R + Triangle) | Photon Art (Triangle) |
 | Grip alone | R (lock-on) | L |
 | Menu button | Start | |
 

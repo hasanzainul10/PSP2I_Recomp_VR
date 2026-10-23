@@ -96,6 +96,15 @@ controls are fine; manual aim in first person not tried yet. They chose to
   - Dev logs: `vr: arms: the matrix at ... rides on body node N` / `let go`;
     with `PSP2I_SKEL` also the copy hook's counters and candidates.
 
+- **The left hand uses the sub weapon** (2026-10-24, user in the headset:
+  "left swing / trigger uses the sub weapon, and left grip + swing /
+  trigger its PA"). A left swing or trigger holds R, waits for the game's R
+  stance (player +0x214 != 0, at most 8 flips), presses Square (Triangle
+  with the left grip) with R still held, and keeps R 20 flips more so a
+  combo's next swing fires at once (host/main.c `g_sub_phase`). The stance
+  came on within 0-6 flips in all 8 logged presses. The right hand is
+  unchanged.
+
 **Next for M2:**
 1. Not checked: town with the weapon put away (a learned weapon would be
    drawn in the hand if the game still draws it there), twin and two-handed

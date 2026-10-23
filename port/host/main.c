@@ -1063,6 +1063,17 @@ static int g_menu_dpad_on;                      /* the stick is the D-pad now (l
 static float    g_vr_swing = SWING_SPEED_INI_DEFAULT;
 static uint32_t g_swing_btn;                    /* the attack being pressed, 0 = none */
 static uint64_t g_swing_flip;                   /* ... since this flip */
+/* The left hand's swings are the sub weapon's: R held brings it up (user:
+ * holding R lifts the gun to the hand, as PSUEx-VR's R1 makes the left
+ * weapon the active one), so a left swing holds R, waits for the game's R
+ * stance (player +0x214, as fp_nudge reads it; at most SUB_LEAD_MAX flips),
+ * then presses Square / Triangle with R still held, and keeps R a moment
+ * after (SUB_TAIL) so a combo's next swing doesn't wait again. */
+#define SUB_LEAD_MAX 8
+#define SUB_TAIL     20
+static int      g_sub_phase;                    /* 0 none, 1 R held and waiting, 2 pressing (then the tail) */
+static uint32_t g_sub_btn;
+static uint64_t g_sub_flip;                     /* phase 1: since this flip */
 /* ... and its projection that much wider across / up (1 = the game's): the
  * eyes' view plus VR_FP_VIEW_MARGIN, so the game culls nothing the eyes see,
  * even as they turn before the next frame (user: "when I look up the bottom
@@ -2748,8 +2759,19 @@ static void poll_controllers(void) {
             if (!vp.swing[h] || !g_vr_motion) continue;
             const uint32_t btn = vp.swing[h] == 2 ? 0x1000u : 0x8000u;   /* Triangle with the grip, else Square */
             if (g_menu.open) continue;
-            g_swing_btn = btn;
-            g_swing_flip = fl;
+            if (h == 0) {                                   /* the sub weapon: through R */
+                g_sub_btn = btn;
+                if (g_sub_phase == 2 && fl - g_swing_flip < SWING_PRESS + SUB_TAIL) {
+                    g_swing_btn = btn;                      /* R is still held: press now */
+                    g_swing_flip = fl;
+                } else {
+                    g_sub_phase = 1;
+                    g_sub_flip = fl;
+                }
+            } else {
+                g_swing_btn = btn;
+                g_swing_flip = fl;
+            }
             vr_haptic(h, 0.4f, 0.05f);
 #ifndef PSP2I_PROD
             if (vp.swing_speed[h] > 0)
@@ -2760,6 +2782,23 @@ static void poll_controllers(void) {
                         btn == 0x1000u ? "Triangle" : "Square");
 #endif
         }
+        if (g_sub_phase == 1) {                             /* R held until the game is in its R stance */
+            const uint32_t pl = gamelog_local_player();
+            static uint64_t stance_since;
+            const int stance = pl && psp_read32(pl + 0x214u) != 0;
+            if (!stance) stance_since = fl;
+            if ((stance && fl - stance_since >= 2) || fl - g_sub_flip >= SUB_LEAD_MAX) {
+#ifndef PSP2I_PROD
+                fprintf(stderr, "vr: sub weapon: R held %llu flips (%s), then %s\n", (unsigned long long)(fl - g_sub_flip),
+                        stance ? "the R stance is on" : "no R stance seen", g_sub_btn == 0x1000u ? "Triangle" : "Square");
+#endif
+                g_sub_phase = 2;
+                g_swing_btn = g_sub_btn;
+                g_swing_flip = fl;
+            }
+        }
+        if (g_sub_phase == 2 && fl - g_swing_flip >= SWING_PRESS + SUB_TAIL) g_sub_phase = 0;
+        if (g_sub_phase) b |= 0x0200u;                      /* R */
         if (g_swing_btn && fl - g_swing_flip < SWING_PRESS) b |= g_swing_btn;
         else g_swing_btn = 0;
     }
