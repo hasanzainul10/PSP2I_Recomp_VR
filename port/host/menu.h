@@ -30,7 +30,7 @@ enum { MENU_FRAME_RATE, MENU_FPS_COUNTER, MENU_SEGA_SERVER, MENU_ADHOC_SERVER, M
        MENU_RS_ON, MENU_RS_SPEED, MENU_SWAP_OC, MENU_TOUCH_COLOR, MENU_TOUCH_ALPHA, MENU_CONTROLS_BACK,
        MENU_TEST_TICKS, MENU_TEST_LOGIC, MENU_TESTS_BACK,
        MENU_VR_ON, MENU_VR_DISTANCE, MENU_VR_WIDTH, MENU_VR_HUD_DIST, MENU_VR_WORLD, MENU_VR_RES, MENU_VR_SHARPEN, MENU_VR_FILTER,
-       MENU_VR_RECENTER, MENU_VR_BACK, MENU_ITEMS };
+       MENU_VR_GLOW, MENU_VR_RECENTER, MENU_VR_BACK, MENU_ITEMS };
 enum { MENU_PAGE_MAIN, MENU_PAGE_CONTROLS, MENU_PAGE_TESTS, MENU_PAGE_VR };
 int menu_page_of(int item);                      /* MENU_PAGE_* */
 #define MENU_BIT(i) (1ull << (i))                 /* 64 bits: there are more than 32 items */
@@ -115,8 +115,8 @@ enum {
     MFX_TOUCH       = 1 << 14,  /* touch_color or touch_alpha changed */
     MFX_RS_ON       = 1 << 15,  /* rs_on changed: the right stick turns the camera, or nothing */
     MFX_TESTS       = 1 << 16,  /* test_ticks or test_logic changed (framerate_set_tests) */
-    MFX_VR          = 1 << 17,  /* vr_on, vr_dist_dm, vr_width_dm, vr_hud_dm, vr_world_pct, vr_res, vr_sharpen or
-                                   vr_filter changed: apply and save */
+    MFX_VR          = 1 << 17,  /* vr_on, vr_dist_dm, vr_width_dm, vr_hud_dm, vr_world_pct, vr_res, vr_sharpen,
+                                   vr_filter or vr_glow changed: apply and save */
     MFX_VR_RECENTER = 1 << 18,  /* VR > RECENTER: the screen in front of the head again */
 };
 
@@ -156,6 +156,7 @@ typedef struct {
     int      vr_res_now;   /* the render scale running (set by the caller): RESTART shows when they differ */
     int      vr_sharpen;   /* 0..VR_SHARPEN_STEPS, tenths */
     int      vr_filter;    /* VR_FILTER_* */
+    int      vr_glow;      /* the game's glow (bloom) in the headset */
     int      vr_quality_restart; /* VR_RESTART_*: the item shows RESTART (set by the caller: needs a new start) */
     char     vr_status[24];/* "RUNNING", "NO HEADSET", ...; set by the caller */
     uint64_t hidden;       /* MENU_BIT(item)s this host leaves out (not drawn, skipped);

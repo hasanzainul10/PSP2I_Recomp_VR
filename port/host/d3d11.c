@@ -957,7 +957,19 @@ static ID3D11ShaderResourceView *texture_view(const psp_gpu_state *st, rt_entry 
             rt_entry *t = &g_rt[i];
             if (!t->used || !overlaps(toff, tend, t->off, rt_end(t))) continue;
             const int same_fmt = st->tex_psm <= 3 && st->tex_psm == t->fmt && !st->tex_swz;
-            if (t->dirty && t->off == toff && st->tex_bufw == t->stride && same_fmt) {
+            /* Stereo: a target with eye copies is sampled from the GPU even
+             * when VRAM is current, so each eye samples its own copy (the eye
+             * draws follow g_tv_src). Decoded from VRAM, both eyes got the
+             * mono (left) picture: PSP2i's glow buffer 0x154000 is sampled as
+             * 512x512, taller than its 272 rows, so the exact-layout path
+             * above skips it, and the glow came out the same in both eyes,
+             * at no depth, apart from what glows (user, 2026-10-23: "the
+             * glow from enemy somehow become separate from body"; 0 px
+             * between the eyes against the body's 3). Without stereo no
+             * target has eye copies, so nothing changes. */
+            const int eyes = t->eye_rtv[0] || t->eye_rtv[1];
+            if (eyes && !t->dirty && t->off == toff && st->tex_bufw == t->stride && same_fmt) rt_check(t);
+            if ((t->dirty || eyes) && t->off == toff && st->tex_bufw == t->stride && same_fmt) {
                 /* Render-to-texture: sample the GPU copy directly. */
                 n_rt_tex++;
                 scale[0] = 1.0f / (float)t->w;
@@ -1462,6 +1474,25 @@ static int d3d_draw_eye_body(int e, const psp_gpu_state *st, const psp_gpu_verte
             srv = g_scratch_srv;
         }
     }
+#ifndef PSP2I_PROD
+    else if (st->tex && (st->tex_addr & 0x0F000000u) == 0x04000000u) {
+        /* Dev: an eye draw sampling a target's bytes without that eye's own
+         * copy (the mono picture, or VRAM): once per texture address. */
+        const uint32_t toff = vram_off(st->tex_addr);
+        static uint32_t seen[32];
+        static int n_seen;
+        int k = 0;
+        while (k < n_seen && seen[k] != toff) k++;
+        for (int i = 0; i < MAX_RT && k == n_seen && n_seen < 32; i++) {
+            const rt_entry *o = &g_rt[i];
+            if (!o->used || (!o->eye_rtv[0] && !o->eye_rtv[1]) || toff < o->off || toff >= rt_end(o)) continue;
+            seen[n_seen++] = toff;
+            fprintf(stderr, "d3d11: eye %d samples VRAM+0x%06X (%ux%u psm %d bufw %u) without its own copy of target 0x%06X/%u fmt %d%s\n",
+                    e, toff, st->tex_w, st->tex_h, st->tex_psm, st->tex_bufw, o->off, o->stride, o->fmt,
+                    g_last.src ? " (the source has no eye copy)" : "");
+        }
+    }
+#endif
     if (submit_draw(st, v, nverts, t->eye_rtv[e], dsv, srv, t->w, t->h, g_last.uvs) != 0) return 1;
     const uint32_t tag = psp_gpu_stereo_tag();
     if (t->eye_frame != frame_no()) t->eye_tag = 0;

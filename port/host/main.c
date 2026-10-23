@@ -996,6 +996,7 @@ static float    g_vr_fp_near = VR_FP_NEAR_DEFAULT;
 static float g_fp_head_off[3];               /* the head's centre across from the feet, world axes (head_frame's probe) */
 static int   g_fp_head_ok;
 static int   g_fp_cam;                       /* the last field camera was applied at the head */
+static int   g_fp_other_cam;                 /* the camera applied last is another (the minimap's): left alone */
 static float g_fp_cam_hr[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };   /* ... turned as the head was then (level frame) */
 /* First person's own heading (the angle of the view's level backward axis,
  * atan2(x, z) in the world), so the view doesn't swing when the game camera
@@ -1332,6 +1333,12 @@ static int      g_vr_cull_all = 1;
  * culling (psp_gpu_stereo.two_sided): "angles not viewable in the original
  * game are not rendered" (user): one-sided walls and roofs seen from behind. */
 static int      g_vr_two_sided = 1;
+/* vr_glow=off (head tracking; VR > GLOW): the game's glow pass is left out
+ * of the eyes (psp_gpu_stereo.no_glow): the parts that glow are drawn into
+ * their own buffer, blurred on the game's 480x272 screen and added over the
+ * scene, which in the eyes sat off what glows (user, 2026-10-23: "the glow
+ * move around"). */
+static int      g_vr_glow = 1;
 static uint64_t n_cull_all;
 static void hook_cull_test(void (*original)(void)) {
     if (!g_head_on || !g_vr_cull_all) { original(); return; }
@@ -1381,6 +1388,19 @@ static void hook_apply_camera(void (*original)(void)) {
     const int field = px > 1.15f && px < 2.5f;      /* other cameras (3 applies a frame) leave g_fp_cam alone */
     if (!g_head_on || !g_vr_first) g_fp_cam = g_fp_yaw_ok = 0;
     if (!field) { original(); return; }
+    /* The field camera is the frame's first with the field's projection.
+     * The minimap's own camera has the same x scale (1.368) and comes after
+     * the scene walk, three times a frame ([cam 09557DA0] scene walk [cam
+     * 094AFD40] x3 [cam 09557DA0], f1_nudge1.log): put at the head and
+     * widened too, its map was drawn from eye level, lying flat (user,
+     * 2026-10-23: "the minimap still behave like we are seeing it in first
+     * person"). Other cameras are applied as the game set them, and the
+     * projection they set (hook_set_projection) is not widened. */
+    static uint64_t main_flip = (uint64_t)-1;
+    static uint32_t main_cam;
+    if (psp_display_flips() != main_flip) { main_flip = psp_display_flips(); main_cam = cam; }
+    g_fp_other_cam = cam != main_cam;
+    if (g_fp_other_cam) { original(); return; }
     g_fp_cam = 0;
     if (g_head_on && g_vr_first && pl) {
         /* The game camera's backward axis, level, from its eye and target
@@ -1460,7 +1480,7 @@ static void hook_apply_camera(void (*original)(void)) {
 static uint64_t n_proj_wide;
 static void hook_set_projection(void (*original)(void)) {
     original();
-    if (!g_head_on || !g_vr_first || !g_fp_cam || psp_read32(PSP2I_PROJ_ORTHO) == 1) return;
+    if (!g_head_on || !g_vr_first || !g_fp_cam || g_fp_other_cam || psp_read32(PSP2I_PROJ_ORTHO) == 1) return;
     const float p0 = psp_read_f32(PSP2I_PROJ_MATRIX), p5 = psp_read_f32(PSP2I_PROJ_MATRIX + 20);
     if (!(fabsf(p0) > 1.15f && fabsf(p0) < 2.5f)) return;
     const float fx = g_vr_fov > 1.0f ? g_vr_fov : 1.0f, fy = g_vr_fov_y > 1.0f ? g_vr_fov_y : 1.0f;
@@ -1566,6 +1586,7 @@ static void stereo_update(void) {
         st.mono_is_left = 1;                                      /* two pictures, not three: the window shows the left eye */
         st.eye_views = head;                                      /* head tracking: head_frame sets each eye per frame */
         st.two_sided = head && g_vr_two_sided;
+        st.no_glow = head && !g_vr_glow;
         st.on_frame = head ? head_frame : NULL;
         st.fov_scale = head ? g_vr_fov : 1.0f;
         st.fov_scale_y = head ? g_vr_fov_y : 1.0f;
@@ -1827,6 +1848,7 @@ static int display_load(void) {
         }
         else if (!strncmp(line, "vr_cull_all=", 12)) g_vr_cull_all = strncmp(line + 12, "off", 3) != 0;
         else if (!strncmp(line, "vr_two_sided=", 13)) g_vr_two_sided = strncmp(line + 13, "off", 3) != 0;
+        else if (!strncmp(line, "vr_glow=", 8)) g_vr_glow = strncmp(line + 8, "off", 3) != 0;
         else if (!strncmp(line, "vr_aniso=", 9)) {
             const int k = atoi(line + 9);
             if (k >= 0 && k <= 16) g_vr_aniso = k;
@@ -1917,6 +1939,8 @@ static void display_save(int res) {
     fprintf(f, "; with head tracking: two sided = on: both sides of the 3D scene's faces drawn (walls and roofs the PSP camera"
                " never saw from behind stay solid), off = the game's back-face culling\n");
     fprintf(f, "vr_two_sided=%s\n", g_vr_two_sided ? "on" : "off");
+    fprintf(f, "; with head tracking: glow = on: the game's glow (bloom) in the headset, off = left out (VR > GLOW)\n");
+    fprintf(f, "vr_glow=%s\n", g_vr_glow ? "on" : "off");
     fprintf(f, "; with head tracking: the HUD and menus on a panel this many metres away, this size of the game's view (0.2..1.0);"
                " follow = how many degrees you can look away before it glides back in front of you (0 = it stays where recenter put it)\n");
     fprintf(f, "vr_hud_distance=%.1f\nvr_hud_size=%.2f\nvr_hud_follow=%.0f\n", (double)g_vr_hud_dist, (double)g_vr_hud_size,
@@ -1988,6 +2012,7 @@ static void menu_step(void) {
     g_menu.vr_res_now = g_hi_s;
     g_menu.vr_sharpen = (int)lroundf(g_vr_sharpen * VR_SHARPEN_STEPS);
     g_menu.vr_filter = menu_vr_filter_of(g_vr_aniso);
+    g_menu.vr_glow = g_vr_glow;
     /* RESTART: sharpening needs a start in VR (its shader), mipmaps a start
      * with filtering on (they're made when textures are first loaded). */
     g_menu.vr_quality_restart = 0;
@@ -2084,6 +2109,7 @@ static void menu_step(void) {
         g_render_scale = g_menu.vr_res;                 /* from the next start */
         g_vr_sharpen = (float)g_menu.vr_sharpen / (float)VR_SHARPEN_STEPS;
         g_vr_aniso = menu_vr_filter_aniso(g_menu.vr_filter);
+        g_vr_glow = g_menu.vr_glow;
         if (g_renderer == REN_D3D11) d3d11_set_quality(g_vr_aniso, g_vr_sharpen);
         if (g_menu.vr_world_pct > 0) {                   /* the view in use: life size * 100 / percent */
             const float k = VR_FP_SCALE_DEFAULT * 100.0f / (float)g_menu.vr_world_pct;
