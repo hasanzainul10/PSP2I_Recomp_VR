@@ -39,15 +39,30 @@ controls are fine; manual aim in first person not tried yet. They chose to
 - **Not identified:** an 8-node model at container +0x10 with its own
   nodes, ~14.5 units from the body.
 
+- **2-bone arm IK works in the headset** (user: "the arms follow the
+  controllers"): `vr_body.c` `arms_pose` at `0x08A846DC`, on with INPUT
+  MODE = MOTION and `vr_arms=on` (the default; ini only, no menu item yet).
+  Shoulder 15 / 20 turns to a solved elbow (pole down, a little out and
+  back), elbow 16 / 21 turns the wrist 17 / 22 onto the target; the nodes
+  are put back after each palette (drawn only). Target = the controller's
+  offset from the headset, in the headset's heading, from the model's eyes
+  (head node 13 + 6 cm up, 8 cm ahead), at the model's arm over 0.55 m
+  (measured live: upper arm and forearm 2.2 units each, 8.0 units a metre:
+  the node scales make them shorter than the records' 2.56).
+- **Seen in the log** (`port/testwork/arms/arms1.log`): the right hand's
+  reach was over 100% of the arm in 21 of 40 samples (up to 146%), so the
+  arm is often clamped straight: the eyes-to-shoulder offset or the 0.55 m
+  arm doesn't match. Not yet judged by the user.
+
 **Next for M2:**
-1. 2-bone IK in `vr_body.c` at `0x08A846DC`: shoulder 15 / 20, elbow 16 /
-   21, wrist 17 / 22 (upper arm and forearm 2.56 each, model units), to the
-   hand poses (`hands_frame`, game units: the model -> world scale comes
-   from model+32 and the view), in a copy put back after each call as the
-   test does. Gate on INPUT MODE = MOTION, a `vr_arms=` setting.
-2. First person: the arms in view (the head is hidden there already?), and
-   whether the weapon's hits follow the drawn hand (they shouldn't: only
-   the drawing changes, nothing in the game's state).
+1. The reach: anchor at the shoulder instead (the headset's shoulder
+   estimate: eyes minus ~0.25 m down and ~0.18 m to the side, as PSUEx-VR
+   does), or a calibration (both grips + both triggers with arms out).
+2. The hand's rotation from the controller's (the weapon tilting with the
+   wrist): wrist 17 / 22 axes from the grip pose, with a fixed offset.
+3. A VR > ARMS item on the engine menu (run `test_menu`).
+4. First person: how the arms look in view; the weapon's hits stay the
+   game's (only the drawing changes).
 
 ## Start here (handoff 2026-10-23)
 

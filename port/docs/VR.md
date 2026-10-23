@@ -88,7 +88,11 @@ CONTROLS page swaps them for VR controllers too.
 
 ### MOTION (as PSUEx-VR)
 
-Your hands are shown where the controllers are (a ring and a short ray).
+Your hands are shown where the controllers are (a ring and a short ray),
+and your character's arms reach for them, in first and third person
+(`vr_arms=on`, the default; `off` keeps the game's own arm animation). Only
+how your character is drawn on your side changes: other players see the
+game's animation.
 
 | Control | Left hand | Right hand |
 |---|---|---|

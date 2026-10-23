@@ -1028,6 +1028,9 @@ static int   g_vr_fp_nudge = 1;
  * level frame and scale as the eyes), for the arms, swings and aim to come
  * (VR_PLAN P5). The controllers' buttons stay the PSP pad either way. */
 static int   g_vr_motion;
+/* vr_arms=: with MOTION, the character's arms reach for the controllers
+ * (vr_body.c: 2-bone IK where the skinning palette is built, drawn only). */
+static int   g_vr_arms = 1;
 typedef struct {
     int   ok;
     float p[3];          /* the grip, world */
@@ -1352,6 +1355,7 @@ static void head_frame(psp_gpu_stereo *s) {
         view_of(q, p, s->eye_view[e]);
     }
     hands_frame(base, lev, k);
+    vr_body_arms(g_vr_arms && g_vr_motion && live);
     s->tag = live ? h.id : 0;
     /* Menu scenes: as the game draws them, on the flat screen (tag 0). */
     int menu = 0;
@@ -2350,6 +2354,7 @@ static int display_load(void) {
         }
         else if (!strncmp(line, "vr_fp_nudge=", 12)) g_vr_fp_nudge = strncmp(line + 12, "off", 3) != 0;
         else if (!strncmp(line, "vr_input=", 9))     g_vr_motion = !strncmp(line + 9, "motion", 6);
+        else if (!strncmp(line, "vr_arms=", 8))      g_vr_arms = strncmp(line + 8, "off", 3) != 0;
         else if (!strncmp(line, "vr_menu_dpad=", 13)) g_vr_menu_dpad = strncmp(line + 13, "off", 3) != 0;
         else if (!strncmp(line, "vr_swing_speed=", 15)) {
             const float k = (float)atof(line + 15);
@@ -2449,6 +2454,9 @@ static void display_save(int res) {
                " left stick click manual aim, right stick click START, both grips + Cross / Circle / Square recenter / first or"
                " third person / engine menu, both grips + left stick click the left stick as the D-pad\n");
     fprintf(f, "vr_input=%s\n", g_vr_motion ? "motion" : "pad");
+    fprintf(f, "; VR arms (with VR input motion): on = your character's arms reach for the controllers (only how it is drawn"
+               " here), off = the game's own arm animation\n");
+    fprintf(f, "vr_arms=%s\n", g_vr_arms ? "on" : "off");
     fprintf(f, "; with motion: swing a controller faster than swing speed (m/s, 1.0..5.0) to attack (Square); with that hand's"
                " grip held, Triangle (the Photon Art slot)\n");
     fprintf(f, "vr_swing_speed=%.1f\n", (double)g_vr_swing);

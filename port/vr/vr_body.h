@@ -19,4 +19,9 @@
  * (15 = the left shoulder: the arm, hand and weapon follow, headset-checked). */
 void vr_body_init(void);
 
+/* Arms (vr_arms=, with INPUT MODE = MOTION): the local player's arms reach
+ * for the VR controllers (2-bone IK at the palette, drawn only; nothing in
+ * the game's state changes). The host sets it each frame. */
+void vr_body_arms(int on);
+
 #endif
