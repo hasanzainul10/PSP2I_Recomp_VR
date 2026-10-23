@@ -1028,8 +1028,9 @@ typedef struct {
 } game_hand;
 static game_hand g_hand_w[2];
 /* M3 prototype, melee by swinging (vr_swing_speed= m/s, MOTION only): a swing
- * of either hand presses Square, with that hand's grip held Triangle (the
- * palette's second action, the Photon Art slot), for SWING_PRESS game frames.
+ * or a trigger pull of either hand presses Square, with that hand's grip held
+ * Triangle (the palette's second action, the Photon Art slot), for SWING_PRESS
+ * game frames (the rest of MOTION's PSUEx-VR mapping is the VR thread's).
  * It goes through the pad like a button, so the first-person attack nudge
  * turns the character to the view first. */
 #define SWING_SPEED_INI_DEFAULT 1.8f            /* = vr.h VR_SWING_SPEED_DEFAULT */
@@ -2201,8 +2202,10 @@ static void display_save(int res) {
     fprintf(f, "; first person: fp nudge = on: an attack (Square, Triangle) first turns your character to where you look"
                " (not while R locks on), off = the attack goes the way the character faces\n");
     fprintf(f, "vr_fp_nudge=%s\n", g_vr_fp_nudge ? "on" : "off");
-    fprintf(f, "; VR input: pad = a gamepad (or the VR controllers as one), motion = the VR controllers' hands shown"
-               " where they are (motion controls build on it; the buttons stay the pad's)\n");
+    fprintf(f, "; VR input: pad = a gamepad (or the VR controllers as one), motion = the VR controllers as in PSUEx-VR: hands"
+               " shown, swing or trigger attacks, grip + swing / trigger the Photon Art, left grip R (lock-on), right grip L,"
+               " left stick click manual aim, right stick click START, both grips + Cross / Circle / Square recenter / first or"
+               " third person / engine menu, both grips + left stick click the left stick as the D-pad\n");
     fprintf(f, "vr_input=%s\n", g_vr_motion ? "motion" : "pad");
     fprintf(f, "; with motion: swing a controller faster than swing speed (m/s, 1.0..5.0) to attack (Square); with that hand's"
                " grip held, Triangle (the Photon Art slot)\n");
@@ -2446,6 +2449,13 @@ static void poll_controllers(void) {
 #ifndef PSP2I_PROD
         if (vp.host & VR_HOST_SHOT) vrshot_request();   /* left grip + left stick click: like F11 */
 #endif
+        /* MOTION's shortcuts (both grips + Cross / Circle), as the gamepad's L3. */
+        if (vp.host & VR_HOST_RECENTER) { vr_recenter(); g_fp_yaw_ok = 0; }
+        if (vp.host & VR_HOST_VIEW) {
+            g_vr_first = !g_vr_first;
+            fprintf(stderr, "vr: both grips + Circle: %s person\n", g_vr_first ? "first" : "third");
+            if (!g_headless) display_save(g_res_saved);
+        }
         /* Swings (MOTION): a press of Square / Triangle for a few game frames;
          * a new swing restarts it. A buzz on that hand says it went. */
         const uint64_t fl = psp_display_flips();
@@ -2457,8 +2467,12 @@ static void poll_controllers(void) {
             g_swing_flip = fl;
             vr_haptic(h, 0.4f, 0.05f);
 #ifndef PSP2I_PROD
-            fprintf(stderr, "vr: swing %s %.1f m/s%s: %s\n", h ? "right" : "left", (double)vp.swing_speed[h],
-                    vp.swing[h] == 2 ? " with the grip" : "", btn == 0x1000u ? "Triangle" : "Square");
+            if (vp.swing_speed[h] > 0)
+                fprintf(stderr, "vr: swing %s %.1f m/s%s: %s\n", h ? "right" : "left", (double)vp.swing_speed[h],
+                        vp.swing[h] == 2 ? " with the grip" : "", btn == 0x1000u ? "Triangle" : "Square");
+            else
+                fprintf(stderr, "vr: trigger %s%s: %s\n", h ? "right" : "left", vp.swing[h] == 2 ? " with the grip" : "",
+                        btn == 0x1000u ? "Triangle" : "Square");
 #endif
         }
         if (g_swing_btn && fl - g_swing_flip < SWING_PRESS) b |= g_swing_btn;

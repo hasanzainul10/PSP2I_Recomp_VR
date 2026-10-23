@@ -29,8 +29,10 @@ typedef struct {
      * hud_follow_deg away (0: it stays where recenter put it). */
     float hud_distance_m, hud_drop_m, hud_width_m, hud_follow_deg;
     int   scale_y;      /* swapchain pixels per game pixel down, scale..8 (taller eye pictures); 0 = scale */
-    int   motion;       /* input mode MOTION: the hands are shown where the controllers are (vr_hands_get), swings
-                           are reported (vr_pad.swing) and the right grip is no longer Select */
+    int   motion;       /* input mode MOTION: the hands are shown where the controllers are (vr_hands_get), and the
+                           controllers map as in PSUEx-VR: swings and triggers attack (vr_pad.swing), grip + swing /
+                           trigger is the Photon Art, a grip alone is R (left) / L (right), the right stick click is
+                           START, and both grips + a button are the VR shortcuts (VR_HOST_RECENTER, _VIEW, _MENU) */
     float swing_speed;  /* m/s a hand must pass to count as a swing (0 = VR_SWING_SPEED_DEFAULT) */
 } vr_config;
 
@@ -142,13 +144,15 @@ typedef struct {
     uint32_t host;
     /* Input mode MOTION: a swing per hand since the last call (0 none, 1 a
      * swing, 2 a swing with that hand's grip held), each reported once, and
-     * the hand's top speed in it (m/s). */
+     * the hand's top speed in it (m/s; 0 = the trigger was pulled). */
     uint8_t  swing[2];
     float    swing_speed[2];
 } vr_pad;
 enum {
     VR_HOST_MENU = 1 << 0,        /* the engine menu's toggle (right stick click) */
-    VR_HOST_SHOT = 1 << 1         /* a VR capture (left grip + left stick click): once per press */
+    VR_HOST_SHOT = 1 << 1,        /* a VR capture (left grip + left stick click): once per press */
+    VR_HOST_RECENTER = 1 << 2,    /* MOTION: both grips + Cross, once per press */
+    VR_HOST_VIEW = 1 << 3         /* MOTION: both grips + Circle (first / third person), once per press */
 };
 int  vr_pad_get(vr_pad *out);
 void vr_set_swap_circle_cross(int on);

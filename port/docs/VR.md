@@ -82,8 +82,34 @@ For now:
 
 ## Controls
 
-Positional, as on a PlayStation pad. **Circle/Cross** in the CONTROLS page
-swaps them for VR controllers too.
+Two input modes, engine menu > VR > **INPUT MODE**. Face buttons are
+positional, as on a PlayStation pad, in both; **Circle/Cross** in the
+CONTROLS page swaps them for VR controllers too.
+
+### MOTION (as PSUEx-VR)
+
+Your hands are shown where the controllers are (a ring and a short ray).
+
+| Control | Left hand | Right hand |
+|---|---|---|
+| Stick | Move (in manual aim: aim) | Camera / turn |
+| Stick click | Manual aim (the game's L + D-pad down) | Start |
+| Face buttons | Square / Triangle | Cross / Circle |
+| Swing, or pull the trigger | Attack (Square) | Attack (Square) |
+| Grip held + swing / trigger | Photon Art (Triangle) | Photon Art (Triangle) |
+| Grip alone | R (lock-on) | L |
+| Menu button | Start | |
+
+A grip counts as R or L after a moment (0.15 s) held without that hand
+attacking; a grip used for a Photon Art sends nothing until you let go.
+Swings count above 1.8 m/s (`vr_swing_speed=`).
+
+**Hold both grips** for the VR shortcuts: + Cross recenter, + Circle first /
+third person, + Square engine menu, + left stick click switches the left
+stick to the D-pad (again to switch back). Left grip + left stick click saves
+a VR capture (dev builds only).
+
+### PAD
 
 | Controller | PSP |
 |---|---|

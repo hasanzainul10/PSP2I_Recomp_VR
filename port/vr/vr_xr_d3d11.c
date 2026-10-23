@@ -182,6 +182,19 @@ static int64_t g_chain_fmt;
 #define MARK_S 64
 static int g_ltrig_on, g_rtrig_on;           /* trigger hysteresis */
 static int g_lclick_prev, g_rclick_prev;
+/* MOTION's mapping (input_update): the face buttons and triggers last frame,
+ * when each grip went down and whether a Photon Art used it, the left stick
+ * as the D-pad (both grips + left stick click), and the shortcuts for the
+ * game (VR_HOST_RECENTER / VR_HOST_VIEW), latched until vr_pad_get. */
+#define GRIP_ALONE_MS 150
+static int g_face_prev[4], g_trig_prev[2], g_grip_used[2], g_dpad_latch;
+static ULONGLONG g_grip_t0[2];
+static uint32_t g_host_latch;                /* this frame's, moved into g_pad.host (VR thread only) */
+/* MOTION: the left stick click alone is PSP2i's manual aim (the game's L +
+ * D-pad down; then the left stick aims), pressed AIM_PRESS_MS: PSUEx-VR's
+ * "free aim on / off" on the same click. */
+#define AIM_PRESS_MS 120
+static ULONGLONG g_aim_until;
 static float g_view_tan[2];                  /* vr_view_tan, under g_cfg_lock */
 
 static const char *res_name(XrResult r) {
@@ -518,8 +531,33 @@ static void input_update(int focused) {
             fprintf(stderr, "vr: stick clicks bound: left (recenter) %s, right (engine menu) %s\n",
                     l.isActive ? "yes" : "no", r.isActive ? "yes" : "no");
         }
+        AcquireSRWLockShared(&g_cfg_lock);
+        const int motion = g_cfg.motion;
+        const float swing_speed = g_cfg.swing_speed;
+        ReleaseSRWLockShared(&g_cfg_lock);
         const XrVector2f ls = get_vec2(A_LSTICK), rs = get_vec2(A_RSTICK);
-        if (get_float(A_LGRIP) > 0.5f) {     /* left grip held: the left stick is the D-pad */
+        const int grip[2] = { get_float(A_LGRIP) > 0.5f, get_float(A_RGRIP) > 0.5f };
+        const int trig[2] = { trigger(get_float(A_LTRIG), &g_ltrig_on), trigger(get_float(A_RTRIG), &g_rtrig_on) };
+        const int both = grip[0] && grip[1];
+        const int lc = get_bool(A_LCLICK), rc = get_bool(A_RCLICK);
+        const int face[4] = { get_bool(A_CROSS), get_bool(A_CIRCLE), get_bool(A_SQUARE), get_bool(A_TRIANGLE) };
+        const ULONGLONG now = GetTickCount64();
+        /* Both grips held (MOTION): the VR shortcuts, as PSUEx-VR has them;
+         * a chord's face button and stick click don't reach the game. */
+        if (motion && both) {
+            if (face[0] && !g_face_prev[0]) { fprintf(stderr, "vr: both grips + Cross: recenter\n"); g_host_latch |= VR_HOST_RECENTER; }
+            if (face[1] && !g_face_prev[1]) { fprintf(stderr, "vr: both grips + Circle: first / third person\n"); g_host_latch |= VR_HOST_VIEW; }
+            if (face[2]) p.host |= VR_HOST_MENU;     /* held, as the engine menu's toggle reads it */
+            if (face[2] && !g_face_prev[2]) fprintf(stderr, "vr: both grips + Square: engine menu\n");
+            if (lc && !g_lclick_prev) {
+                g_dpad_latch = !g_dpad_latch;
+                fprintf(stderr, "vr: both grips + left stick click: the left stick is %s\n", g_dpad_latch ? "the D-pad" : "the stick");
+            }
+            g_grip_used[0] = g_grip_used[1] = 1;     /* no L / R from this hold */
+        }
+        /* The left stick: the D-pad with the left grip held (PAD) or after
+         * both grips + left stick click (MOTION), else the analog stick. */
+        if (motion ? g_dpad_latch : grip[0]) {
             if (ls.y > 0.5f) p.buttons |= P_UP;
             if (ls.y < -0.5f) p.buttons |= P_DOWN;
             if (ls.x < -0.5f) p.buttons |= P_LEFT;
@@ -531,18 +569,42 @@ static void input_update(int focused) {
         p.rx = axis_byte(rs.x);
         p.ry = axis_byte(-rs.y);
         const int swap = g_swap_oc != 0;
-        if (get_bool(A_CROSS))    p.buttons |= swap ? P_CIRCLE : P_CROSS;
-        if (get_bool(A_CIRCLE))   p.buttons |= swap ? P_CROSS : P_CIRCLE;
-        if (get_bool(A_SQUARE))   p.buttons |= P_SQUARE;
-        if (get_bool(A_TRIANGLE)) p.buttons |= P_TRIANGLE;
-        if (trigger(get_float(A_LTRIG), &g_ltrig_on)) p.buttons |= P_L;
-        if (trigger(get_float(A_RTRIG), &g_rtrig_on)) p.buttons |= P_R;
-        AcquireSRWLockShared(&g_cfg_lock);
-        const int motion = g_cfg.motion;
-        const float swing_speed = g_cfg.swing_speed;
-        ReleaseSRWLockShared(&g_cfg_lock);
-        const int grip[2] = { get_float(A_LGRIP) > 0.5f, get_float(A_RGRIP) > 0.5f };
-        if (grip[1] && !motion) p.buttons |= P_SELECT;   /* MOTION: the right grip picks the Photon Art */
+        if (!(motion && both)) {
+            if (face[0]) p.buttons |= swap ? P_CIRCLE : P_CROSS;
+            if (face[1]) p.buttons |= swap ? P_CROSS : P_CIRCLE;
+            if (face[2]) p.buttons |= P_SQUARE;
+            if (face[3]) p.buttons |= P_TRIANGLE;
+        }
+        if (get_bool(A_START)) p.buttons |= P_START;
+        if (!motion) {
+            /* PAD: the triggers are L / R, the right grip Select, the left
+             * stick click recenters, the right one opens the engine menu. */
+            if (trig[0]) p.buttons |= P_L;
+            if (trig[1]) p.buttons |= P_R;
+            if (grip[1]) p.buttons |= P_SELECT;
+            if (rc) p.host |= VR_HOST_MENU;
+            if (rc && !g_rclick_prev) fprintf(stderr, "vr: right stick click: engine menu\n");
+        } else {
+            /* MOTION (PSUEx-VR's combat): a trigger attacks like a swing, and
+             * that hand's grip held with a swing or a trigger is the Photon
+             * Art. A grip alone is a button (left R, the lock-on, as
+             * PSUEx-VR's LB; right L) once held GRIP_ALONE_MS without that
+             * hand attacking; a grip used for a Photon Art sends nothing until
+             * let go. The right stick click is START. */
+            for (int h = 0; h < 2; h++) {
+                if (!grip[h]) { g_grip_t0[h] = 0; g_grip_used[h] = 0; }
+                else if (!g_grip_t0[h]) g_grip_t0[h] = now;
+                if (trig[h] && !g_trig_prev[h] && !both) {   /* both grips: a chord (calibration, later), no attack */
+                    if (grip[h]) g_grip_used[h] = 1;
+                    AcquireSRWLockExclusive(&g_pad_lock);
+                    g_swing[h] = (uint8_t)(grip[h] ? 2 : 1);
+                    g_swing_top[h] = 0;              /* 0: the trigger, not a swing */
+                    ReleaseSRWLockExclusive(&g_pad_lock);
+                }
+                if (grip[h] && !g_grip_used[h] && now - g_grip_t0[h] >= GRIP_ALONE_MS) p.buttons |= h ? P_L : P_R;
+            }
+            if (rc && !both) p.buttons |= P_START;
+        }
         for (int h = 0; h < 2; h++) {
             const float v = g_hand_speed[h];
             if (!motion || v < SWING_REARM) {
@@ -554,26 +616,25 @@ static void input_update(int focused) {
             if (v > g_swing_peak[h]) g_swing_peak[h] = v;
             if (g_swing_armed[h] && v > swing_speed && ++g_swing_n[h] >= 2) {
                 g_swing_armed[h] = 0;
+                if (grip[h]) g_grip_used[h] = 1;
                 AcquireSRWLockExclusive(&g_pad_lock);
                 g_swing[h] = (uint8_t)(grip[h] ? 2 : 1);
                 g_swing_top[h] = g_swing_peak[h];
                 ReleaseSRWLockExclusive(&g_pad_lock);
             }
         }
-        if (get_bool(A_START)) p.buttons |= P_START;
-        const int rc = get_bool(A_RCLICK);
-        if (rc) p.host |= VR_HOST_MENU;
-        if (rc && !g_rclick_prev) fprintf(stderr, "vr: right stick click: engine menu\n");
-        g_rclick_prev = rc;
-        /* Left stick click recenters; with the left grip held it asks for a
-         * VR capture instead (F11 doesn't reach the game window while the
-         * headset is on). Latched, so the game's slower poll can't miss it. */
-        const int lc = get_bool(A_LCLICK);
-        if (lc && !g_lclick_prev) {
-            const int grip = get_float(A_LGRIP) > 0.5f;
-            fprintf(stderr, "vr: left stick click%s\n", grip ? " with the grip: a capture" : ": recenter");
-            InterlockedExchange(grip ? &g_shot : &g_recenter, 1);
+        /* The left stick click: with only the left grip held, a VR capture
+         * (F11 doesn't reach the game window while the headset is on); else,
+         * in PAD, recenter. Latched, so the game's slower poll can't miss it. */
+        if (lc && !g_lclick_prev && !both) {
+            if (grip[0]) { fprintf(stderr, "vr: left stick click with the grip: a capture\n"); InterlockedExchange(&g_shot, 1); }
+            else if (!motion) { fprintf(stderr, "vr: left stick click: recenter\n"); InterlockedExchange(&g_recenter, 1); }
+            else { fprintf(stderr, "vr: left stick click: manual aim (L + down)\n"); g_aim_until = now + AIM_PRESS_MS; }
         }
+        if (motion && now < g_aim_until) p.buttons |= P_L | P_DOWN;
+        g_rclick_prev = rc;
+        for (int k = 0; k < 4; k++) g_face_prev[k] = face[k];
+        g_trig_prev[0] = trig[0]; g_trig_prev[1] = trig[1];
         g_lclick_prev = lc;
         float amp[2], sec[2];
         AcquireSRWLockExclusive(&g_pad_lock);
@@ -591,11 +652,17 @@ static void input_update(int focused) {
         }
     } else {
         g_ltrig_on = g_rtrig_on = g_lclick_prev = g_rclick_prev = 0;
+        memset(g_face_prev, 0, sizeof g_face_prev);
+        g_trig_prev[0] = g_trig_prev[1] = 0;
+        g_grip_t0[0] = g_grip_t0[1] = 0;
         AcquireSRWLockExclusive(&g_pad_lock);
         g_buzz_s[0] = g_buzz_s[1] = 0;               /* no stale buzz when focus comes back */
         ReleaseSRWLockExclusive(&g_pad_lock);
     }
     AcquireSRWLockExclusive(&g_pad_lock);
+    p.host |= g_host_latch;                  /* kept until vr_pad_get takes them */
+    g_host_latch = 0;
+    p.host |= g_pad.host & (VR_HOST_RECENTER | VR_HOST_VIEW);
     g_pad = p;
     g_pad_live = focused;
     ReleaseSRWLockExclusive(&g_pad_lock);
@@ -1652,12 +1719,11 @@ void vr_haptic(int hand, float amplitude, float seconds) {
 }
 
 int vr_pad_get(vr_pad *out) {
-    AcquireSRWLockShared(&g_pad_lock);
+    AcquireSRWLockExclusive(&g_pad_lock);
     const int live = g_pad_live;
     *out = g_pad;
-    ReleaseSRWLockShared(&g_pad_lock);
-    AcquireSRWLockExclusive(&g_pad_lock);
-    for (int h = 0; h < 2; h++) {
+    g_pad.host &= ~(uint32_t)(VR_HOST_RECENTER | VR_HOST_VIEW);   /* the latched shortcuts, taken once */
+    for (int h = 0; h < 2; h++) {                                  /* ... and the swings */
         out->swing[h] = live ? g_swing[h] : 0;
         out->swing_speed[h] = g_swing_top[h];
         g_swing[h] = 0;

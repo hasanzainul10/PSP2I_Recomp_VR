@@ -485,6 +485,27 @@ the world; the user found it overwhelming. Those were removed. Now:
     into the D-pad.
   - **Logs and tools:** dev log `vr: swing right 2.6 m/s: Square`.
     `vr_test` prints swings too. Not in the engine menu yet (ini only).
+  - **Headset runs** (`vr_m3_1.log`, `vr_merge1.log`, the user: "it works"):
+    24 swings from both hands, Square and Triangle, 1.8-3.1 m/s. The nudge
+    turned the character first 7 times and stayed out while locked on.
+- **MOTION mapped as in PSUEx-VR (2026-10-23, the user's pick of the
+  layout): built, not yet tried in the headset.** In `input_update`; PAD
+  mode is unchanged. Table in VR.md "Controls".
+  - **Attacks:** a trigger attacks like a swing (Square). That hand's grip
+    held with a swing or trigger gives Triangle (Photon Art).
+  - **Grips and clicks:** a grip alone is a button after 150 ms: left R
+    (lock-on, PSUEx-VR's LB), right L. A grip used for a Photon Art sends
+    nothing until let go. The right stick click is START. The left stick
+    click alone is PSP2i's manual aim (L + D-pad down for 120 ms; the user:
+    the game aims with the left stick then).
+  - **Both grips + a button** are the VR shortcuts: Cross recenters, Circle
+    switches first / third person (`VR_HOST_RECENTER` / `VR_HOST_VIEW`, as
+    the gamepad's L3), Square opens the engine menu, the left stick click
+    toggles the left stick as the D-pad. Triggers do nothing during a chord
+    (kept for the hand calibration).
+  - **Open:** in first person the walk code turns the left stick to the
+    head; in manual aim that may turn the aim too (not seen yet). Whether
+    the same L + down leaves manual aim isn't known.
 
 **Next (in order):**
 1. **Try the controller capture in the headset:** left grip + left stick
