@@ -1370,11 +1370,29 @@ static void frame(void) {
         AcquireSRWLockShared(&g_cfg_lock);
         const int motion = g_cfg.motion;
         ReleaseSRWLockShared(&g_cfg_lock);
+        const uint32_t nl_scene = nl;
+        int nh = 0;
         if (nl && motion && g_placed)                    /* the hands on top of everything */
             for (int hand = 0; hand < 2; hand++) {
                 const int n = marker_layers(hand, &quad[4 + 2 * hand]);
                 for (int k = 0; k < n; k++) layers[nl++] = (const XrCompositionLayerBaseHeader *)&quad[4 + 2 * hand + k];
+                nh += n;
             }
+        /* Why the hands are or aren't drawn, on each change (user, first
+         * M0 run: the rings showed at the switch to MOTION, then went, while
+         * the game still had both hands tracked). */
+        static int last_why = -1, n_why;
+        const int why = nh | (motion ? 1 << 4 : 0) | (g_placed ? 1 << 5 : 0) | (nl_scene ? 1 << 6 : 0) |
+                        (g_mchain_filled ? 1 << 7 : 0) | g_hloc_ok[0] << 8 | g_hloc_ok[1] << 9 | g_hloc_ok[2] << 10 |
+                        g_hloc_ok[3] << 11 | (tracked ? 1 << 12 : 0);   /* not the overlay: it blinks with the menu */
+        if (why != last_why && n_why < 300) {
+            n_why++;
+            fprintf(stderr, "vr: hand markers: %d layers (of %u); motion %d, placed %d, picture %d, marker image %d;"
+                            " tracked grip L %d R %d, aim L %d R %d; head layer %d, overlay %d\n",
+                    nh, (unsigned)nl, motion, g_placed, nl_scene != 0, g_mchain_filled, g_hloc_ok[0], g_hloc_ok[1],
+                    g_hloc_ok[2], g_hloc_ok[3], tracked, ovl);
+            last_why = why;
+        }
     }
     XrFrameEndInfo ei = { XR_TYPE_FRAME_END_INFO };
     ei.displayTime = fs.predictedDisplayTime;

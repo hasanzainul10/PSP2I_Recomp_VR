@@ -346,7 +346,7 @@ the world; the user found it overwhelming. Those were removed. Now:
   within 24 degrees, 2 skipped while locked on. Triangle not pressed in
   first person since the fix. Circle is not nudged (it talks in town).
   Only the pad changes (online-safe).
-- **M0 hands in the world (VR_PLAN P5, 2026-10-23): built, not yet seen in
+- **M0 hands in the world (VR_PLAN P5, 2026-10-23): the user sees them in
   the headset.**
   - **Setting:** engine menu VR > INPUT MODE (PAD / MOTION), `vr_input=` in
     the ini. MOTION shows the hands and buzzes both controllers once
@@ -374,6 +374,17 @@ the world; the user found it overwhelming. Those were removed. Now:
     Square buzz the right / left controller: an M0 check without the game.
   - **Not done:** emulated controllers and a command file for tests without
     a headset (PSUEx has them).
+  - **Headset runs** (`testwork/p5/vr_m0_1.log`, `vr_m0_2.log`): the user
+    sees the rings and rays at the hands (run 2). In run 1 they vanished
+    after a moment: an accidental gamepad L3, not the markers. Run 2's log
+    (`vr: hand markers: ...`, each change of what is sent and why) had 4
+    marker layers every frame from the switch to MOTION on, both hands
+    tracked. SteamVR's PS VR2 Sense show up as the Touch profile; in PAD
+    mode all four poses dropped together twice for a moment (controllers
+    idle) and came back. The buzz on the switch was not confirmed.
+    Hands logged 2.0-3.6 units above the feet and 3.2-4.7 across (first
+    person, 3.8 units/m): far out, partly the eyes' 1.2-unit forward
+    offset; check against the body when M2's arms need it.
 
 **Next (in order):**
 1. **Try the controller capture in the headset:** left grip + left stick
