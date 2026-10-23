@@ -100,6 +100,10 @@ and weapon, then press **both grips + both triggers** (both controllers
 buzz). It is saved (`vr_hand_cal=` in `psp2i_display.ini`; delete the line
 to undo it). Until then the hands keep the game's rotation.
 
+In first person your character's head is hidden (`vr_fp_hide_head=on`, the
+default) and the view sits where its face is; `off` brings the head back,
+with the view further ahead (`vr_fp_forward`, `vr_fp_near`).
+
 Your weapon goes into your hand once you have held **R** (the left grip)
 with it out: the game itself only holds a weapon in the hand while R is
 held, and from then on it stays in your hand. After switching weapons, hold

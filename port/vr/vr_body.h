@@ -24,6 +24,14 @@ void vr_body_init(void);
  * the game's state changes). The host sets it each frame. */
 void vr_body_arms(int on);
 
+/* First person (vr_fp_hide_head=): your character's head (and hair) is
+ * drawn shrunk to a point, so the eyes can be where its face is. The host
+ * sets it each frame. */
+void vr_body_head(int hide);
+
+/* Dev: the body's palettes of the next frame to the log (with a VR capture). */
+void vr_body_dump_palettes(void);
+
 /* The hands' rotation: vr_body_hand_calibrate (both grips + both triggers)
  * takes, at the next pose, each hand's rotation relative to its controller
  * (hold the controllers as your character holds its hands); after it the

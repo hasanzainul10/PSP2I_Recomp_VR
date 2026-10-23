@@ -998,6 +998,14 @@ static int      g_menu_loading;
  * head"), and a clip plane hides it whatever the animation does. 1.0 is
  * ~30 cm. */
 #define VR_FP_NEAR_DEFAULT 1.0f
+/* vr_fp_hide_head=on: the own head is drawn shrunk to a point (vr_body.c), so
+ * it can't be in the way: the eyes sit only VR_FP_HIDDEN_FWD ahead (where
+ * the face is; user: with the head in the way "it feels weird, the camera
+ * is on top of the head") and the clip is as short. vr_fp_forward /
+ * vr_fp_near apply with it off. */
+#define VR_FP_HIDDEN_FWD  0.25f
+#define VR_FP_HIDDEN_NEAR 0.25f
+static int      g_vr_fp_hide_head = 1;
 static int      g_vr_first;
 static float    g_vr_fp_eye = VR_FP_EYE_DEFAULT, g_vr_fp_scale = VR_FP_SCALE_DEFAULT, g_vr_fp_fwd = VR_FP_FORWARD_DEFAULT;
 static float    g_vr_fp_near = VR_FP_NEAR_DEFAULT;
@@ -1322,7 +1330,7 @@ static void head_frame(psp_gpu_stereo *s) {
             float hv[3];                                        /* the head's offset, in this view */
             for (int r = 0; r < 3; r++) hv[r] = g_fp_head_ok ? v[r] * g_fp_head_off[0] + v[8 + r] * g_fp_head_off[2] : 0.0f;
             for (int r = 0; r < 3; r++)
-                base[r] = c[r] + g_vr_fp_eye * un[r] + hv[r] - g_vr_fp_fwd * q[6 + r];   /* ahead: -z */
+                base[r] = c[r] + g_vr_fp_eye * un[r] + hv[r] - (g_vr_fp_hide_head ? VR_FP_HIDDEN_FWD : g_vr_fp_fwd) * q[6 + r];   /* ahead: -z */
             fx_dist = sqrtf(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]) + PSP2I_FP_FX_AHEAD;
             first = 1;
         }
@@ -1356,7 +1364,8 @@ static void head_frame(psp_gpu_stereo *s) {
         s->fov_scale = g_eye_fs_x;
         s->fov_scale_y = g_eye_fs_y;
     }
-    s->near_w = first ? g_vr_fp_near : 0.0f;                    /* the player's own head, clipped away */
+    s->near_w = first ? (g_vr_fp_hide_head ? VR_FP_HIDDEN_NEAR : g_vr_fp_near) : 0.0f;   /* the player's own head, clipped away */
+    vr_body_head(first && g_vr_fp_hide_head);
     s->fx_dist = fx_dist;
     for (int e = 0; e < 2; e++) {
         float p[3];
@@ -2364,6 +2373,7 @@ static int display_load(void) {
             if (k >= 0.0f && k <= 3.0f) g_vr_fp_fwd = k;
         }
         else if (!strncmp(line, "vr_fp_nudge=", 12)) g_vr_fp_nudge = strncmp(line + 12, "off", 3) != 0;
+        else if (!strncmp(line, "vr_fp_hide_head=", 16)) g_vr_fp_hide_head = strncmp(line + 16, "off", 3) != 0;
         else if (!strncmp(line, "vr_input=", 9))     g_vr_motion = !strncmp(line + 9, "motion", 6);
         else if (!strncmp(line, "vr_arms=", 8))      g_vr_arms = strncmp(line + 8, "off", 3) != 0;
 #ifdef PSP2I_VR
@@ -2472,6 +2482,9 @@ static void display_save(int res) {
     fprintf(f, "; first person: fp nudge = on: an attack (Square, Triangle) first turns your character to where you look"
                " (not while R locks on), off = the attack goes the way the character faces\n");
     fprintf(f, "vr_fp_nudge=%s\n", g_vr_fp_nudge ? "on" : "off");
+    fprintf(f, "; first person: hide head = on: your character's head is drawn shrunk away and the eyes sit where its face"
+               " is (fp forward / fp near apply only with it off)\n");
+    fprintf(f, "vr_fp_hide_head=%s\n", g_vr_fp_hide_head ? "on" : "off");
     fprintf(f, "; VR input: pad = a gamepad (or the VR controllers as one), motion = the VR controllers as in PSUEx-VR: hands"
                " shown, swing or trigger attacks, grip + swing / trigger the Photon Art, left grip R (lock-on), right grip L,"
                " left stick click manual aim, right stick click START, both grips + Cross / Circle / Square recenter / first or"
@@ -2740,7 +2753,7 @@ static void poll_controllers(void) {
         g_vr_host = vp.host;
         g_vr_rx = vp.rx; g_vr_ry = vp.ry;
 #ifndef PSP2I_PROD
-        if (vp.host & VR_HOST_SHOT) vrshot_request();   /* left grip + left stick click: like F11 */
+        if (vp.host & VR_HOST_SHOT) { vrshot_request(); g_dump_key = 1; vr_body_dump_palettes(); }   /* left grip + left stick click: a capture, F12's GE dump, the body's palettes */
         if (vp.host & VR_HOST_MARK) mf_mark();          /* both grips + Triangle: the menu finder's label */
 #endif
         /* MOTION's shortcuts (both grips + Cross / Circle), as the gamepad's L3. */

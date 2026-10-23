@@ -260,6 +260,20 @@ Its matrices reach `0x08D8D4E8` like every model's; while R is held
 0.0-0.1 units from it. Without R the game puts it elsewhere (a gun lowered
 or holstered). Found by rigidity per node, as vr_body.c does at run time.
 
+**The head, for first person** (VR captures and GE dumps with each draw's
+bones, 2026-10-24): hair and accessories are body meshes (texture
+`0x0935A020`) on nodes 12 / 13 only; the face is body meshes (texture
+`0x09353F20`, 4 weights) blended between 12 / 13 and the chest (10) and a
+collarbone (14 / 19); the player's container (+0x10) holds an 8-node
+accessory model ~2.5 units from node 13; the head itself is a rigid mesh
+(texture `0x09358BE0`, vertex type `0x121`, no weights, 141 + 80 + 80 + 36
+vertices) whose world matrix none of `0x08D74E54`'s callers builds (its
+source not found; dropped at the GE by position instead).
+
+| Address | What | Status |
+|---|---|---|
+| `0x08D74E54` callers | `0x08A846DC` (M = model+32), `0x08A86AF4` (M in `$s3`), `0x08ADE47C` (M built on the stack), `0x08AA0FD8` / `0x08AA1150` (no M: model space). **Hooked** at `0x08D74E54` (vr_body.c `hook_palette_any`) | known (disassembly + hook) |
+
 The tree (node <- parent, rest length in model units; the head is ~13.3
 above the feet, so ~7.8 model units per metre for a 1.7 m character; the
 model+32 matrix scales it into the world). Sides from the poses: model +z

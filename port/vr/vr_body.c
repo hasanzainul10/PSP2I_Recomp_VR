@@ -12,6 +12,7 @@
 #include <psprecomp/dispatch.h>
 #include <psprecomp/hle.h>
 #include <psprecomp/mem.h>
+#include <psprecomp/render.h>
 
 /* 0x08A846DC(model, &palette, skeleton) -> 0x08D74E54(palette, skeleton,
  * *(model+100), model+32): for each of the skeleton's +40 nodes (144-byte
@@ -267,6 +268,38 @@ static void mat3_mult(const float *a, const float *b, float *o) {       /* o = a
         for (int c = 0; c < 3; c++) o[r * 3 + c] = a[r * 3] * b[c * 3] + a[r * 3 + 1] * b[c * 3 + 1] + a[r * 3 + 2] * b[c * 3 + 2];
 }
 
+/* First person: the head (node 13 and what hangs on it, hair included)
+ * drawn shrunk to a point at the neck, so the eyes can sit where the face
+ * is (vr_fp_hide_head; drawn only, like the arms). */
+#define HEAD_NODE  13
+/* Shrunk from the neck (12, at the chest's top; 13 hangs 1.07 above it):
+ * from 13 only the hair and accessories went, the face and head stayed (user). */
+#define NECK_NODE  12
+#define HEAD_SHRINK 0.001f
+static int g_hide_head;
+void vr_body_head(int hide) {
+    if (hide != g_hide_head) fprintf(stderr, "vr: first person: own head %s\n", hide ? "hidden" : "shown");
+    g_hide_head = hide;
+    psp_gpu_set_skin_zero_drop(hide);
+    if (!hide) psp_gpu_set_rigid_drop(0, NULL, 0.0f);
+}
+/* The head's rigid mesh (texture 0x09358BE0 in the GE dump: unskinned, its
+ * world matrix from none of the palettes, so neither the zeroed bones nor
+ * the shrunk palettes reach it; user: "still there") is dropped at the GE:
+ * rigid draws within HEAD_RIGID_R of the head node, eye space, from the
+ * animated pose of this frame. */
+#define HEAD_RIGID_R 3.0f
+static void node_get(uint32_t nodes, int b, float *m);
+static void head_rigid_mark(uint32_t model, uint32_t nodes) {
+    float Mb[16], nb[16], W[16];
+    for (uint32_t i = 0; i < 16; i++) Mb[i] = psp_read_f32(model + 32u + 4u * i);
+    node_get(nodes, HEAD_NODE, nb);
+    for (int c = 0; c < 4; c++)                                /* W = Mb x node, the translation column only */
+        for (int r = 0; r < 4; r++)
+            W[c * 4 + r] = Mb[r] * nb[c * 4] + Mb[4 + r] * nb[c * 4 + 1] + Mb[8 + r] * nb[c * 4 + 2] + Mb[12 + r] * nb[c * 4 + 3];
+    psp_gpu_set_rigid_drop(1, &W[12], HEAD_RIGID_R);
+}
+
 void vr_body_arms(int on) {
     if (on != g_arms_on) fprintf(stderr, "vr: arms %s\n", on ? "on (they follow the controllers)" : "off");
     g_arms_on = on;
@@ -348,14 +381,14 @@ static void turn_below(uint32_t nodes, uint32_t recs, int n, int top, const floa
 }
 
 /* Poses both arms; returns 1 with the nodes saved for arms_restore. */
-static int arms_pose(uint32_t model, uint32_t skel) {
+static int arms_pose(uint32_t model, uint32_t skel, int arms) {
     const int n = (int)psp_read32(skel + 40u);
     const uint32_t nodes = psp_read32(model + 100u), recs = psp_read32(skel + 48u);
     if (n < 23 || n > NODES_MAX || !user_ptr(nodes) || !user_ptr(recs)) return 0;
     for (int b = 0; b < n; b++) node_get(nodes, b, g_arms_saved[b]);
     g_arms_n_saved = n;
     for (int hd = 0; hd < 2; hd++) {
-        if (!g_arms_ok[hd]) continue;
+        if (!arms || !g_arms_ok[hd]) continue;
         const int *J = ARM_NODE[hd];
         float S[3], E[3], W[3], m[16];
         node_get(nodes, J[0], m); memcpy(S, &m[12], sizeof S);
@@ -428,13 +461,32 @@ static int arms_pose(uint32_t model, uint32_t skel) {
         }
 #endif
     }
-    if (g_cal_req) {
+    if (arms && g_cal_req) {
         g_cal_req = 0;
         g_cal_changed = 1;
         vr_haptic(-1, 0.6f, 0.2f);
         fprintf(stderr, "vr: arms: hands calibrated (left %s, right %s)\n", g_cal_ok[0] ? "yes" : "no", g_cal_ok[1] ? "yes" : "no");
     }
     return 1;
+}
+
+/* Shrinks node `top` and everything below it to its own origin. */
+static void shrink_below(uint32_t nodes, uint32_t recs, int n, int top, float k) {
+    float P[16];
+    node_get(nodes, top, P);
+    for (int b = 0; b < n; b++) {
+        int x = b;
+        for (int guard = 0; x >= 0 && x != top && guard < n; guard++) x = (int16_t)psp_read16(recs + 144u * (uint32_t)x + 6u);
+        if (x != top) continue;
+        float m[16];
+        node_get(nodes, b, m);
+        if (k == 0.0f) memset(m, 0, sizeof m);                /* all zero: a bone the GE drops its draws for */
+        else {
+            for (int i = 0; i < 12; i++) m[i] *= k;
+            for (int r = 0; r < 3; r++) m[12 + r] = P[12 + r] + k * (m[12 + r] - P[12 + r]);
+        }
+        node_put(nodes, b, m);
+    }
 }
 
 static void arms_restore(uint32_t model) {
@@ -474,6 +526,8 @@ static void arms_restore(uint32_t model) {
 static const int ATT_NODE[] = { 16, 17, 18, 21, 22, 23, 1, 11, 13 };
 #define ATT_NN  ((int)(sizeof ATT_NODE / sizeof ATT_NODE[0]))
 #define ATT_ARM 6                              /* the first ATT_ARM are the arms' */
+#define ATT_HEAD_I 8                           /* ATT_NODE[8]: the head, node 13 */
+#define ATT_HEAD_NEAR 3.0f                     /* first person: rigid pieces this close to it are the head's */
 
 static float    g_att_d[NODES_MAX][16];        /* per body node: the IK's change, model space */
 static int      g_att_dn;                      /* nodes in it (0 = no pose yet) */
@@ -490,6 +544,7 @@ typedef struct {
     int      node[2];                          /* the node it rides on per state (ATT_STATE), -1 = none */
     int      off[2];                           /* frames in a row it has drifted off that node */
     int      grip_node;                        /* learned with R held: the hand it is aimed from, -1 = none */
+    int      head_told;                        /* dev log: hidden as part of the head, said once */
     float    grip[16];                         /* ... and where it sits in that hand */
     float    err[ATT_NN];                      /* recent drift per frame (decaying) */
     float    sum[2][ATT_NN];                   /* all its drift since it was first seen, per state */
@@ -639,6 +694,27 @@ static int att_follow(uint32_t mat, int st, uint32_t body, const float *Mb, cons
                 (double)torso_s, (double)dist);
         return 0;                                              /* use_L is the old node's: from the next frame */
     }
+    /* First person: a rigid piece at the head that no hand holds (the face
+     * and head: they stayed with the body's node 13 and the container's
+     * model hidden, which took only the hair and the accessories, user) is
+     * drawn shrunk away. ATT_NODE[ATT_HEAD_I] is node 13. */
+    if (g_hide_head && a->node[0] < 0 && a->node[1] < 0 && a->grip_node < 0) {
+        mul44(Wi[ATT_HEAD_I], Mw, L);
+        if (L[12] * L[12] + L[13] * L[13] + L[14] * L[14] < ATT_HEAD_NEAR * ATT_HEAD_NEAR) {
+#ifndef PSP2I_PROD
+            if (!a->head_told) {
+                a->head_told = 1;
+                fprintf(stderr, "vr: first person: the matrix at 0x%08X (obj 0x%08X) sits %.2f units from the head: hidden\n",
+                        mat, g_ad_cur_obj, (double)sqrtf(L[12] * L[12] + L[13] * L[13] + L[14] * L[14]));
+            }
+#endif
+            for (uint32_t i = 0; i < 16; i++) {
+                keep[i] = Mw[i];
+                psp_write_f32(mat + 4u * i, i < 12 ? Mw[i] * HEAD_SHRINK : Mw[i]);
+            }
+            return 1;
+        }
+    }
     /* A gun is in the hand only while R is held; in VR your hand keeps it:
      * without R, what was learned with R stays in the hand at its grip. */
     int nb_i;
@@ -661,6 +737,11 @@ static int att_follow(uint32_t mat, int st, uint32_t body, const float *Mb, cons
     return 1;
 }
 
+#ifndef PSP2I_PROD
+static int      g_pal_dump;                    /* dev: the capture frame (vr_body_dump_palettes, below) */
+static uint64_t g_pal_dump_vb;
+#endif
+
 /* 0x08D8D4E8(obj): its matrices into its display list (see FN_BONE_PATCH). */
 #define FN_BONE_PATCH 0x08D8D4E8u
 #define ATT_KEEP_MAX  64
@@ -669,7 +750,7 @@ static void hook_bone_patch(void (*original)(void)) {
     uint32_t kept_at[ATT_KEEP_MAX];
     static float kept[ATT_KEEP_MAX][16];
     int nk = 0;
-    const uint32_t pl = g_arms_on && g_att_dn ? gamelog_local_player() : 0;
+    const uint32_t pl = (g_arms_on && g_att_dn) || g_hide_head ? gamelog_local_player() : 0;
     const uint32_t box = pl ? psp_read32(pl + PLAYER_MODEL_BOX) : 0;
     const uint32_t body = user_ptr(box) ? psp_read32(box + 8u) : 0;
     const uint32_t nodes = user_ptr(body) ? psp_read32(body + 100u) : 0;
@@ -731,6 +812,7 @@ static void hook_bone_patch(void (*original)(void)) {
             for (int k = 0; k < 4 && !body_pal; k++) body_pal = g_att_pal_vb + 2 >= psp_sched_vblank_count() && mats == g_att_pal[k];
             if (body_pal) {
 #ifndef PSP2I_PROD
+                if (g_pal_dump) fprintf(stderr, "vr: at the head: obj 0x%08X part %d is a body palette (skipped)\n", obj, part);
                 g_ad_bodypal++;
                 static uint64_t told;                          /* that the skip finds them */
                 if (psp_sched_vblank_count() - told >= 600) {
@@ -742,6 +824,17 @@ static void hook_bone_patch(void (*original)(void)) {
             }
             for (int i = 0; i < n && nk < ATT_KEEP_MAX; i++) {
                 const uint32_t m = mats + 64u * (uint32_t)i;
+#ifndef PSP2I_PROD
+                if (g_pal_dump) {                              /* the capture frame: what sits at the head */
+                    const float dx = psp_read_f32(m + 48u) - W[ATT_HEAD_I][12], dy = psp_read_f32(m + 52u) - W[ATT_HEAD_I][13],
+                                dz = psp_read_f32(m + 56u) - W[ATT_HEAD_I][14];
+                    if (dx * dx + dy * dy + dz * dz < 16.0f)
+                        fprintf(stderr, "vr: at the head: obj 0x%08X part %d matrix %d (0x%08X) t %.3f %.3f %.3f, %.2f from node 13,"
+                                        " flags 0x%08X\n", obj, part, i, m, (double)psp_read_f32(m + 48u),
+                                (double)psp_read_f32(m + 52u), (double)psp_read_f32(m + 56u),
+                                (double)sqrtf(dx * dx + dy * dy + dz * dz), psp_read32(obj + 16u));
+                }
+#endif
                 if (att_follow(m, st, body, Mb, (const float (*)[16])W, (const float (*)[16])Wi, kept[nk])) kept_at[nk++] = m;
             }
         }
@@ -750,6 +843,54 @@ static void hook_bone_patch(void (*original)(void)) {
     for (int k = 0; k < nk; k++)
         for (uint32_t i = 0; i < 16; i++) psp_write_f32(kept_at[k] + 4u * i, kept[k][i]);
 }
+
+/* A model next to the body in the player's container (the first 16 slots)
+ * placed at the head: its origin within HEAD_NEAR of node 13. */
+#define HEAD_NEAR 6.0f                          /* the face model sits 4.54 from node 13 (its origin); the body's, at the feet, ~13 */
+static int head_model(uint32_t box, uint32_t body, uint32_t model) {
+    int in_box = 0;
+    for (uint32_t q = 0; q < 0x40u && !in_box; q += 4) in_box = psp_read32(box + q) == model;
+    const uint32_t nodes = psp_read32(body + 100u);
+    if (!in_box || !user_ptr(nodes)) return 0;
+    float Mb[16], nb[16], W[16], Wi[16], Mw[16], L[16];
+    for (uint32_t i = 0; i < 16; i++) { Mb[i] = psp_read_f32(body + 32u + 4u * i); Mw[i] = psp_read_f32(model + 32u + 4u * i); }
+    node_get(nodes, HEAD_NODE, nb);
+    mul44(Mb, nb, W);
+    if (!inv_affine(W, Wi)) return 0;
+    mul44(Wi, Mw, L);
+    const int near = L[12] * L[12] + L[13] * L[13] + L[14] * L[14] < HEAD_NEAR * HEAD_NEAR;
+#ifndef PSP2I_PROD
+    static uint32_t told;
+    if (told != model) {
+        told = model;
+        fprintf(stderr, "vr: first person: model 0x%08X in the container is %.2f units from the head node: %s\n", model,
+                (double)sqrtf(L[12] * L[12] + L[13] * L[13] + L[14] * L[14]), near ? "the head, hidden" : "not the head");
+    }
+#endif
+    return near;
+}
+
+#ifndef PSP2I_PROD
+/* Dev: with a VR capture (vr_body_dump_palettes), the body's palettes of
+ * the next frame in the log: slot -> node and each entry's translation, the
+ * same numbers as the GE dump's "bones" of its draws (which nodes a mesh
+ * such as the face hangs on). */
+void vr_body_dump_palettes(void) { g_pal_dump = 1; }
+static void pal_dump(uint32_t pal, uint32_t skel) {
+    const int n = (int)psp_read32(skel + 40u);
+    const uint32_t recs = psp_read32(skel + 48u);
+    if (n <= 0 || n > NODES_MAX || !user_ptr(recs) || !user_ptr(pal)) return;
+    fprintf(stderr, "vr: palette 0x%08X (skeleton 0x%08X):", pal, skel);
+    for (int b = 0; b < n; b++) {
+        const int slot = (int16_t)psp_read16(recs + 144u * (uint32_t)b + 4u);
+        if (slot < 0) continue;
+        const uint32_t e = pal + 64u * (uint32_t)slot;
+        fprintf(stderr, " slot %d node %d (%.2f %.2f %.2f)", slot, b, (double)psp_read_f32(e + 48u),
+                (double)psp_read_f32(e + 52u), (double)psp_read_f32(e + 56u));
+    }
+    fputc('\n', stderr);
+}
+#endif
 
 static void hook_palette(void (*original)(void)) {
     const uint32_t model = psp_cpu.r[4], skel = psp_cpu.r[6];
@@ -762,7 +903,7 @@ static void hook_palette(void (*original)(void)) {
         return;
     }
 #endif
-    if (g_arms_on && user_ptr(model) && user_ptr(skel)) {
+    if ((g_arms_on || g_hide_head) && user_ptr(model) && user_ptr(skel)) {
         const uint32_t pl = gamelog_local_player();
         const uint32_t box = pl ? psp_read32(pl + PLAYER_MODEL_BOX) : 0;
         const uint32_t body = user_ptr(box) ? psp_read32(box + 8u) : 0;
@@ -771,17 +912,82 @@ static void hook_palette(void (*original)(void)) {
             if (vb != g_att_pal_vb) { memset(g_att_pal, 0, sizeof g_att_pal); g_att_pal_vb = vb; }
             const uint32_t pal = psp_read32(psp_cpu.r[5]);
             for (int k = 0; k < 4; k++) if (!g_att_pal[k] || g_att_pal[k] == pal) { g_att_pal[k] = pal; break; }
-            arms_frame();
-            if ((g_arms_ok[0] || g_arms_ok[1]) && arms_pose(model, skel)) {
-                att_keep_pose(psp_read32(model + 100u), g_arms_n_saved);
+            if (g_arms_on) arms_frame();
+            const int arms = g_arms_on && (g_arms_ok[0] || g_arms_ok[1]);
+            if ((arms || g_hide_head) && arms_pose(model, skel, arms)) {
+                const uint32_t nodes = psp_read32(model + 100u);
+                if (arms) att_keep_pose(nodes, g_arms_n_saved);    /* before the head: only the arms' changes */
+                else g_att_dn = 0;
+                if (g_hide_head && g_arms_n_saved > HEAD_NODE) head_rigid_mark(model, nodes);   /* before it is zeroed */
+                if (g_hide_head && g_arms_n_saved > HEAD_NODE)    /* zero: the GE drops the draws that use them */
+                    shrink_below(nodes, psp_read32(skel + 48u), g_arms_n_saved, NECK_NODE, 0.0f);
                 original();
+#ifndef PSP2I_PROD
+                if (g_pal_dump) {                              /* this frame's three palettes */
+                    const uint64_t vb = psp_sched_vblank_count();
+                    if (!g_pal_dump_vb) g_pal_dump_vb = vb;
+                    if (vb == g_pal_dump_vb) pal_dump(pal, skel);          /* $a1 is gone after the call */
+                    else g_pal_dump = 0, g_pal_dump_vb = 0;
+                }
+#endif
                 arms_restore(model);
                 return;
             }
             g_att_dn = 0;                                      /* no pose: nothing to follow */
+        } else if (g_hide_head && user_ptr(body) && head_model(box, body, model)) {
+            /* The face is its own model (8 nodes, in the container at
+             * +0x10, riding on node 13): shrinking the body's node 13 hid
+             * the head and hair but left the face (user). Drawn shrunk to
+             * its origin for this palette. */
+            float keep[16];
+            for (uint32_t i = 0; i < 16; i++) keep[i] = psp_read_f32(model + 32u + 4u * i);
+            for (uint32_t i = 0; i < 12; i++) psp_write_f32(model + 32u + 4u * i, keep[i] * HEAD_SHRINK);
+            original();
+            for (uint32_t i = 0; i < 16; i++) psp_write_f32(model + 32u + 4u * i, keep[i]);
+            return;
         }
     }
     original();
+}
+
+/* 0x08D74E54(palette, skeleton, nodes, M): every model's palette, from all
+ * five callers (0x08A846DC above, and 0x08A86AF4 / 0x08ADE47C with a matrix
+ * of their own: a model attached to another). In first person the head
+ * stayed drawn whole (a rigid mesh, texture 0x09358BE0 in the GE dump) after
+ * the container's head model was shrunk at 0x08A846DC: it is placed through
+ * another caller. Here any palette but the body's whose M puts the model
+ * within HEAD_AT of the body's node 13 is built shrunk, M put back after. */
+#define FN_PALETTE_ANY 0x08D74E54u
+#define HEAD_AT        3.0f
+static void hook_palette_any(void (*original)(void)) {
+    const uint32_t nodes = psp_cpu.r[6], mp = psp_cpu.r[7];
+    if (!g_hide_head || !user_ptr(mp)) { original(); return; }
+    const uint32_t pl = gamelog_local_player();
+    const uint32_t box = pl ? psp_read32(pl + PLAYER_MODEL_BOX) : 0;
+    const uint32_t body = user_ptr(box) ? psp_read32(box + 8u) : 0;
+    const uint32_t bn = user_ptr(body) ? psp_read32(body + 100u) : 0;
+    if (!user_ptr(bn) || nodes == bn) { original(); return; }
+    float Mb[16], nb[16], W[16], M[16];
+    for (uint32_t i = 0; i < 16; i++) { Mb[i] = psp_read_f32(body + 32u + 4u * i); M[i] = psp_read_f32(mp + 4u * i); }
+    node_get(bn, HEAD_NODE, nb);
+    mul44(Mb, nb, W);
+    const float dx = M[12] - W[12], dy = M[13] - W[13], dz = M[14] - W[14];
+    const float d = sqrtf(dx * dx + dy * dy + dz * dz);
+    if (d > HEAD_AT) { original(); return; }
+#ifndef PSP2I_PROD
+    static uint32_t told[8];
+    int seen = 0;
+    for (int k = 0; k < 8 && !seen; k++) seen = told[k] == psp_cpu.r[5];
+    if (!seen) {
+        for (int k = 7; k > 0; k--) told[k] = told[k - 1];
+        told[0] = psp_cpu.r[5];
+        fprintf(stderr, "vr: first person: skeleton 0x%08X (nodes 0x%08X) placed %.2f from the head: built shrunk\n",
+                psp_cpu.r[5], nodes, (double)d);
+    }
+#endif
+    for (uint32_t i = 0; i < 12; i++) psp_write_f32(mp + 4u * i, M[i] * HEAD_SHRINK);
+    original();
+    for (uint32_t i = 0; i < 16; i++) psp_write_f32(mp + 4u * i, M[i]);
 }
 
 void vr_body_init(void) {
@@ -801,5 +1007,6 @@ void vr_body_init(void) {
     } else g_test_node = -1;
 #endif
     psp_hook_set(FN_PALETTE, hook_palette);                 /* a no-op unless the map, the test or the arms are on */
-    psp_hook_set(FN_BONE_PATCH, hook_bone_patch);           /* the weapon follows the hand: a no-op unless the arms are on */
+    psp_hook_set(FN_BONE_PATCH, hook_bone_patch);
+    psp_hook_set(FN_PALETTE_ANY, hook_palette_any);         /* first person: the head's other models; a no-op otherwise */           /* the weapon follows the hand: a no-op unless the arms are on */
 }

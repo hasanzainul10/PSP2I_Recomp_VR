@@ -105,6 +105,31 @@ controls are fine; manual aim in first person not tried yet. They chose to
   came on within 0-6 flips in all 8 logged presses. The right hand is
   unchanged.
 
+- **First person without your own head** (2026-10-24, user in the headset:
+  "in first person the head and face are gone now"). Before, the eyes sat
+  1.2 units ahead of the head with a 1.0 clip so the head stayed out of
+  view (user: "it feels weird, the camera is on top of the head"). Now
+  `vr_fp_hide_head=on` (default) hides the head and the eyes sit where the
+  face is: 0.25 ahead, 0.25 clip (`vr_fp_forward` / `vr_fp_near` apply with
+  it off). The head turned out to be four things, each found from a VR
+  capture and its GE dump (left grip + left stick click now also takes the
+  GE dump and logs the body's palettes):
+  - hair and accessories: body meshes on nodes 12 / 13 only;
+  - the face: body meshes blended between the head nodes and the chest /
+    collarbones (10, 14): shrinking the head squashed it into a smear, so
+    the head nodes are set to an all-zero matrix and psprecomp's GE drops
+    any skinned draw with an all-zero bone (`psp_gpu_set_skin_zero_drop`);
+  - an accessory model in the player's container (+0x10, 8 nodes, ~2.5
+    units from node 13): its M shrunk at `0x08A846DC`;
+  - the head itself: a **rigid** mesh (texture `0x09358BE0`, no weights),
+    whose world matrix none of the palette paths builds (hooking all five
+    callers of `0x08D74E54` shrank ~40 skeletons near the head and left
+    it): dropped at the GE, any rigid draw whose world origin is within 3
+    units of the head node (`psp_gpu_set_rigid_drop`, the point set each
+    frame from the animated pose).
+  Not checked: a weapon held against the face (may blink out at 3 units),
+  party members standing inside you.
+
 **Next for M2:**
 1. Not checked: town with the weapon put away (a learned weapon would be
    drawn in the hand if the game still draws it there), twin and two-handed
