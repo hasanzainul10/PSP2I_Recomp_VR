@@ -346,6 +346,34 @@ the world; the user found it overwhelming. Those were removed. Now:
   within 24 degrees, 2 skipped while locked on. Triangle not pressed in
   first person since the fix. Circle is not nudged (it talks in town).
   Only the pad changes (online-safe).
+- **M0 hands in the world (VR_PLAN P5, 2026-10-23): built, not yet seen in
+  the headset.**
+  - **Setting:** engine menu VR > INPUT MODE (PAD / MOTION), `vr_input=` in
+    the ini. MOTION shows the hands and buzzes both controllers once
+    (`menu: VR input motion`). The controllers' buttons stay the PSP pad
+    either way.
+  - **VR thread** (`vr_xr_d3d11.c`): grip and aim pose actions plus a
+    vibration output per hand, bound at the same paths in every profile
+    (`HANDS`), with action spaces. `track_hands` locates them each headset
+    frame. `vr_hands_get` hands them to the game relative to the recentred
+    head, the same space as `vr_head`. `vr_haptic(hand, amp, s)` buzzes.
+  - **Markers:** quad layers drawn by the compositor on top of everything
+    (`marker_layers`): a 4.5 cm ring at the grip facing the eyes (left cyan,
+    right orange) and a 30 cm ray along the aim. They move at the
+    headset's rate, not the game's, but have no depth against the scene.
+    That's a choice for M0; the plan's "psprecomp extra draw" waits for when
+    the hands need to hide behind things.
+  - **Game units** (`hands_frame` in main.c, called from `head_frame`): each
+    3D frame the hands go through the eyes' base, level frame and scale,
+    then out through the view matrix into world positions, the grip's axes
+    and the aim ray (`g_hand_w`, for M2 to M4). Dev log every ~2 s:
+    `vr: hand left: world ...; from the feet X across, Y up`. Check: a hand
+    at the hip in first person should be ~3 units up from the feet
+    (3.4 units per metre).
+  - **vr_test** shows the markers, prints the hands each second, and Cross /
+    Square buzz the right / left controller: an M0 check without the game.
+  - **Not done:** emulated controllers and a command file for tests without
+    a headset (PSUEx has them).
 
 **Next (in order):**
 1. **Try the controller capture in the headset:** left grip + left stick

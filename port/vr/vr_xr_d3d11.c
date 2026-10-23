@@ -58,7 +58,7 @@
     X(xrSuggestInteractionProfileBindings) X(xrAttachSessionActionSets) X(xrSyncActions) \
     X(xrGetActionStateBoolean) X(xrGetActionStateFloat) X(xrGetActionStateVector2f) X(xrResultToString) \
     X(xrLocateViews) X(xrGetCurrentInteractionProfile) X(xrPathToString) X(xrEnumerateBoundSourcesForAction) \
-    X(xrGetInputSourceLocalizedName)
+    X(xrGetInputSourceLocalizedName) X(xrCreateActionSpace) X(xrApplyHapticFeedback)
 
 #define DECL(f) static PFN_##f p_##f;
 XR_GLOBAL_FUNCS(DECL)
@@ -100,7 +100,11 @@ static struct { uint32_t id; XrPosef pose; } g_heads[HEAD_RING];
 static vr_head  g_head;                     /* the newest, relative to the reference */
 static uint32_t g_head_next;
 static XrVector3f g_eye_off[2] = { { -0.032f, 0, 0 }, { 0.032f, 0, 0 } };   /* the eyes in the head's space */
+static vr_hand  g_hands[2];                 /* vr_hands_get: the newest, relative to the reference (under g_head_lock) */
 static volatile LONG g_share_failed;        /* it can't be used here: the game sends pixels instead */
+
+/* vr_haptic: a buzz per hand waiting for the VR thread (under g_pad_lock). */
+static float    g_buzz_amp[2], g_buzz_s[2];
 
 static SRWLOCK  g_pad_lock = SRWLOCK_INIT;
 static vr_pad   g_pad = { 0, 128, 128, 128, 128, 0 };
@@ -128,6 +132,7 @@ static XrPosef g_screen_pose;
 static float g_ref_yaw;                      /* the head's heading and position at recenter (head tracking's origin) */
 static XrVector3f g_ref_pos;
 static float g_head_yaw;                     /* the head's heading now (track_head) */
+static XrPosef g_head_local;                 /* ... and its LOCAL pose (the hand markers face it) */
 static float g_hud_yaw;                      /* the HUD panel's heading (lazy follow, hud_pose) */
 static int   g_hud_following;
 static XrTime g_hud_time;
@@ -148,8 +153,23 @@ static uint32_t *g_oupload;
 /* Actions */
 static XrActionSet g_aset;
 enum { A_LSTICK, A_RSTICK, A_CROSS, A_CIRCLE, A_SQUARE, A_TRIANGLE, A_LTRIG, A_RTRIG,
-       A_LGRIP, A_RGRIP, A_START, A_LCLICK, A_RCLICK, A_COUNT };
+       A_LGRIP, A_RGRIP, A_START, A_LCLICK, A_RCLICK,
+       A_LGRIP_POSE, A_RGRIP_POSE, A_LAIM_POSE, A_RAIM_POSE, A_LHAPTIC, A_RHAPTIC, A_COUNT };
 static XrAction g_act[A_COUNT];
+/* P5: the hands. Their action spaces (left grip, right grip, left aim, right
+ * aim), where they were this headset frame in LOCAL, and the markers drawn
+ * there with input mode MOTION: a disc at the grip facing the eyes and a short
+ * ray along the aim, as quad layers (the compositor draws them at the
+ * headset's rate, not the game's; over the scene, without its depth). */
+static XrSpace g_hspace[4];
+static XrPosef g_hloc[4];
+static int     g_hloc_ok[4];
+static XrSwapchain g_mchain;                 /* the markers' picture: left disc | right disc | ray, MARK_S square each */
+static XrSwapchainImageD3D11KHR g_mimages[8];
+static uint32_t g_nmimages;
+static int     g_mchain_filled;
+static int64_t g_chain_fmt;
+#define MARK_S 64
 static int g_ltrig_on, g_rtrig_on;           /* trigger hysteresis */
 static int g_lclick_prev, g_rclick_prev;
 static float g_view_tan[2];                  /* vr_view_tan, under g_cfg_lock */
@@ -332,9 +352,20 @@ static XrPath path_of(const char *s) {
 
 typedef struct { int act; const char *path; } binding;
 
+/* Every profile has the hands' poses and vibration at the same paths. */
+static const binding HANDS[] = {
+    { A_LGRIP_POSE, "/user/hand/left/input/grip/pose" }, { A_RGRIP_POSE, "/user/hand/right/input/grip/pose" },
+    { A_LAIM_POSE, "/user/hand/left/input/aim/pose" },   { A_RAIM_POSE, "/user/hand/right/input/aim/pose" },
+    { A_LHAPTIC, "/user/hand/left/output/haptic" },      { A_RHAPTIC, "/user/hand/right/output/haptic" },
+};
+
 static void suggest(const char *profile, const binding *b, int n) {
     XrActionSuggestedBinding sb[A_COUNT * 2];
     for (int i = 0; i < n; i++) { sb[i].action = g_act[b[i].act]; sb[i].binding = path_of(b[i].path); }
+    for (int i = 0; i < (int)(sizeof HANDS / sizeof HANDS[0]); i++, n++) {
+        sb[n].action = g_act[HANDS[i].act];
+        sb[n].binding = path_of(HANDS[i].path);
+    }
     XrInteractionProfileSuggestedBinding s = { XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING };
     s.interactionProfile = path_of(profile);
     s.suggestedBindings = sb;
@@ -362,6 +393,12 @@ static int actions_create(void) {
         { "start",      "Start",                      XR_ACTION_TYPE_BOOLEAN_INPUT },
         { "recenter",   "Recenter the screen",        XR_ACTION_TYPE_BOOLEAN_INPUT },
         { "engine_menu","Engine menu",                XR_ACTION_TYPE_BOOLEAN_INPUT },
+        { "grip_left",  "Left hand",                  XR_ACTION_TYPE_POSE_INPUT },
+        { "grip_right", "Right hand",                 XR_ACTION_TYPE_POSE_INPUT },
+        { "aim_left",   "Left pointer",               XR_ACTION_TYPE_POSE_INPUT },
+        { "aim_right",  "Right pointer",              XR_ACTION_TYPE_POSE_INPUT },
+        { "buzz_left",  "Left vibration",             XR_ACTION_TYPE_VIBRATION_OUTPUT },
+        { "buzz_right", "Right vibration",            XR_ACTION_TYPE_VIBRATION_OUTPUT },
     };
     for (int i = 0; i < A_COUNT; i++) {
         XrActionCreateInfo ai = { XR_TYPE_ACTION_CREATE_INFO };
@@ -411,6 +448,12 @@ static int actions_create(void) {
         { A_LCLICK, "/user/hand/left/input/thumbstick/click" },
     };
     suggest("/interaction_profiles/microsoft/motion_controller", WMR, (int)(sizeof WMR / sizeof WMR[0]));
+    for (int i = 0; i < 4; i++) {
+        XrActionSpaceCreateInfo ci = { XR_TYPE_ACTION_SPACE_CREATE_INFO };
+        ci.action = g_act[A_LGRIP_POSE + i];
+        ci.poseInActionSpace.orientation.w = 1.0f;
+        XR_CHECK(p_xrCreateActionSpace(g_sess, &ci, &g_hspace[i]), "xrCreateActionSpace");
+    }
     return 0;
 }
 
@@ -500,8 +543,25 @@ static void input_update(int focused) {
             InterlockedExchange(grip ? &g_shot : &g_recenter, 1);
         }
         g_lclick_prev = lc;
+        float amp[2], sec[2];
+        AcquireSRWLockExclusive(&g_pad_lock);
+        for (int h = 0; h < 2; h++) { amp[h] = g_buzz_amp[h]; sec[h] = g_buzz_s[h]; g_buzz_s[h] = 0; }
+        ReleaseSRWLockExclusive(&g_pad_lock);
+        for (int h = 0; h < 2; h++) {
+            if (sec[h] <= 0) continue;
+            XrHapticActionInfo hi = { XR_TYPE_HAPTIC_ACTION_INFO };
+            hi.action = g_act[A_LHAPTIC + h];
+            XrHapticVibration v = { XR_TYPE_HAPTIC_VIBRATION };
+            v.amplitude = amp[h];
+            v.duration = (XrDuration)(sec[h] * 1e9f);
+            v.frequency = XR_FREQUENCY_UNSPECIFIED;
+            p_xrApplyHapticFeedback(g_sess, &hi, (const XrHapticBaseHeader *)&v);
+        }
     } else {
         g_ltrig_on = g_rtrig_on = g_lclick_prev = g_rclick_prev = 0;
+        AcquireSRWLockExclusive(&g_pad_lock);
+        g_buzz_s[0] = g_buzz_s[1] = 0;               /* no stale buzz when focus comes back */
+        ReleaseSRWLockExclusive(&g_pad_lock);
     }
     AcquireSRWLockExclusive(&g_pad_lock);
     g_pad = p;
@@ -530,6 +590,7 @@ static int swapchain_create(int scale, int scale_y) {
     if (pick < 0) { fprintf(stderr, "vr: no 8-bit RGBA swapchain format\n"); return -1; }
     if (!PREF[pick].srgb) fprintf(stderr, "vr: no sRGB swapchain format; colours will look washed out\n");
     g_chain_bgra = PREF[pick].bgra;
+    g_chain_fmt = PREF[pick].f;
     g_chain_w = GAME_W * scale * 3;                     /* left eye | right eye | HUD */
     g_chain_h = GAME_H * scale_y;                       /* the eye pictures' rows (vr_config.scale_y) */
     XrSwapchainCreateInfo ci = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
@@ -568,6 +629,17 @@ static int swapchain_create(int scale, int scale_y) {
     g_oupload = (uint32_t *)malloc((size_t)GAME_W * scale * GAME_H * scale * 4);
     g_ochain_filled = 0;
     g_ovl_uploaded = -1;
+    /* The hand markers' (filled once: marker_upload). */
+    ci.width = MARK_S * 3;
+    ci.height = MARK_S;
+    XR_CHECK(p_xrCreateSwapchain(g_sess, &ci, &g_mchain), "xrCreateSwapchain (hands)");
+    g_nmimages = 0;
+    XR_CHECK(p_xrEnumerateSwapchainImages(g_mchain, 0, &g_nmimages, NULL), "xrEnumerateSwapchainImages");
+    if (g_nmimages > 8) g_nmimages = 8;
+    for (uint32_t i = 0; i < g_nmimages; i++) g_mimages[i].type = XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
+    XR_CHECK(p_xrEnumerateSwapchainImages(g_mchain, g_nmimages, &g_nmimages, (XrSwapchainImageBaseHeader *)g_mimages),
+             "xrEnumerateSwapchainImages");
+    g_mchain_filled = 0;
     return g_upload && g_oupload ? 0 : -1;
 }
 
@@ -606,16 +678,23 @@ static int session_create(void) {
 
 static void session_destroy(void) {
     input_update(0);
+    for (int i = 0; i < 4; i++) {
+        if (g_hspace[i]) p_xrDestroySpace(g_hspace[i]);
+        g_hspace[i] = XR_NULL_HANDLE;
+        g_hloc_ok[i] = 0;
+    }
     if (g_aset) { p_xrDestroyActionSet(g_aset); g_aset = XR_NULL_HANDLE; }
     memset(g_act, 0, sizeof g_act);
     if (g_chain) { p_xrDestroySwapchain(g_chain); g_chain = XR_NULL_HANDLE; }
     if (g_ochain) { p_xrDestroySwapchain(g_ochain); g_ochain = XR_NULL_HANDLE; }
+    if (g_mchain) { p_xrDestroySwapchain(g_mchain); g_mchain = XR_NULL_HANDLE; }
     if (g_view) { p_xrDestroySpace(g_view); g_view = XR_NULL_HANDLE; }
     if (g_local) { p_xrDestroySpace(g_local); g_local = XR_NULL_HANDLE; }
     if (g_sess) { p_xrDestroySession(g_sess); g_sess = XR_NULL_HANDLE; }
     g_running = 0;
     AcquireSRWLockExclusive(&g_head_lock);
     g_head.id = 0;                                  /* no pose until the next session tracks one */
+    g_hands[0].ok = g_hands[1].ok = 0;
     ReleaseSRWLockExclusive(&g_head_lock);
 }
 
@@ -928,6 +1007,7 @@ static void track_head(XrTime t) {
         const XrVector3f f = qrot(loc.pose.orientation, fwd0);
         if (f.x * f.x + f.z * f.z > 1e-6f) g_head_yaw = atan2f(-f.x, -f.z);
     }
+    g_head_local = loc.pose;
     AcquireSRWLockExclusive(&g_head_lock);
     if (++g_head_next == 0) g_head_next = 1;                     /* 0 means none */
     g_heads[g_head_next % HEAD_RING].id = g_head_next;
@@ -939,6 +1019,153 @@ static void track_head(XrTime t) {
         g_head.eye[e][0] = g_eye_off[e].x; g_head.eye[e][1] = g_eye_off[e].y; g_head.eye[e][2] = g_eye_off[e].z;
     }
     ReleaseSRWLockExclusive(&g_head_lock);
+}
+
+/* P5: the hands' grip and aim poses for this headset frame: kept in LOCAL
+ * for the markers, and handed to the game relative to the reference, as the
+ * head is (track_head). A pose without a valid position or orientation (the
+ * controller off, or out of the tracking cameras' sight) counts as none. */
+static void track_hands(XrTime t) {
+    vr_hand h[2];
+    memset(h, 0, sizeof h);
+    const XrQuaternionf unyaw = { 0, -sinf(g_ref_yaw * 0.5f), 0, cosf(g_ref_yaw * 0.5f) };
+    for (int i = 0; i < 4; i++) {
+        XrSpaceLocation loc = { XR_TYPE_SPACE_LOCATION };
+        g_hloc_ok[i] = g_hspace[i] && XR_SUCCEEDED(p_xrLocateSpace(g_hspace[i], g_local, t, &loc)) &&
+                       (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) &&
+                       (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT);
+        if (!g_hloc_ok[i]) continue;
+        g_hloc[i] = loc.pose;
+        const XrQuaternionf q = qmul(unyaw, loc.pose.orientation);
+        const XrVector3f d = { loc.pose.position.x - g_ref_pos.x, loc.pose.position.y - g_ref_pos.y,
+                               loc.pose.position.z - g_ref_pos.z };
+        const XrVector3f p = qrot(unyaw, d);
+        vr_hand *o = &h[i & 1];
+        float *oq = i < 2 ? o->q : o->aim_q, *op = i < 2 ? o->p : o->aim_p;
+        oq[0] = q.x; oq[1] = q.y; oq[2] = q.z; oq[3] = q.w;
+        op[0] = p.x; op[1] = p.y; op[2] = p.z;
+    }
+    for (int k = 0; k < 2; k++) h[k].ok = g_hloc_ok[k] && g_hloc_ok[2 + k];
+    AcquireSRWLockExclusive(&g_head_lock);
+    memcpy(g_hands, h, sizeof h);
+    ReleaseSRWLockExclusive(&g_head_lock);
+}
+
+/* The rotation whose axes are x, y, z (orthonormal, right-handed). */
+static XrQuaternionf quat_axes(XrVector3f x, XrVector3f y, XrVector3f z) {
+    XrQuaternionf q;
+    const float tr = x.x + y.y + z.z;
+    if (tr > 0) {
+        const float s = 2.0f * sqrtf(tr + 1.0f);
+        q.w = 0.25f * s; q.x = (y.z - z.y) / s; q.y = (z.x - x.z) / s; q.z = (x.y - y.x) / s;
+    } else if (x.x > y.y && x.x > z.z) {
+        const float s = 2.0f * sqrtf(1.0f + x.x - y.y - z.z);
+        q.w = (y.z - z.y) / s; q.x = 0.25f * s; q.y = (y.x + x.y) / s; q.z = (z.x + x.z) / s;
+    } else if (y.y > z.z) {
+        const float s = 2.0f * sqrtf(1.0f + y.y - x.x - z.z);
+        q.w = (z.x - x.z) / s; q.x = (y.x + x.y) / s; q.y = 0.25f * s; q.z = (z.y + y.z) / s;
+    } else {
+        const float s = 2.0f * sqrtf(1.0f + z.z - x.x - y.y);
+        q.w = (x.y - y.x) / s; q.x = (z.x + x.z) / s; q.y = (z.y + y.z) / s; q.z = 0.25f * s;
+    }
+    return q;
+}
+
+static XrVector3f v3_norm(XrVector3f v) {
+    const float l = sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+    if (l > 1e-6f) { v.x /= l; v.y /= l; v.z /= l; }
+    return v;
+}
+static XrVector3f v3_cross(XrVector3f a, XrVector3f b) {
+    const XrVector3f r = { a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x };
+    return r;
+}
+static float v3_dot(XrVector3f a, XrVector3f b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+
+/* The markers' picture, once per swapchain (its last released image is what
+ * the compositor keeps showing): a ring with a faint fill per hand (left
+ * cyan, right orange) and a ray fading out toward its far end (the top row).
+ * Premultiplied alpha, sRGB bytes. */
+static void marker_upload(void) {
+    if (g_mchain_filled || !g_mchain) return;
+    static uint32_t px[MARK_S * 3 * MARK_S];
+    static const float COL[3][3] = { { 0.25f, 0.85f, 1.0f }, { 1.0f, 0.6f, 0.2f }, { 1.0f, 1.0f, 1.0f } };
+    for (int y = 0; y < MARK_S; y++)
+        for (int x = 0; x < MARK_S * 3; x++) {
+            const int cell = x / MARK_S;
+            const float u = ((float)(x % MARK_S) + 0.5f) / MARK_S * 2.0f - 1.0f, v = ((float)y + 0.5f) / MARK_S * 2.0f - 1.0f;
+            float a;
+            if (cell < 2) {                          /* a ring 0.75..0.95 of the radius, 30% inside */
+                const float r = sqrtf(u * u + v * v), edge = 2.0f / MARK_S;
+                const float ring = fminf(fmaxf((r - 0.75f) / edge + 0.5f, 0.0f), 1.0f) *
+                                   fminf(fmaxf((0.95f - r) / edge + 0.5f, 0.0f), 1.0f);
+                a = fmaxf(ring, r < 0.75f ? 0.3f : 0.0f);
+            } else {                                 /* soft across, fading toward the top */
+                a = fmaxf(0.0f, 1.0f - fabsf(u)) * 0.8f * ((float)y + 0.5f) / MARK_S;
+            }
+            uint32_t c[3];
+            for (int k = 0; k < 3; k++) c[k] = (uint32_t)lroundf(COL[cell][k] * a * 255.0f);
+            const uint32_t A = (uint32_t)lroundf(a * 255.0f);
+            px[y * MARK_S * 3 + x] = g_chain_bgra ? (c[2] | c[1] << 8 | c[0] << 16 | A << 24)
+                                                  : (c[0] | c[1] << 8 | c[2] << 16 | A << 24);
+        }
+    uint32_t idx;
+    XrSwapchainImageAcquireInfo ai = { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
+    if (XR_FAILED(p_xrAcquireSwapchainImage(g_mchain, &ai, &idx))) return;
+    XrSwapchainImageWaitInfo wi = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
+    wi.timeout = XR_INFINITE_DURATION;
+    if (XR_SUCCEEDED(p_xrWaitSwapchainImage(g_mchain, &wi))) {
+        ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)g_mimages[idx].texture, 0, NULL, px, MARK_S * 3 * 4, 0);
+        g_mchain_filled = 1;
+    }
+    XrSwapchainImageReleaseInfo ri = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+    p_xrReleaseSwapchainImage(g_mchain, &ri);
+}
+
+/* A hand's two markers: the disc at the grip, turned to face the head, and
+ * the ray from the aim pose along its -z, turned about itself to face the
+ * head. */
+#define MARK_DISC_M 0.045f
+#define MARK_RAY_M  0.30f
+#define MARK_RAY_W  0.008f
+static int marker_layers(int hand, XrCompositionLayerQuad *q) {
+    if (!g_hloc_ok[hand] || !g_hloc_ok[2 + hand] || !g_mchain_filled) return 0;
+    const XrVector3f up = { 0, 1, 0 }, fwd0 = { 0, 0, -1 }, back = { 0, 0, 1 };
+    for (int k = 0; k < 2; k++) {
+        q[k].layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+        q[k].space = g_local;
+        q[k].eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+        q[k].subImage.swapchain = g_mchain;
+        q[k].subImage.imageRect.extent.width = MARK_S;
+        q[k].subImage.imageRect.extent.height = MARK_S;
+    }
+    /* The disc. */
+    const XrVector3f gp = g_hloc[hand].position, hp = g_head_local.position;
+    const XrVector3f to_head = { hp.x - gp.x, hp.y - gp.y, hp.z - gp.z };
+    XrVector3f z = v3_dot(to_head, to_head) > 1e-6f ? v3_norm(to_head) : back;
+    const float uz = v3_dot(up, z);
+    XrVector3f y = { up.x - uz * z.x, up.y - uz * z.y, up.z - uz * z.z };
+    if (v3_dot(y, y) < 1e-4f) y = fwd0;                  /* the hand straight above or below the head */
+    y = v3_norm(y);
+    q[0].pose.orientation = quat_axes(v3_cross(y, z), y, z);
+    q[0].pose.position = gp;
+    q[0].subImage.imageRect.offset.x = hand * MARK_S;
+    q[0].size.width = q[0].size.height = MARK_DISC_M;
+    /* The ray. */
+    const XrVector3f ap = g_hloc[2 + hand].position, d = v3_norm(qrot(g_hloc[2 + hand].orientation, fwd0));
+    const XrVector3f th = { hp.x - ap.x, hp.y - ap.y, hp.z - ap.z };
+    const float td = v3_dot(th, d);
+    XrVector3f rz = { th.x - td * d.x, th.y - td * d.y, th.z - td * d.z };
+    if (v3_dot(rz, rz) < 1e-6f) rz = up;                 /* looking straight down the ray */
+    rz = v3_norm(rz);
+    q[1].pose.orientation = quat_axes(v3_cross(d, rz), d, rz);
+    q[1].pose.position.x = ap.x + d.x * MARK_RAY_M * 0.5f;
+    q[1].pose.position.y = ap.y + d.y * MARK_RAY_M * 0.5f;
+    q[1].pose.position.z = ap.z + d.z * MARK_RAY_M * 0.5f;
+    q[1].subImage.imageRect.offset.x = 2 * MARK_S;
+    q[1].size.width = MARK_RAY_W;
+    q[1].size.height = MARK_RAY_M;
+    return 2;
 }
 
 /* The HUD panel's pose (as PSUEx-VR's VRCamera does it): the heading eases
@@ -1023,12 +1250,12 @@ static void frame(void) {
     if (XR_FAILED(r)) { fprintf(stderr, "vr: xrBeginFrame failed: %s\n", res_name(r)); g_session_over = 1; return; }
 
     input_update(g_state == XR_SESSION_STATE_FOCUSED);
-    XrCompositionLayerQuad quad[4] = { { XR_TYPE_COMPOSITION_LAYER_QUAD }, { XR_TYPE_COMPOSITION_LAYER_QUAD },
-                                       { XR_TYPE_COMPOSITION_LAYER_QUAD }, { XR_TYPE_COMPOSITION_LAYER_QUAD } };
+    XrCompositionLayerQuad quad[8];                     /* 0, 1 the screen; 2 the overlay; 3 the HUD; 4..7 the hands */
+    for (int i = 0; i < 8; i++) { memset(&quad[i], 0, sizeof quad[i]); quad[i].type = XR_TYPE_COMPOSITION_LAYER_QUAD; }
     XrCompositionLayerProjection proj = { XR_TYPE_COMPOSITION_LAYER_PROJECTION };
     XrCompositionLayerProjectionView pv[2] = { { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW },
                                                { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW } };
-    const XrCompositionLayerBaseHeader *layers[4];
+    const XrCompositionLayerBaseHeader *layers[8];
     uint32_t nl = 0;
     if (fs.shouldRender) {
         if (InterlockedExchange(&g_recenter, 0) || !g_placed) {
@@ -1037,7 +1264,8 @@ static void frame(void) {
                         (double)g_ref_pos.y, (double)g_ref_pos.z, (double)(g_ref_yaw * 57.29578f));
         }
         update_ipd(fs.predictedDisplayTime);
-        if (g_placed) track_head(fs.predictedDisplayTime);
+        if (g_placed) { track_head(fs.predictedDisplayTime); track_hands(fs.predictedDisplayTime); }
+        marker_upload();
         upload();
         upload_overlay();
         AcquireSRWLockShared(&g_frame_lock);
@@ -1139,6 +1367,14 @@ static void frame(void) {
             q->size.height = w * (float)GAME_H / (float)GAME_W;
             layers[nl++] = (const XrCompositionLayerBaseHeader *)q;
         }
+        AcquireSRWLockShared(&g_cfg_lock);
+        const int motion = g_cfg.motion;
+        ReleaseSRWLockShared(&g_cfg_lock);
+        if (nl && motion && g_placed)                    /* the hands on top of everything */
+            for (int hand = 0; hand < 2; hand++) {
+                const int n = marker_layers(hand, &quad[4 + 2 * hand]);
+                for (int k = 0; k < n; k++) layers[nl++] = (const XrCompositionLayerBaseHeader *)&quad[4 + 2 * hand + k];
+            }
     }
     XrFrameEndInfo ei = { XR_TYPE_FRAME_END_INFO };
     ei.displayTime = fs.predictedDisplayTime;
@@ -1232,6 +1468,7 @@ void vr_configure(const vr_config *cfg) {
     g_cfg.distance_m = cfg->distance_m;
     g_cfg.width_m = cfg->width_m;
     g_cfg.stereo = cfg->stereo;
+    g_cfg.motion = cfg->motion;
     if (cfg->hud_distance_m > 0) {
         g_cfg.hud_distance_m = cfg->hud_distance_m;
         g_cfg.hud_drop_m = cfg->hud_drop_m;
@@ -1325,6 +1562,23 @@ int vr_head_get(vr_head *out) {
     *out = g_head;
     ReleaseSRWLockShared(&g_head_lock);
     return out->id != 0;
+}
+
+int vr_hands_get(vr_hand out[2]) {
+    AcquireSRWLockShared(&g_head_lock);
+    out[0] = g_hands[0];
+    out[1] = g_hands[1];
+    ReleaseSRWLockShared(&g_head_lock);
+    return (out[0].ok ? 1 : 0) | (out[1].ok ? 2 : 0);
+}
+
+void vr_haptic(int hand, float amplitude, float seconds) {
+    if (amplitude < 0) amplitude = 0;
+    if (amplitude > 1) amplitude = 1;
+    AcquireSRWLockExclusive(&g_pad_lock);
+    for (int h = 0; h < 2; h++)
+        if (hand < 0 || hand == h) { g_buzz_amp[h] = amplitude; g_buzz_s[h] = seconds; }
+    ReleaseSRWLockExclusive(&g_pad_lock);
 }
 
 int vr_pad_get(vr_pad *out) {

@@ -888,6 +888,12 @@ static void test_vr_page(void) {
     CHECK(menu_vr_filter_aniso(VR_FILTER_OFF) == 0 && menu_vr_filter_aniso(VR_FILTER_4X) == 4 &&
           menu_vr_filter_aniso(VR_FILTER_16X) == 16 && menu_vr_filter_of(16) == VR_FILTER_16X && menu_vr_filter_of(0) == VR_FILTER_OFF);
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_VR_INPUT && !m.vr_motion);                /* input mode: pad */
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_VR && m.vr_motion); /* motion */
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_VR && !m.vr_motion);
+    menu_update(&m, 0, 0);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_VR_RECENTER && menu_update(&m, MI_CONFIRM, 0) == MFX_VR_RECENTER);
     menu_update(&m, 0, 0);
     CHECK(menu_update(&m, MI_BACK, 0) == 0 && m.page == MENU_PAGE_MAIN && m.sel == MENU_VR);   /* Cross: back */

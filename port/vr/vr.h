@@ -29,6 +29,7 @@ typedef struct {
      * hud_follow_deg away (0: it stays where recenter put it). */
     float hud_distance_m, hud_drop_m, hud_width_m, hud_follow_deg;
     int   scale_y;      /* swapchain pixels per game pixel down, scale..8 (taller eye pictures); 0 = scale */
+    int   motion;       /* input mode MOTION: the hands are shown where the controllers are (vr_hands_get) */
 } vr_config;
 
 #define VR_DISTANCE_DEFAULT 2.5f
@@ -112,6 +113,20 @@ typedef struct {
     float    eye[2][3];     /* the left and right eye in the head's space */
 } vr_head;
 int vr_head_get(vr_head *out);
+
+/* P5 motion controls: the controllers' grip pose (the palm: +y along the
+ * fingers' back, -z out of the fist) and aim pose (the pointing ray along
+ * -z) for this headset frame, relative to the recentred head as vr_head is
+ * (the same space, so they line up with the eyes). Returns a bit per hand
+ * tracked (1 left, 2 right); an untracked hand has ok 0. */
+typedef struct {
+    int   ok;
+    float q[4], p[3];           /* grip */
+    float aim_q[4], aim_p[3];   /* aim */
+} vr_hand;
+int vr_hands_get(vr_hand out[2]);
+/* A buzz on a controller: hand 0 left, 1 right, -1 both; amplitude 0..1. */
+void vr_haptic(int hand, float amplitude, float seconds);
 
 /* The controllers as a PSP pad. buttons: PSP_CTRL_* bits; sticks 0..255, 128
  * centre (left: the analog stick, right: the camera). host: VR_HOST_* actions

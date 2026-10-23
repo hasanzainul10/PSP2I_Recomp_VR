@@ -1013,6 +1013,19 @@ static int   g_fp_stick_on, g_fp_stick_in[2], g_fp_stick_out[2];   /* the last t
  * the character faces more than FP_NUDGE_MIN away from where the head looks
  * is held back while the stick turns it to the head first (fp_nudge). */
 static int   g_vr_fp_nudge = 1;
+/* P5 motion controls (vr_input=pad|motion, engine menu VR > INPUT MODE): with
+ * MOTION the headset shows the controllers' hands (vr.h vr_hands_get), and
+ * each 3D frame places them in the game world (head_frame: through the same
+ * level frame and scale as the eyes), for the arms, swings and aim to come
+ * (VR_PLAN P5). The controllers' buttons stay the PSP pad either way. */
+static int   g_vr_motion;
+typedef struct {
+    int   ok;
+    float p[3];          /* the grip, world */
+    float axes[9];       /* its axes in the world, column-major (x, y, z) */
+    float aim_p[3], aim_d[3];   /* the pointer ray, world */
+} game_hand;
+static game_hand g_hand_w[2];
 /* ... and its projection that much wider across / up (1 = the game's): the
  * eyes' view plus VR_FP_VIEW_MARGIN, so the game culls nothing the eyes see,
  * even as they turn before the next frame (user: "when I look up the bottom
@@ -1068,7 +1081,7 @@ static void vr_apply(void) {
     const vr_config cfg = { g_vr_dist_dm / 10.0f, g_vr_width_dm / 10.0f, g_hi_s > 1 ? g_hi_s : VR_SCALE_DEFAULT,
                             g_vr_stereo && g_renderer == REN_D3D11, g_vr_hud_dist, VR_HUD_DROP_DEFAULT,
                             2.0f * g_vr_hud_dist * 0.7311f * g_vr_hud_size, g_vr_hud_follow,
-                            g_hi_s > 1 ? g_hi_sy : 0 };
+                            g_hi_s > 1 ? g_hi_sy : 0, g_vr_motion };
     if (g_vr_on && !g_vr_live && !g_headless) {
         vr_set_swap_circle_cross(g_swap_oc);
         g_vr_live = vr_start(g_exe_dir, &cfg) == 0;
@@ -1129,6 +1142,63 @@ static void view_of(const float *q, const float *p, float *m) {
     for (int r = 0; r < 3; r++) m[12 + r] = -(q[r * 3] * p[0] + q[r * 3 + 1] * p[1] + q[r * 3 + 2] * p[2]);
     m[3] = m[7] = m[11] = 0.0f;
     m[15] = 1.0f;
+}
+
+/* P5: the hands in the game world for this frame. A hand relative to the
+ * recentred head goes where the eyes' head would be at that offset: base
+ * (the head's origin in the game camera's view space) + k * lev * p, then
+ * out of the view space through the view matrix the frame is drawn with
+ * (its rotation transposed). Dev builds log them every ~2 s against the
+ * player's feet, the check that the scale and frame are right (a hand held
+ * at the hip in first person: ~3 units up from the feet, at 3.4 a metre). */
+static void hands_frame(const float *base, const float *lev, float k) {
+    vr_hand vh[2];
+    if (!g_vr_motion || !g_vr_live || !vr_hands_get(vh)) {
+        g_hand_w[0].ok = g_hand_w[1].ok = 0;
+        return;
+    }
+    float v[16];
+    for (int i = 0; i < 16; i++) v[i] = psp_read_f32(PSP2I_VIEW_MATRIX + 4u * (uint32_t)i);
+    for (int hd = 0; hd < 2; hd++) {
+        game_hand *o = &g_hand_w[hd];
+        o->ok = vh[hd].ok;
+        if (!o->ok) continue;
+        float pv[2][3], hr[9], ar[9], gq[9], aq[9];
+        for (int r = 0; r < 3; r++) {
+            pv[0][r] = base[r] + k * (lev[r] * vh[hd].p[0] + lev[3 + r] * vh[hd].p[1] + lev[6 + r] * vh[hd].p[2]);
+            pv[1][r] = base[r] + k * (lev[r] * vh[hd].aim_p[0] + lev[3 + r] * vh[hd].aim_p[1] + lev[6 + r] * vh[hd].aim_p[2]);
+        }
+        quat_mat3(vh[hd].q, hr);
+        quat_mat3(vh[hd].aim_q, ar);
+        mat3_mul(lev, hr, gq);                                   /* axes in the camera's view space */
+        mat3_mul(lev, ar, aq);
+        for (int c = 0; c < 3; c++) {                            /* view -> world: R^T (x - t) */
+            o->p[c] = v[c * 4] * (pv[0][0] - v[12]) + v[c * 4 + 1] * (pv[0][1] - v[13]) + v[c * 4 + 2] * (pv[0][2] - v[14]);
+            o->aim_p[c] = v[c * 4] * (pv[1][0] - v[12]) + v[c * 4 + 1] * (pv[1][1] - v[13]) + v[c * 4 + 2] * (pv[1][2] - v[14]);
+            o->aim_d[c] = -(v[c * 4] * aq[6] + v[c * 4 + 1] * aq[7] + v[c * 4 + 2] * aq[8]);   /* the ray is -z */
+            for (int a = 0; a < 3; a++)
+                o->axes[a * 3 + c] = v[c * 4] * gq[a * 3] + v[c * 4 + 1] * gq[a * 3 + 1] + v[c * 4 + 2] * gq[a * 3 + 2];
+        }
+    }
+#ifndef PSP2I_PROD
+    static uint64_t last;
+    const uint64_t vb = psp_sched_vblank_count();
+    if (vb - last >= 120) {
+        last = vb;
+        const uint32_t pl = gamelog_local_player();
+        float f[3] = { 0, 0, 0 };
+        if (pl) for (int i = 0; i < 3; i++) f[i] = psp_read_f32(pl + 0x4B0u + 4u * (uint32_t)i);
+        for (int hd = 0; hd < 2; hd++) {
+            const game_hand *o = &g_hand_w[hd];
+            if (!o->ok) { fprintf(stderr, "vr: hand %s: not tracked\n", hd ? "right" : "left"); continue; }
+            const float dx = o->p[0] - f[0], dz = o->p[2] - f[2];
+            fprintf(stderr, "vr: hand %s: world %.1f %.1f %.1f; from the feet %.2f across, %.2f up (%s person, %.1f units/m);"
+                            " aim %.2f %.2f %.2f\n", hd ? "right" : "left", (double)o->p[0], (double)o->p[1], (double)o->p[2],
+                    (double)sqrtf(dx * dx + dz * dz), (double)(o->p[1] - f[1]), g_vr_first ? "first" : "third", (double)k,
+                    (double)o->aim_d[0], (double)o->aim_d[1], (double)o->aim_d[2]);
+        }
+    }
+#endif
 }
 
 /* psp_gpu_stereo.on_frame: at the first 3D draw of each game frame, each
@@ -1246,6 +1316,7 @@ static void head_frame(psp_gpu_stereo *s) {
                                   q[r] * h.eye[e][0] + q[3 + r] * h.eye[e][1] + q[6 + r] * h.eye[e][2]);
         view_of(q, p, s->eye_view[e]);
     }
+    hands_frame(base, lev, k);
     s->tag = live ? h.id : 0;
     /* Menu scenes: as the game draws them, on the flat screen (tag 0). */
     int menu = 0;
@@ -2003,6 +2074,7 @@ static int display_load(void) {
             if (k >= 0.0f && k <= 3.0f) g_vr_fp_fwd = k;
         }
         else if (!strncmp(line, "vr_fp_nudge=", 12)) g_vr_fp_nudge = strncmp(line + 12, "off", 3) != 0;
+        else if (!strncmp(line, "vr_input=", 9))     g_vr_motion = !strncmp(line + 9, "motion", 6);
         else if (!strncmp(line, "vr_fp_scale=", 12)) {
             const float k = (float)atof(line + 12);
             if (k >= 0.5f && k <= 20.0f) g_vr_fp_scale = k;
@@ -2090,6 +2162,9 @@ static void display_save(int res) {
     fprintf(f, "; first person: fp nudge = on: an attack (Square, Triangle) first turns your character to where you look"
                " (not while R locks on), off = the attack goes the way the character faces\n");
     fprintf(f, "vr_fp_nudge=%s\n", g_vr_fp_nudge ? "on" : "off");
+    fprintf(f, "; VR input: pad = a gamepad (or the VR controllers as one), motion = the VR controllers' hands shown"
+               " where they are (motion controls build on it; the buttons stay the pad's)\n");
+    fprintf(f, "vr_input=%s\n", g_vr_motion ? "motion" : "pad");
     fprintf(f, "; VR image quality (from the next start, VR only): aniso = texture filtering 0 (off) or 2..16;"
                " sharpen = sharpening of the headset's pictures 0.0 (off) .. 1.0\n");
     fprintf(f, "vr_aniso=%d\nvr_sharpen=%.2f\n", g_vr_aniso, (double)g_vr_sharpen);
@@ -2151,6 +2226,7 @@ static void menu_step(void) {
     g_menu.vr_res_now = g_hi_s;
     g_menu.vr_sharpen = (int)lroundf(g_vr_sharpen * VR_SHARPEN_STEPS);
     g_menu.vr_filter = menu_vr_filter_of(g_vr_aniso);
+    g_menu.vr_motion = g_vr_motion;
     /* RESTART: sharpening needs a start in VR (its shader), mipmaps a start
      * with filtering on (they're made when textures are first loaded). */
     g_menu.vr_quality_restart = 0;
@@ -2248,6 +2324,11 @@ static void menu_step(void) {
         g_vr_sharpen = (float)g_menu.vr_sharpen / (float)VR_SHARPEN_STEPS;
         g_vr_aniso = menu_vr_filter_aniso(g_menu.vr_filter);
         if (g_renderer == REN_D3D11) d3d11_set_quality(g_vr_aniso, g_vr_sharpen);
+        if (g_menu.vr_motion != g_vr_motion) {
+            g_vr_motion = g_menu.vr_motion;
+            if (g_vr_motion && g_vr_live) vr_haptic(-1, 0.5f, 0.15f);   /* a buzz: the controllers are the hands now */
+            fprintf(stderr, "menu: VR input %s\n", g_vr_motion ? "motion (the hands shown)" : "pad");
+        }
         if (g_menu.vr_world_pct > 0) {                   /* the view in use: life size * 100 / percent */
             const float k = VR_FP_SCALE_DEFAULT * 100.0f / (float)g_menu.vr_world_pct;
             if (g_vr_first) g_vr_fp_scale = k; else g_vr_world_scale = k;

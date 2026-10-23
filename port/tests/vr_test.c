@@ -1,7 +1,9 @@
 /* vr_test: the VR theater without the game. Shows a moving test picture on the
  * VR screen and prints the controllers as a PSP pad, so the OpenXR side
  * (loader, runtime, session, swapchain, bindings) can be checked on its own,
- * e.g. against SteamVR's null headset.
+ * e.g. against SteamVR's null headset. The hands are shown as in input mode
+ * MOTION, their poses printed each second, and Cross / Square buzz the right /
+ * left controller (P5 M0's check without the game).
  *
  *   vr_test [seconds]        default 30; Ctrl+C ends it early */
 #include <stdio.h>
@@ -38,10 +40,12 @@ int main(int argc, char **argv) {
     char *slash = strrchr(dir, '\\');
     if (slash) *slash = '\0';
     vr_config cfg = { VR_DISTANCE_DEFAULT, VR_WIDTH_DEFAULT, VR_SCALE_DEFAULT };
+    cfg.motion = 1;
     if (vr_start(dir, &cfg) != 0) return 1;
     const ULONGLONG t0 = GetTickCount64();
     int last_status = -1, frame = 0;
     vr_pad last = { 0xFFFFFFFFu, 0, 0, 0, 0, 0 };
+    ULONGLONG hands_at = 0;
     while (GetTickCount64() - t0 < (ULONGLONG)(seconds * 1000.0)) {
         draw(frame++);
         vr_submit_frame(g_px, W, H);
@@ -53,7 +57,19 @@ int main(int argc, char **argv) {
         if (live && memcmp(&p, &last, sizeof p)) {
             printf("pad: buttons %04X  left %3u,%3u  right %3u,%3u  host %X\n", p.buttons, p.ax, p.ay, p.rx, p.ry, p.host);
             fflush(stdout);
+            if ((p.buttons & 0x4000u) && !(last.buttons & 0x4000u)) vr_haptic(1, 0.6f, 0.1f);   /* Cross: right */
+            if ((p.buttons & 0x8000u) && !(last.buttons & 0x8000u)) vr_haptic(0, 0.6f, 0.1f);   /* Square: left */
             last = p;
+        }
+        if (GetTickCount64() - hands_at >= 1000) {
+            hands_at = GetTickCount64();
+            vr_hand hd[2];
+            if (vr_hands_get(hd)) {
+                for (int i = 0; i < 2; i++)
+                    if (hd[i].ok) printf("hand %s: %+.2f %+.2f %+.2f m from the head at recenter\n", i ? "right" : "left",
+                                         hd[i].p[0], hd[i].p[1], hd[i].p[2]);
+                fflush(stdout);
+            }
         }
         Sleep(16);                                  /* about the game's 60 fps */
     }

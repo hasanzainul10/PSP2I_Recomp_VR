@@ -198,6 +198,7 @@ static int change(menu_state *m, int dir) {
         else              *v = *v >= hi ? 0 : *v + 1;
         return *v != old ? MFX_VR : 0;
     }
+    case MENU_VR_INPUT:    m->vr_motion = !m->vr_motion; return MFX_VR;
     case MENU_VR_RECENTER: return dir == 0 ? MFX_VR_RECENTER : 0;
     default:               return 0;
     }
@@ -487,7 +488,7 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
                                                    "VR", "CLOSE", "RIGHT STICK", "SENSITIVITY", "CIRCLE/CROSS", "TOUCH COLOR",
                                                    "TOUCH OPACITY", "BACK", "TICK PACING", "30 HZ LOGIC", "BACK",
                                                    "VR", "SCREEN DISTANCE", "SCREEN WIDTH", "HUD DISTANCE", "WORLD SIZE",
-                                                   "RESOLUTION", "SHARPEN", "TEXTURE FILTER", "RECENTER", "BACK" };
+                                                   "RESOLUTION", "SHARPEN", "TEXTURE FILTER", "INPUT MODE", "RECENTER", "BACK" };
     static const char *const ADHOC_MODES[3] = { "< PPSSPP DIRECT >", "< PPSSPP RELAY >", "< MODERN >" };
     char adhoc[32];
     snprintf(adhoc, sizeof adhoc, "%.25s", m->adhoc[0] ? m->adhoc : "NOT SET");
@@ -550,7 +551,8 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
                       : i == MENU_VR_DISTANCE ? vr_dist : i == MENU_VR_WIDTH ? vr_width
                       : i == MENU_VR_HUD_DIST ? vr_hud : i == MENU_VR_WORLD ? vr_world
                       : i == MENU_VR_RES ? vr_res
-                      : i == MENU_VR_SHARPEN ? vr_sharp : i == MENU_VR_FILTER ? vr_filt : "";
+                      : i == MENU_VR_SHARPEN ? vr_sharp : i == MENU_VR_FILTER ? vr_filt
+                      : i == MENU_VR_INPUT ? (m->vr_motion ? "< MOTION >" : "< PAD >") : "";
         menu_text(img, x0 + VALUE_X, y, v, col);
         y += ROW_H;
     }
