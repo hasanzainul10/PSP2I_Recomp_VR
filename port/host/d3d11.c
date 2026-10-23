@@ -137,16 +137,16 @@ static ID3D11Texture2D *g_scratch;       /* copy of a target sampled while drawn
 static ID3D11ShaderResourceView *g_scratch_srv;
 static uint32_t g_scratch_w, g_scratch_h;
 static uint64_t g_use;
-static int g_scale = 1;                  /* internal resolution: GPU pixels per PSP pixel (1..4) */
-static int g_scale_y = 1;                /* ... down (g_scale..8): taller for the VR eyes */
+static int g_scale = 1;                  /* internal resolution: GPU pixels per PSP pixel (1..6; above 4 for VR) */
+static int g_scale_y = 1;                /* ... down (g_scale..12): taller for the VR eyes */
 
 /* Before d3d11_init: the internal resolution scale. */
-void d3d11_set_scale(int s) { g_scale = g_scale_y = s < 1 ? 1 : s > 4 ? 4 : s; }
+void d3d11_set_scale(int s) { g_scale = g_scale_y = s < 1 ? 1 : s > 6 ? 6 : s; }
 /* After d3d11_set_scale, before d3d11_init: GPU pixels per PSP pixel down,
  * when it isn't the same as across. VR head tracking widens the eyes' view
  * up and down more than across (vr_fov_scale_y), so the eye pictures need
  * more rows for square pixels in the headset. */
-void d3d11_set_scale_y(int s) { g_scale_y = s < g_scale ? g_scale : s > 8 ? 8 : s; }
+void d3d11_set_scale_y(int s) { g_scale_y = s < g_scale ? g_scale : s > 12 ? 12 : s; }
 
 /* Image quality for VR (before d3d11_init; the window's game is drawn as
  * before when these are 0): `aniso` 2..16 = the game's linearly filtered

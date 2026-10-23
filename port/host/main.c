@@ -58,7 +58,7 @@
  *               GPU presenter (present.c) and scales with GDI.
  *   --texture-packs DIR[;DIR...]  PPSSPP texture packs for this run, instead of
  *               psp2i_display.ini texture_packs= (texreplace.h); "" = none
- *   --render-scale N  internal resolution for this run, 1..4 (Direct3D 11),
+ *   --render-scale N  internal resolution for this run, 1..6 (Direct3D 11),
  *               instead of psp2i_display.ini render_scale=
  *   --oracle    (trace builds) diff the function at ADDR against an interpreter
  *               the first time it runs; see host/oracle.c
@@ -312,7 +312,7 @@ static int      g_have_frame;
  * renderer's S-times picture and g_hi_rgba that picture with the overlay,
  * for the window (present.c) and the headset. */
 static int       g_hi_s = 1;                /* the scale in use: 1 = off */
-static int       g_hi_sy = 1;               /* ... down, for the VR eye pictures (g_hi_s.. 8) */
+static int       g_hi_sy = 1;               /* ... down, for the VR eye pictures (g_hi_s.. 12) */
 static uint32_t *g_hi_frame, *g_hi_rgba;
 static int       g_hi_valid;                /* g_hi_frame holds the frame g_frame holds */
 
@@ -1642,7 +1642,7 @@ static float eye_tan_y(uint32_t tag) {   /* the GE's y scale over x is 480:272 t
 static void compose_eyes(void) {
     const int S = g_eye_w / SCREEN_W, SY = g_eye_h / SCREEN_H, W = g_eye_w;
     for (int e = 0; e < 2; e++) {
-        if (!g_eye_rgba[e]) g_eye_rgba[e] = (uint32_t *)malloc((size_t)SCREEN_W * 4 * SCREEN_H * 8 * 4);
+        if (!g_eye_rgba[e]) g_eye_rgba[e] = (uint32_t *)malloc((size_t)SCREEN_W * 6 * SCREEN_H * 12 * 4);
         if (!g_eye_rgba[e]) return;
         for (int y = 0; y < SCREEN_H; y++)
             for (int x = 0; x < SCREEN_W; x++) {
@@ -1694,7 +1694,7 @@ static int  g_last_windowed = RES_DEFAULT;  /* where Alt+Enter returns from full
 
 static int g_res_saved = RES_DEFAULT;       /* what psp2i_display.ini holds */
 static int g_ren_saved = REN_D3D11;
-static int g_render_scale = 1;              /* render_scale=: internal resolution 1..4 (D3D11) */
+static int g_render_scale = 1;              /* render_scale=: internal resolution 1..6 (D3D11; 5, 6 for VR) */
 static int g_render_scale_arg;              /* --render-scale for one run; 0 = the saved one */
 static int g_vol_saved[VOL_N] = { VOL_STEPS, VOL_STEPS, VOL_STEPS };
 static int g_att_saved = ATT_DEFAULT;
@@ -1716,7 +1716,7 @@ static int display_load(void) {
     while (fgets(line, sizeof line, f)) {
         if (!strncmp(line, "resolution=", 11)) res = menu_res_parse(line + 11);
         else if (!strncmp(line, "renderer=", 9)) { const int r = menu_ren_parse(line + 9); if (r >= 0) g_ren_saved = r; }
-        else if (!strncmp(line, "render_scale=", 13)) { const int r = atoi(line + 13); g_render_scale = r < 1 ? 1 : r > 4 ? 4 : r; }
+        else if (!strncmp(line, "render_scale=", 13)) { const int r = atoi(line + 13); g_render_scale = r < 1 ? 1 : r > 6 ? 6 : r; }
         else if (!strncmp(line, "master_volume=", 14)) g_vol_saved[VOL_MASTER] = vol_parse(line + 14);
         else if (!strncmp(line, "music_volume=", 13))  g_vol_saved[VOL_MUSIC] = vol_parse(line + 13);
         else if (!strncmp(line, "sfx_volume=", 11))    g_vol_saved[VOL_SFX] = vol_parse(line + 11);
@@ -1818,7 +1818,8 @@ static void display_save(int res) {
     fprintf(f, "resolution=%s\n", menu_res_name(res));
     fprintf(f, "; renderer: d3d11 or opengl (used from the next start)\n");
     fprintf(f, "renderer=%s\n", menu_ren_key(g_ren_saved));
-    fprintf(f, "; internal resolution, Direct3D 11 only: 1 = the PSP's 480x272, 2..4 = that many times sharper (used from the next start)\n");
+    fprintf(f, "; internal resolution, Direct3D 11 only: 1 = the PSP's 480x272, 2..6 = that many times sharper (used from the next start;"
+               " 5 and 6 cost a lot, for VR: engine menu VR > RESOLUTION)\n");
     fprintf(f, "render_scale=%d\n", g_render_scale);
     fprintf(f, "; volumes 0..100 (%%); attenuation while other programs play sound: off, -6db, -12db, -20db\n");
     fprintf(f, "master_volume=%d\nmusic_volume=%d\nsfx_volume=%d\n",
@@ -1924,6 +1925,8 @@ static void menu_step(void) {
     g_menu.vr_first = g_vr_first;
     g_menu.vr_world_pct = (int)lroundf(VR_FP_SCALE_DEFAULT * 100.0f / (g_vr_first ? g_vr_fp_scale : g_vr_world_scale));
     g_menu.vr_hud_dm = (int)lroundf(g_vr_hud_dist * 10.0f);
+    g_menu.vr_res = g_render_scale;                     /* RESOLUTION: the saved render scale */
+    g_menu.vr_res_now = g_hi_s;
     g_menu.vr_sharpen = (int)lroundf(g_vr_sharpen * VR_SHARPEN_STEPS);
     g_menu.vr_filter = menu_vr_filter_of(g_vr_aniso);
     /* RESTART: sharpening needs a start in VR (its shader), mipmaps a start
@@ -2019,6 +2022,7 @@ static void menu_step(void) {
         g_vr_dist_dm = g_menu.vr_dist_dm;
         g_vr_width_dm = g_menu.vr_width_dm;
         g_vr_hud_dist = (float)g_menu.vr_hud_dm / 10.0f;
+        g_render_scale = g_menu.vr_res;                 /* from the next start */
         g_vr_sharpen = (float)g_menu.vr_sharpen / (float)VR_SHARPEN_STEPS;
         g_vr_aniso = menu_vr_filter_aniso(g_menu.vr_filter);
         if (g_renderer == REN_D3D11) d3d11_set_quality(g_vr_aniso, g_vr_sharpen);
@@ -2377,7 +2381,7 @@ static void on_vblank(void) {
             int w1, h1, w2, h2;
             const uint32_t *l = d3d11_present_eye(0, &w1, &h1), *r = d3d11_present_eye(1, &w2, &h2);
             g_eye_px[0] = g_eye_px[1] = NULL;
-            if (l && r && w1 == w2 && h1 == h2 && w1 % SCREEN_W == 0 && w1 <= SCREEN_W * 4) {
+            if (l && r && w1 == w2 && h1 == h2 && w1 % SCREEN_W == 0 && w1 <= SCREEN_W * 6) {
                 g_eye_px[0] = l; g_eye_px[1] = r; g_eye_w = w1; g_eye_h = h1;
                 g_eye_px_tag = d3d11_present_eye_tag();
                 g_eye_new = 1;
@@ -3490,7 +3494,7 @@ int main(int argc, char **argv) {
     }
     if (g_renderer == REN_D3D11) {
         int sc = g_render_scale_arg ? g_render_scale_arg : g_render_scale;
-        sc = sc < 1 ? 1 : sc > 4 ? 4 : sc;
+        sc = sc < 1 ? 1 : sc > 6 ? 6 : sc;                 /* 5 and 6: for VR (the eyes cover the headset's wide view) */
         d3d11_set_scale(sc);
 #ifdef PSP2I_VR
         /* VR head tracking: the eyes see vr_fov_scale times the game's view
@@ -3503,7 +3507,7 @@ int main(int argc, char **argv) {
             const float fx = g_vr_fov > 1.0f ? g_vr_fov : 1.0f, fy = g_vr_fov_y > 1.0f ? g_vr_fov_y : 1.0f;
             const float k = ((float)SCREEN_W / (float)SCREEN_H) * atanf(fy * ty) / atanf(fx * tx);
             int sy = (int)lroundf((float)sc * k);
-            sy = sy < sc ? sc : sy > 8 ? 8 : sy;
+            sy = sy < sc ? sc : sy > 12 ? 12 : sy;
             d3d11_set_scale_y(sy);
             g_hi_sy = sy;
         }

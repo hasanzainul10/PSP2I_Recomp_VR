@@ -29,7 +29,7 @@ enum { MENU_FRAME_RATE, MENU_FPS_COUNTER, MENU_SEGA_SERVER, MENU_ADHOC_SERVER, M
        MENU_FONT, MENU_CONTROLS, MENU_TESTS, MENU_VR, MENU_CLOSE,
        MENU_RS_ON, MENU_RS_SPEED, MENU_SWAP_OC, MENU_TOUCH_COLOR, MENU_TOUCH_ALPHA, MENU_CONTROLS_BACK,
        MENU_TEST_TICKS, MENU_TEST_LOGIC, MENU_TESTS_BACK,
-       MENU_VR_ON, MENU_VR_DISTANCE, MENU_VR_WIDTH, MENU_VR_HUD_DIST, MENU_VR_WORLD, MENU_VR_SHARPEN, MENU_VR_FILTER,
+       MENU_VR_ON, MENU_VR_DISTANCE, MENU_VR_WIDTH, MENU_VR_HUD_DIST, MENU_VR_WORLD, MENU_VR_RES, MENU_VR_SHARPEN, MENU_VR_FILTER,
        MENU_VR_RECENTER, MENU_VR_BACK, MENU_ITEMS };
 enum { MENU_PAGE_MAIN, MENU_PAGE_CONTROLS, MENU_PAGE_TESTS, MENU_PAGE_VR };
 int menu_page_of(int item);                      /* MENU_PAGE_* */
@@ -87,6 +87,10 @@ int  menu_ren_parse(const char *s);                  /* "d3d11" / "opengl" / "gl
 /* VR image quality: sharpening of the headset's pictures in tenths (0 off ..
  * 10), and texture filtering: VR_FILTER_* (off, then 2x .. 16x anisotropic). */
 #define VR_SHARPEN_STEPS 10
+/* VR resolution: the render scale (render_scale=, 1..6: GPU pixels per PSP
+ * pixel across; the eye pictures are 480 times it wide), from the next start. */
+#define VR_RES_MIN 1
+#define VR_RES_MAX 6
 enum { VR_FILTER_OFF, VR_FILTER_2X, VR_FILTER_4X, VR_FILTER_8X, VR_FILTER_16X, VR_FILTERS };
 int  menu_vr_filter_aniso(int f);                    /* VR_FILTER_* -> 0, 2, 4, 8, 16 */
 int  menu_vr_filter_of(int aniso);                   /* 0..16 -> the nearest VR_FILTER_* */
@@ -111,8 +115,8 @@ enum {
     MFX_TOUCH       = 1 << 14,  /* touch_color or touch_alpha changed */
     MFX_RS_ON       = 1 << 15,  /* rs_on changed: the right stick turns the camera, or nothing */
     MFX_TESTS       = 1 << 16,  /* test_ticks or test_logic changed (framerate_set_tests) */
-    MFX_VR          = 1 << 17,  /* vr_on, vr_dist_dm, vr_width_dm, vr_hud_dm, vr_world_pct, vr_sharpen or vr_filter
-                                   changed: apply and save */
+    MFX_VR          = 1 << 17,  /* vr_on, vr_dist_dm, vr_width_dm, vr_hud_dm, vr_world_pct, vr_res, vr_sharpen or
+                                   vr_filter changed: apply and save */
     MFX_VR_RECENTER = 1 << 18,  /* VR > RECENTER: the screen in front of the head again */
 };
 
@@ -148,6 +152,8 @@ typedef struct {
     int      vr_hud_dm;    /* the HUD panel's distance, VR_HUD_MIN_DM..VR_HUD_MAX_DM */
     int      vr_world_pct; /* the world's size, VR_WORLD_MIN_PCT..VR_WORLD_MAX_PCT; set by the caller for its view */
     int      vr_first;     /* the view vr_world_pct is for: first person (shown); set by the caller */
+    int      vr_res;       /* the render scale chosen, VR_RES_MIN..VR_RES_MAX */
+    int      vr_res_now;   /* the render scale running (set by the caller): RESTART shows when they differ */
     int      vr_sharpen;   /* 0..VR_SHARPEN_STEPS, tenths */
     int      vr_filter;    /* VR_FILTER_* */
     int      vr_quality_restart; /* VR_RESTART_*: the item shows RESTART (set by the caller: needs a new start) */

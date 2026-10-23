@@ -867,6 +867,15 @@ static void test_vr_page(void) {
     for (int i = 0; i < 40; i++) { menu_update(&m, MI_RIGHT, 0); menu_update(&m, 0, 0); }
     CHECK(m.vr_world_pct == VR_WORLD_MAX_PCT);
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_VR_RES && m.vr_res == 3 && m.vr_res_now == 3);   /* the render scale */
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_VR && m.vr_res == 4);
+    menu_update(&m, 0, 0);
+    for (int i = 0; i < 5; i++) { menu_update(&m, MI_RIGHT, 0); menu_update(&m, 0, 0); }
+    CHECK(m.vr_res == VR_RES_MAX);                               /* stops at 6 */
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_VR && m.vr_res == VR_RES_MIN);   /* Confirm wraps */
+    menu_update(&m, 0, 0);
+    m.vr_res = 3;
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_VR_SHARPEN && m.vr_sharpen == 5);         /* sharpening in tenths */
     CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_VR && m.vr_sharpen == 6);
     menu_update(&m, 0, 0);

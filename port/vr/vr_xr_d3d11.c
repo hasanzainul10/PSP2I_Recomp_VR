@@ -84,8 +84,8 @@ static float     g_tan_fov_y;               /* ... and vertical; 0 = from the pi
 static SRWLOCK  g_frame_lock = SRWLOCK_INIT;
 /* The latest picture (0xAARRGGBB): 480x272, or k times that when the game
  * renders at a higher internal resolution (up to 4x). */
-static uint32_t g_frame[GAME_W * 4 * GAME_H * 8];      /* up to 8 rows per game row (vr_config.scale_y) */
-static uint32_t g_frame_r[GAME_W * 4 * GAME_H * 8];   /* the right eye's (vr_submit_stereo) */
+static uint32_t g_frame[GAME_W * 6 * GAME_H * 12];     /* up to 6 x 12 per game pixel (vr_config.scale, scale_y) */
+static uint32_t g_frame_r[GAME_W * 6 * GAME_H * 12];  /* the right eye's (vr_submit_stereo) */
 static int      g_frame_w = GAME_W, g_frame_h = GAME_H;
 static int      g_frame_stereo;             /* g_frame is the left eye and g_frame_r the right */
 static LONG     g_frame_seq;                /* bumped per vr_submit_frame / vr_submit_stereo(_shared) */
@@ -589,9 +589,9 @@ static int session_create(void) {
     int scale = g_cfg.scale, scale_y = g_cfg.scale_y;
     ReleaseSRWLockShared(&g_cfg_lock);
     if (scale < 1) scale = 1;
-    if (scale > 4) scale = 4;
+    if (scale > 6) scale = 6;
     if (scale_y < scale) scale_y = scale;
-    if (scale_y > 8) scale_y = 8;
+    if (scale_y > 12) scale_y = 12;
     if (swapchain_create(scale, scale_y) != 0) return -1;
     if (actions_create() != 0) return -1;
     XrSessionActionSetsAttachInfo at = { XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO };
@@ -1245,7 +1245,7 @@ void vr_configure(const vr_config *cfg) {
 void vr_recenter(void) { InterlockedExchange(&g_recenter, 1); }
 
 void vr_submit_frame(const uint32_t *argb, int w, int h) {
-    if (!g_thread || w < GAME_W || w % GAME_W || h * GAME_W != w * GAME_H || w > GAME_W * 4) return;
+    if (!g_thread || w < GAME_W || w % GAME_W || h * GAME_W != w * GAME_H || w > GAME_W * 6) return;
     AcquireSRWLockExclusive(&g_frame_lock);
     memcpy(g_frame, argb, (size_t)w * h * 4);
     g_frame_w = w; g_frame_h = h;
@@ -1258,7 +1258,7 @@ void vr_submit_frame(const uint32_t *argb, int w, int h) {
 
 void vr_submit_stereo(const uint32_t *left, const uint32_t *right, int w, int h, float tan_half_fov_x,
                       float tan_half_fov_y, uint32_t head) {
-    if (!g_thread || w < GAME_W || w % GAME_W || w > GAME_W * 4 || h < GAME_H || h % GAME_H || h > GAME_H * 8) return;
+    if (!g_thread || w < GAME_W || w % GAME_W || w > GAME_W * 6 || h < GAME_H || h % GAME_H || h > GAME_H * 12) return;
     AcquireSRWLockExclusive(&g_frame_lock);
     memcpy(g_frame, left, (size_t)w * h * 4);
     memcpy(g_frame_r, right, (size_t)w * h * 4);
