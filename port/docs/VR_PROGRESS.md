@@ -311,6 +311,17 @@ the world; the user found it overwhelming. Those were removed. Now:
 - **Open:** hiding the player's own head (bone weights, or an eye-forward
   offset), body-relative movement (today the stick moves relative to the
   game camera, which trails behind), the cull behind the game camera.
+- **Walk where you look (2026-10-23, user: "feels right").** In first person
+  the view has its own heading (`g_fp_yaw`): it follows the game camera
+  only while the right stick turns it, after a jump of over 0.5 rad (a cut
+  or camera reset), at recenter and when first person starts, so the game
+  camera trailing round no longer swings the view. The left stick is turned
+  by (that heading + the head's yaw - the game camera's, from its eye and
+  target +0xFC / +0x108) in `ctrl_commit`, re-sent each poll while held.
+  Log `vr: fp walk` (dev builds, every 2 s): in `vr_walk1.log` the walk
+  went where the head pointed within ~10 degrees in all 14 samples (head
+  -121 to +48 degrees); the game moves relative to its camera's eye-target
+  heading. Only the stick changes (online-safe).
 
 **Next (in order):**
 1. **Try the controller capture in the headset:** left grip + left stick

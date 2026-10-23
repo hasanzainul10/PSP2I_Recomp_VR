@@ -98,6 +98,9 @@ swaps them for VR controllers too.
 | Left grip + left stick click | VR capture, like F11 (dev builds only) |
 | Right stick click | Engine menu |
 
+In first person the left stick walks where your head looks, and the right
+stick turns the view; recenter makes the game camera's direction ahead again.
+
 Index: left A / B are Square / Triangle; Start is a firm squeeze of the left
 trackpad. Vive wands have no face buttons: the trackpads are the sticks, and the
 right trackpad click is Cross. Pico 4 uses the Touch layout.

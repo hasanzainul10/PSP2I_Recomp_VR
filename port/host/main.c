@@ -997,6 +997,18 @@ static float g_fp_head_off[3];               /* the head's centre across from th
 static int   g_fp_head_ok;
 static int   g_fp_cam;                       /* the last field camera was applied at the head */
 static float g_fp_cam_hr[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };   /* ... turned as the head was then (level frame) */
+/* First person's own heading (the angle of the view's level backward axis,
+ * atan2(x, z) in the world), so the view doesn't swing when the game camera
+ * trails round behind the player: it turns with the game camera only while
+ * the right stick turns it, and takes the game's again after a cut or reset
+ * (a jump of over FP_YAW_CUT radians), at recenter and when first person
+ * starts. g_fp_game_yaw is the game camera's own (eye - target). The left
+ * stick is turned by (this heading + the head's yaw - the game's), so it
+ * walks where the head looks (ctrl_commit). */
+#define FP_YAW_CUT 0.5f
+static float g_fp_yaw, g_fp_game_yaw;
+static int   g_fp_yaw_ok;
+static int   g_fp_stick_on, g_fp_stick_in[2], g_fp_stick_out[2];   /* the last turned stick (the dev walk log) */
 /* ... and its projection that much wider across / up (1 = the game's): the
  * eyes' view plus VR_FP_VIEW_MARGIN, so the game culls nothing the eyes see,
  * even as they turn before the next frame (user: "when I look up the bottom
@@ -1367,17 +1379,26 @@ static void hook_apply_camera(void (*original)(void)) {
     }
 #endif
     const int field = px > 1.15f && px < 2.5f;      /* other cameras (3 applies a frame) leave g_fp_cam alone */
-    if (!g_head_on || !g_vr_first) g_fp_cam = 0;
+    if (!g_head_on || !g_vr_first) g_fp_cam = g_fp_yaw_ok = 0;
     if (!field) { original(); return; }
     g_fp_cam = 0;
     if (g_head_on && g_vr_first && pl) {
-        float v[16];
-        for (int i = 0; i < 16; i++) v[i] = psp_read_f32(cam + 0x10u + 4u * (uint32_t)i);
-        /* The camera's backward axis (view z) in the world, level. */
-        float z[3] = { v[2], 0.0f, v[10] };
-        const float zl = sqrtf(z[0] * z[0] + z[2] * z[2]);
-        if (zl > 1e-3f) {
-            z[0] /= zl; z[2] /= zl;
+        /* The game camera's backward axis, level, from its eye and target
+         * (+0xFC, +0x108: the game's own, never written here). */
+        float bz[3];
+        for (int i = 0; i < 3; i++) bz[i] = psp_read_f32(cam + 0xFCu + 4u * (uint32_t)i) - psp_read_f32(cam + 0x108u + 4u * (uint32_t)i);
+        if (bz[0] * bz[0] + bz[2] * bz[2] > 1e-6f) {
+            const float gy = atan2f(bz[0], bz[2]);
+            float dg = gy - g_fp_game_yaw;
+            dg -= 6.2831853f * floorf((dg + 3.1415927f) / 6.2831853f);
+            if (!g_fp_yaw_ok || fabsf(dg) > FP_YAW_CUT) g_fp_yaw = gy;   /* a start, cut or camera reset */
+            else if (camera_x() != 0.0f) g_fp_yaw += dg;                  /* the right stick turning */
+            g_fp_game_yaw = gy;
+            g_fp_yaw_ok = 1;
+        }
+        /* The view's backward axis in the world, level: first person's heading. */
+        float z[3] = { sinf(g_fp_yaw), 0.0f, cosf(g_fp_yaw) };
+        if (g_fp_yaw_ok) {
             const float lx[3] = { z[2], 0.0f, -z[0] }, ly[3] = { 0.0f, 1.0f, 0.0f }, lz[3] = { z[0], 0.0f, z[2] };   /* x = up cross z */
             /* Turned as the head is (yaw, pitch, roll on the level heading),
              * so what the eyes look at is in front of the game camera: in
@@ -1408,6 +1429,21 @@ static void hook_apply_camera(void (*original)(void)) {
             }
             g_fp_cam = 1;
             if (n_fp_cam++ == 0) fprintf(stderr, "vr: first person: the game camera at the player's head\n");
+#ifndef PSP2I_PROD
+            {   /* Every 2 s while walking: the headings (degrees, backward axis) and
+                 * where the player went, to check the walk follows the head:
+                 * moved = view + head when the stick is pushed straight ahead. */
+                static float lp[3];
+                static uint64_t n_walk;
+                const float mx = h[0] - lp[0], mz = h[2] - lp[2];
+                if (g_fp_stick_on && mx * mx + mz * mz > 1e-4f && n_walk++ % 60 == 0)
+                    fprintf(stderr, "vr: fp walk: game %.0f view %.0f head %+.0f moved %.0f; stick %d,%d -> %d,%d\n",
+                            (double)(g_fp_game_yaw * 57.29578f), (double)(g_fp_yaw * 57.29578f),
+                            (double)(atan2f(hr[6], hr[8]) * 57.29578f), (double)(atan2f(-mx, -mz) * 57.29578f),
+                            g_fp_stick_in[0] - 128, g_fp_stick_in[1] - 128, g_fp_stick_out[0] - 128, g_fp_stick_out[1] - 128);
+                memcpy(lp, h, sizeof lp);
+            }
+#endif
         }
     }
     original();
@@ -1677,6 +1713,29 @@ static void ctrl_commit(void) {
     }
     bits = menu_filter_game(&g_menu, bits & ~PRESS_MENU);
     if (g_menu.open) ax = ay = 128;
+#ifdef PSP2I_VR
+    /* First person: the stick walks where the head looks. The game moves
+     * relative to its camera (g_fp_game_yaw); the head looks along first
+     * person's heading plus its own yaw, so the stick is turned by the
+     * difference. Only the stick changes (what this player presses). */
+    g_fp_stick_on = 0;
+    vr_head hd;
+    if (g_head_on && g_vr_first && g_fp_cam && g_fp_yaw_ok && !g_rep_on && (ax != 128 || ay != 128) &&
+        g_vr_live && vr_head_get(&hd)) {
+        float hr[9];
+        quat_mat3(hd.q, hr);
+        const float d = g_fp_yaw + atan2f(hr[6], hr[8]) - g_fp_game_yaw, cd = cosf(d), sd = sinf(d);
+        const float sx = (float)ax - 128.0f, sf = 128.0f - (float)ay;      /* right, ahead */
+        float rx = sx * cd - sf * sd, rf = sx * sd + sf * cd;
+        const float big = fmaxf(fabsf(rx), fabsf(rf));
+        if (big > 127.0f) { rx *= 127.0f / big; rf *= 127.0f / big; }    /* the same direction, inside the pad's square */
+        g_fp_stick_in[0] = ax; g_fp_stick_in[1] = ay;
+        ax = (uint8_t)lroundf(128.0f + rx);
+        ay = (uint8_t)lroundf(128.0f - rf);
+        g_fp_stick_out[0] = ax; g_fp_stick_out[1] = ay;
+        g_fp_stick_on = 1;
+    }
+#endif
     if (!g_rep_on) rec_pad(bits, ax, ay);
     psp_ctrl_set(bits, ax, ay);
 }
@@ -2036,7 +2095,7 @@ static void menu_step(void) {
                 g_vr_on ? "on" : "off", g_vr_dist_dm / 10, g_vr_dist_dm % 10, g_vr_width_dm / 10, g_vr_width_dm % 10,
                 (double)g_vr_hud_dist, g_menu.vr_world_pct, g_vr_first ? "first" : "third");
     }
-    if (fx & MFX_VR_RECENTER) vr_recenter();
+    if (fx & MFX_VR_RECENTER) { vr_recenter(); g_fp_yaw_ok = 0; }   /* first person faces the game camera's way again */
 #endif
     if (fx & MFX_FONT) {
         g_menu.font = font_win_select(g_menu.font);
@@ -2127,13 +2186,14 @@ static void poll_controllers(void) {
             } else if (!held_done) {
                 fprintf(stderr, "vr: gamepad L3: recenter\n");
                 vr_recenter();
+                g_fp_yaw_ok = 0;
                 last_tap = now;
             }
             down = 0;
         }
     }
 #endif
-    if (b != g_pad_bits || ax != g_pad_ax || ay != g_pad_ay) {
+    if (b != g_pad_bits || ax != g_pad_ax || ay != g_pad_ay || g_fp_stick_on) {   /* first person's turned stick follows the head */
         g_pad_bits = b; g_pad_ax = ax; g_pad_ay = ay;
         ctrl_commit();
     }
