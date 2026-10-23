@@ -1858,6 +1858,73 @@ static inline uint32_t present_px(uint32_t c, int f, const uint32_t (*L)[256]) {
     return L[0][c & 0xFF] | L[1][(c >> 8) & 0xFF] | L[2][(c >> 16) & 0xFF];
 }
 
+/* While the eyes are drawn the window only needs the 480x272 picture, and
+ * the copy for it was the whole S x SY target (at 6x, 2880x2448: ~5 ms a
+ * frame to bring back). This pass picks the same pixels the CPU picked (the
+ * one nearest each PSP pixel's centre) into a w x h target on the GPU, and
+ * only that is copied back. VR off, and frames without eyes, copy as before. */
+static const char *PICK_SRC =
+"cbuffer K : register(b4) { int4 kp; };\n"     /* x: S, y: SY */
+"Texture2D<float4> T : register(t3);\n"
+"float4 vsk(uint id : SV_VertexID) : SV_Position {\n"
+"  float2 p = float2((id << 1) & 2, id & 2);\n"
+"  return float4(p * float2(2, -2) + float2(-1, 1), 0, 1);\n"
+"}\n"
+"float4 psk(float4 pos : SV_Position) : SV_Target {\n"
+"  int2 c = int2(pos.xy);\n"
+"  return T.Load(int3(c.x * kp.x + kp.x / 2, c.y * kp.y + kp.y / 2, 0));\n"
+"}\n";
+static ID3D11VertexShader     *g_kvs;
+static ID3D11PixelShader      *g_kps;
+static ID3D11Buffer           *g_kcb;
+static ID3D11Texture2D        *g_pick_tex;
+static ID3D11RenderTargetView *g_pick_rtv;
+static UINT                    g_pick_w, g_pick_h;
+
+/* t's picture as w x h PSP pixels into g_pick_tex; 0 if it can't. */
+static int pick_small(rt_entry *t, UINT w, UINT h) {
+    if (!g_kvs || !g_kps || !g_kcb || !t->srv) return 0;
+    if (!g_pick_tex || g_pick_w != w || g_pick_h != h) {
+        if (g_pick_rtv) ID3D11RenderTargetView_Release(g_pick_rtv);
+        if (g_pick_tex) ID3D11Texture2D_Release(g_pick_tex);
+        g_pick_rtv = NULL; g_pick_tex = NULL;
+        D3D11_TEXTURE2D_DESC d;
+        memset(&d, 0, sizeof d);
+        d.Width = w; d.Height = h; d.MipLevels = 1; d.ArraySize = 1;
+        d.Format = DXGI_FORMAT_R8G8B8A8_UNORM; d.SampleDesc.Count = 1;
+        d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_RENDER_TARGET;
+        if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &d, NULL, &g_pick_tex)) ||
+            FAILED(ID3D11Device_CreateRenderTargetView(g_dev, (ID3D11Resource *)g_pick_tex, NULL, &g_pick_rtv))) return 0;
+        g_pick_w = w; g_pick_h = h;
+    }
+    const int32_t k[4] = { g_scale, g_scale_y, 0, 0 };
+    ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)g_kcb, 0, NULL, k, 0, 0);
+    ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &g_pick_rtv, NULL);
+    D3D11_VIEWPORT vp = { 0, 0, (float)w, (float)h, 0, 1 };
+    ID3D11DeviceContext_RSSetViewports(g_ctx, 1, &vp);
+    D3D11_RECT sc = { 0, 0, (LONG)w, (LONG)h };
+    ID3D11DeviceContext_RSSetScissorRects(g_ctx, 1, &sc);
+    ID3D11DeviceContext_RSSetState(g_ctx, g_rs);
+    ID3D11DeviceContext_OMSetBlendState(g_ctx, NULL, NULL, 0xFFFFFFFFu);
+    ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, NULL, 0);
+    ID3D11DeviceContext_IASetInputLayout(g_ctx, NULL);
+    ID3D11DeviceContext_IASetPrimitiveTopology(g_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_VSSetShader(g_ctx, g_kvs, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(g_ctx, g_kps, NULL, 0);
+    ID3D11DeviceContext_PSSetConstantBuffers(g_ctx, 4, 1, &g_kcb);
+    ID3D11DeviceContext_PSSetShaderResources(g_ctx, 3, 1, &t->srv);
+    ID3D11DeviceContext_Draw(g_ctx, 3, 0);
+    ID3D11ShaderResourceView *none = NULL;
+    ID3D11DeviceContext_PSSetShaderResources(g_ctx, 3, 1, &none);
+    ID3D11RenderTargetView *no_rt = NULL;
+    ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &no_rt, NULL);
+    return 1;
+}
+
+static ID3D11Texture2D *g_present_small[PRESENT_RING];   /* w x h staging copies of g_pick_tex */
+static int g_present_is_small[PRESENT_RING];
+static uint64_t n_present_small;
+
 static int present_body(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w, int h);
 int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w, int h) {
     const uint64_t t0 = qpc_now();
@@ -1899,10 +1966,25 @@ static int present_body(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, 
             g_present_w[k] = t->w;
         }
         D3D11_BOX box = { 0, 0, 0, (UINT)(w * g_scale), (UINT)(h * g_scale_y), 1 };
-        ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)g_present[k], 0, 0, 0, 0,
-                                                  (ID3D11Resource *)t->tex, 0, &box);
         /* Stereo: the eye copies too, when this frame was drawn for the eyes. */
         g_present_eyes[k] = eye_picture(t, 0) && eye_picture(t, 1) && t->eye_frame + 2 >= frame_no();
+        g_present_is_small[k] = 0;
+        if (g_present_eyes[k] && (g_scale > 1 || g_scale_y > 1) && pick_small(t, (UINT)w, (UINT)h)) {
+            if (!g_present_small[k]) {
+                D3D11_TEXTURE2D_DESC d;
+                ID3D11Texture2D_GetDesc(g_pick_tex, &d);
+                d.Usage = D3D11_USAGE_STAGING; d.BindFlags = 0; d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &d, NULL, &g_present_small[k]))) g_present_small[k] = NULL;
+            }
+            if (g_present_small[k]) {
+                ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)g_present_small[k], (ID3D11Resource *)g_pick_tex);
+                g_present_is_small[k] = 1;
+                n_present_small++;
+            }
+        }
+        if (!g_present_is_small[k])
+            ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)g_present[k], 0, 0, 0, 0,
+                                                      (ID3D11Resource *)t->tex, 0, &box);
         g_present_stereo[k] = g_present_eyes[k];
         g_present_tag[k] = t->eye_tag;
         if (g_present_eyes[k] && g_share_on && share_eyes(t, (UINT)(w * g_scale), (UINT)(h * g_scale_y)) &&
@@ -1940,7 +2022,8 @@ static int present_body(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, 
         /* PSP2I_PRESENT_VERIFY: wait for the newest copy (for comparing with VRAM). */
         static int verify = -1;
         if (verify < 0) verify = getenv("PSP2I_PRESENT_VERIFY") != NULL;
-        HRESULT hr = ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_present[best], 0, D3D11_MAP_READ,
+        ID3D11Texture2D *const src_tex = g_present_is_small[best] ? g_present_small[best] : g_present[best];
+        HRESULT hr = ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)src_tex, 0, D3D11_MAP_READ,
                                              verify ? 0 : D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
         if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
             /* Not done: try the next older one (it was queued earlier). */
@@ -1971,6 +2054,13 @@ static int present_body(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, 
         }
         const uint32_t (*L)[256] = lut[f & 3];
         const int S = g_scale, c0 = S / 2, SY = g_scale_y;
+        if (g_present_is_small[best]) {                 /* already picked on the GPU */
+            for (int y = 0; y < h; y++) {
+                const uint32_t *src = (const uint32_t *)((const uint8_t *)m.pData + (size_t)y * m.RowPitch);
+                uint32_t *dst = out + (size_t)y * (size_t)w;
+                for (int x = 0; x < w; x++) dst[x] = present_px(src[x], f, L);
+            }
+        } else
         for (int y = 0; y < h; y++) {                   /* PSP pixels: the sample nearest each centre */
             const uint32_t *src = (const uint32_t *)((const uint8_t *)m.pData + (size_t)(y * SY + SY / 2) * m.RowPitch);
             uint32_t *dst = out + (size_t)y * (size_t)w;
@@ -1988,7 +2078,7 @@ static int present_body(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, 
             }
             g_hires_fresh = 1;
         }
-        ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_present[best], 0);
+        ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)src_tex, 0);
         if (g_present_eyes[best]) {                       /* copied just after: done or nearly */
             const int W = w * S, H = h * SY;              /* the eyes keep their SY rows */
             int ok = 1;
@@ -2059,6 +2149,17 @@ int d3d11_init(void) {
             sb.ByteWidth = 16; sb.Usage = D3D11_USAGE_DEFAULT; sb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
             ID3D11Device_CreateBuffer(g_dev, &sb, NULL, &g_scb);
             if (!g_svs || !g_sps || !g_scb) { fprintf(stderr, "d3d11: no sharpening (shader)\n"); g_sharpen = 0; }
+        }
+        {
+            ID3DBlob *kv = compile_src(PICK_SRC, "vsk", "vs_4_0"), *kpb = compile_src(PICK_SRC, "psk", "ps_4_0");
+            if (kv) ID3D11Device_CreateVertexShader(g_dev, ID3D10Blob_GetBufferPointer(kv), ID3D10Blob_GetBufferSize(kv), NULL, &g_kvs);
+            if (kpb) ID3D11Device_CreatePixelShader(g_dev, ID3D10Blob_GetBufferPointer(kpb), ID3D10Blob_GetBufferSize(kpb), NULL, &g_kps);
+            if (kv) ID3D10Blob_Release(kv);
+            if (kpb) ID3D10Blob_Release(kpb);
+            D3D11_BUFFER_DESC kb;
+            memset(&kb, 0, sizeof kb);
+            kb.ByteWidth = 16; kb.Usage = D3D11_USAGE_DEFAULT; kb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            ID3D11Device_CreateBuffer(g_dev, &kb, NULL, &g_kcb);
         }
         ID3DBlob *xv = compile_src(XFER_SRC, "vsx", "vs_4_0"), *xp = compile_src(XFER_SRC, "psx", "ps_4_0");
         if (xv) ID3D11Device_CreateVertexShader(g_dev, ID3D10Blob_GetBufferPointer(xv), ID3D10Blob_GetBufferSize(xv), NULL, &g_xvs);
@@ -2134,6 +2235,8 @@ void d3d11_report(FILE *out) {
         fprintf(out, "  d3d11 stereo        %llu eye draws, %llu frames read back for both eyes, %llu shared on the GPU (%llu skipped: busy)\n",
                 (unsigned long long)n_eye_draws, (unsigned long long)n_present_eyes,
                 (unsigned long long)n_share, (unsigned long long)n_share_busy);
+    if (n_present_small) fprintf(out, "  d3d11 present       %llu of them picked to the PSP's size on the GPU first (stereo)\n",
+                                 (unsigned long long)n_present_small);
     fprintf(out, "  d3d11 present       %llu frames from asynchronous copies, %llu from VRAM, %llu vblanks kept the last picture\n",
             (unsigned long long)n_present_async, (unsigned long long)n_present_vram, (unsigned long long)n_present_kept);
 }
