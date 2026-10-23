@@ -1009,6 +1009,10 @@ static float g_fp_cam_hr[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };   /* ... turned as 
 static float g_fp_yaw, g_fp_game_yaw;
 static int   g_fp_yaw_ok;
 static int   g_fp_stick_on, g_fp_stick_in[2], g_fp_stick_out[2];   /* the last turned stick (the dev walk log) */
+/* vr_fp_nudge=: in first person, an attack (Square, Triangle) pressed while
+ * the character faces more than FP_NUDGE_MIN away from where the head looks
+ * is held back while the stick turns it to the head first (fp_nudge). */
+static int   g_vr_fp_nudge = 1;
 /* ... and its projection that much wider across / up (1 = the game's): the
  * eyes' view plus VR_FP_VIEW_MARGIN, so the game culls nothing the eyes see,
  * even as they turn before the next frame (user: "when I look up the bottom
@@ -1361,6 +1365,52 @@ static int      g_apply_log_n, g_apply_log_print, g_node_seen;
 static uint64_t g_apply_log_flip;
 #endif
 
+#ifndef PSP2I_PROD
+/* Dev: PSP2I_PL_TRACE=FILE writes, once per game frame with the field
+ * camera, the pad as sent, the headings and 4 KB of the local player object
+ * plus 512 bytes of the camera object, for offline searches (the player's
+ * facing, attack and lock-on state: compare frames, don't guess). */
+static uint32_t g_sent_bits;
+static uint8_t  g_sent_ax = 128, g_sent_ay = 128;
+#define PL_TRACE_PL  0x1000u
+#define PL_TRACE_CAM 0x200u
+static void pl_trace(uint32_t cam, uint32_t pl) {
+    static FILE *f;
+    static int tried;
+    static uint64_t last_flip, bytes;
+    if (!tried) {
+        tried = 1;
+        const char *p = getenv("PSP2I_PL_TRACE");
+        if (p && *p && (f = fopen(p, "wb")) != NULL) fprintf(stderr, "vr: player trace to %s\n", p);
+    }
+    const uint64_t fl = psp_display_flips();
+    if (!f || !pl || fl == last_flip || bytes > (200u << 20)) return;
+    last_flip = fl;
+    struct {
+        uint32_t magic, flip, pl, cam, bits;
+        uint8_t ax, ay, in_ax, in_ay;
+        uint32_t first, fp_cam;
+        float fp_yaw, game_yaw, head_yaw;
+    } r;
+    memset(&r, 0, sizeof r);
+    r.magic = 0x52544C50u; r.flip = (uint32_t)fl; r.pl = pl; r.cam = cam; r.bits = g_sent_bits;
+    r.ax = g_sent_ax; r.ay = g_sent_ay; r.in_ax = g_pad_ax; r.in_ay = g_pad_ay;
+    r.first = (uint32_t)g_vr_first; r.fp_cam = (uint32_t)g_fp_cam;
+    r.fp_yaw = g_fp_yaw; r.game_yaw = g_fp_game_yaw;
+#ifdef PSP2I_VR
+    vr_head hd;
+    if (g_vr_live && vr_head_get(&hd)) { float hr[9]; quat_mat3(hd.q, hr); r.head_yaw = atan2f(hr[6], hr[8]); }
+#endif
+    const void *pp = psp_mem_ptr(pl, PL_TRACE_PL), *cp = psp_mem_ptr(cam, PL_TRACE_CAM);
+    if (!pp || !cp) return;
+    fwrite(&r, sizeof r, 1, f);
+    fwrite(pp, PL_TRACE_PL, 1, f);
+    fwrite(cp, PL_TRACE_CAM, 1, f);
+    bytes += sizeof r + PL_TRACE_PL + PL_TRACE_CAM;
+    if (fl % 300 == 0) fflush(f);
+}
+#endif
+
 static void hook_apply_camera(void (*original)(void)) {
     const uint32_t cam = psp_cpu.r[4], pl = gamelog_local_player();
     const float px = cam ? psp_read_f32(cam + 0x90u) : 0.0f;
@@ -1381,6 +1431,9 @@ static void hook_apply_camera(void (*original)(void)) {
     const int field = px > 1.15f && px < 2.5f;      /* other cameras (3 applies a frame) leave g_fp_cam alone */
     if (!g_head_on || !g_vr_first) g_fp_cam = g_fp_yaw_ok = 0;
     if (!field) { original(); return; }
+#ifndef PSP2I_PROD
+    pl_trace(cam, pl);
+#endif
     g_fp_cam = 0;
     if (g_head_on && g_vr_first && pl) {
         /* The game camera's backward axis, level, from its eye and target
@@ -1694,6 +1747,108 @@ static void compose_eyes(void) {
 }
 #endif
 
+#ifdef PSP2I_VR
+/* First person: the attack nudge (VR_PLAN F1). After walking left, right or
+ * back the character faces where it walked, and an attack goes that way, not
+ * where the head looks. From a player trace (2026-10-23, ADDRESS_MAP): the
+ * facing is player +0x70's rotation (its forward row x, z at +0x90, +0x98);
+ * the stick turns it 20 degrees a game frame, from 1-3 frames after the push,
+ * and letting the stick go mid-turn snaps it to the stick's heading a frame
+ * later; a stick pushed during an attack's start doesn't turn it. So the
+ * attack is held back: the stick points ahead (the walk turn below aims it at
+ * the head) until it turns that way, is let go for FP_NUDGE_GAP frames, then
+ * the attack is pressed. Not while R is held or its lock-on (player +0x214)
+ * is set: the lock-on picks the target. Only what this player presses. */
+#define FP_NUDGE_BUTTONS 0x9000u    /* Square, Triangle */
+#define FP_NUDGE_MIN     0.5236f    /* 30 degrees between the facing and the view */
+#define FP_NUDGE_HOLD    6          /* game frames of stick at most */
+#define FP_NUDGE_GAP     2          /* game frames of centred stick: the snap */
+#define FP_NUDGE_PRESS   2          /* game frames the attack is pressed at least */
+#define FP_NUDGE_COMBO   30         /* game frames after an attack: no nudge (combos, Just Attacks keep their timing) */
+enum { NUDGE_OFF, NUDGE_TURN, NUDGE_GAP, NUDGE_PRESS };
+static int      g_nudge;
+static uint32_t g_nudge_btn, g_nudge_prev;
+static uint64_t g_nudge_flip, g_nudge_flip0, g_nudge_turned, g_attack_flip;
+static float    g_nudge_err0;
+
+static float wrap_pi(float a) { return a - 6.2831853f * floorf((a + 3.1415927f) / 6.2831853f); }
+
+/* The local player's facing, atan2(x, z) of its forward axis. */
+static int fp_face(uint32_t pl, float *a) {
+    const float x = psp_read_f32(pl + 0x90u), z = psp_read_f32(pl + 0x98u);
+    if (!(x * x + z * z > 0.25f)) return 0;      /* not a rotation (or NaN) */
+    *a = atan2f(x, z);
+    return 1;
+}
+
+static void fp_nudge(uint32_t *bits, uint8_t *ax, uint8_t *ay) {
+    const uint32_t raw = *bits, down = raw & ~g_nudge_prev & FP_NUDGE_BUTTONS;
+    g_nudge_prev = raw;
+    const uint32_t pl = gamelog_local_player();
+    vr_head hd;
+    if (!g_vr_fp_nudge || !g_head_on || !g_vr_first || !g_fp_cam || !g_fp_yaw_ok || g_rep_on || g_menu.open || !pl ||
+        !g_vr_live || !vr_head_get(&hd)) {
+        if (g_nudge && g_nudge < NUDGE_PRESS) *bits |= g_nudge_btn;   /* the held-back attack still goes */
+        g_nudge = NUDGE_OFF;
+        return;
+    }
+    float hr[9], face;
+    quat_mat3(hd.q, hr);
+    const float look = g_fp_yaw + atan2f(hr[6], hr[8]) + 3.1415927f;   /* g_fp_yaw is the backward axis */
+    const int have = fp_face(pl, &face);
+    const float err = have ? wrap_pi(look - face) : 0.0f;
+    const uint64_t fl = psp_display_flips(), last = g_attack_flip;
+    if (down) g_attack_flip = fl;
+    switch (g_nudge) {
+    case NUDGE_OFF:
+        if (!down || !have || fabsf(err) <= FP_NUDGE_MIN || (last && fl - last < FP_NUDGE_COMBO)) return;
+        if ((raw & 0x0200u) || psp_read32(pl + 0x214u) != 0) {
+#ifndef PSP2I_PROD
+            fprintf(stderr, "vr: fp nudge: none, locked on (facing %+.0f from the view)\n", (double)(err * 57.29578f));
+#endif
+            return;
+        }
+        g_nudge = NUDGE_TURN;
+        g_nudge_btn = down;
+        g_nudge_flip = g_nudge_flip0 = fl;
+        g_nudge_err0 = err;
+        /* fall through */
+    case NUDGE_TURN:
+        *bits &= ~g_nudge_btn;
+        /* At least 2 frames of this stick (the game takes the heading 1-3
+         * frames after the push) and the facing nearer the view: a facing
+         * still turning from the player's own stick doesn't count, its snap
+         * would go the old way (headset run 2026-10-23: walking back). */
+        if ((fl - g_nudge_flip0 >= 2 && have && fabsf(err) < fabsf(g_nudge_err0) - 0.26f) || fabsf(err) <= FP_NUDGE_MIN ||
+            fl - g_nudge_flip0 >= FP_NUDGE_HOLD) {
+            g_nudge = NUDGE_GAP;              /* turning the head's way: the game has the heading */
+            g_nudge_flip = fl;
+            g_nudge_turned = fl - g_nudge_flip0;
+            *ax = *ay = 128;
+        } else {
+            *ax = 128; *ay = 1;               /* straight ahead, turned to the head below */
+        }
+        return;
+    case NUDGE_GAP:
+        *bits &= ~g_nudge_btn;
+        *ax = *ay = 128;
+        if (fl - g_nudge_flip < FP_NUDGE_GAP) return;
+        g_nudge = NUDGE_PRESS;
+        g_nudge_flip = fl;
+#ifndef PSP2I_PROD
+        fprintf(stderr, "vr: fp nudge: facing %+.0f from the view, stick %llu frames, then %+.0f; attack 0x%04X sent\n",
+                (double)(g_nudge_err0 * 57.29578f), (unsigned long long)g_nudge_turned,
+                (double)(err * 57.29578f), g_nudge_btn);
+#endif
+        /* fall through */
+    case NUDGE_PRESS:
+        *bits |= g_nudge_btn;                 /* pressed even if already let go */
+        if (fl - g_nudge_flip >= FP_NUDGE_PRESS) g_nudge = NUDGE_OFF;
+        return;
+    }
+}
+#endif
+
 static void ctrl_commit(void) {
     uint32_t bits = g_script_bits | g_pad_bits;
 #ifdef _WIN32
@@ -1720,6 +1875,7 @@ static void ctrl_commit(void) {
      * difference. Only the stick changes (what this player presses). */
     g_fp_stick_on = 0;
     vr_head hd;
+    fp_nudge(&bits, &ax, &ay);
     if (g_head_on && g_vr_first && g_fp_cam && g_fp_yaw_ok && !g_rep_on && (ax != 128 || ay != 128) &&
         g_vr_live && vr_head_get(&hd)) {
         float hr[9];
@@ -1737,6 +1893,9 @@ static void ctrl_commit(void) {
     }
 #endif
     if (!g_rep_on) rec_pad(bits, ax, ay);
+#ifndef PSP2I_PROD
+    g_sent_bits = bits; g_sent_ax = ax; g_sent_ay = ay;
+#endif
     psp_ctrl_set(bits, ax, ay);
 }
 
@@ -1843,6 +2002,7 @@ static int display_load(void) {
             const float k = (float)atof(line + 14);
             if (k >= 0.0f && k <= 3.0f) g_vr_fp_fwd = k;
         }
+        else if (!strncmp(line, "vr_fp_nudge=", 12)) g_vr_fp_nudge = strncmp(line + 12, "off", 3) != 0;
         else if (!strncmp(line, "vr_fp_scale=", 12)) {
             const float k = (float)atof(line + 12);
             if (k >= 0.5f && k <= 20.0f) g_vr_fp_scale = k;
@@ -1927,6 +2087,9 @@ static void display_save(int res) {
                " (hides your own head when running); fp scale = game units per metre in first person\n");
     fprintf(f, "vr_view=%s\nvr_fp_eye=%.1f\nvr_fp_forward=%.1f\nvr_fp_near=%.1f\nvr_fp_scale=%.1f\n", g_vr_first ? "first" : "third",
             (double)g_vr_fp_eye, (double)g_vr_fp_fwd, (double)g_vr_fp_near, (double)g_vr_fp_scale);
+    fprintf(f, "; first person: fp nudge = on: an attack (Square, Triangle) first turns your character to where you look"
+               " (not while R locks on), off = the attack goes the way the character faces\n");
+    fprintf(f, "vr_fp_nudge=%s\n", g_vr_fp_nudge ? "on" : "off");
     fprintf(f, "; VR image quality (from the next start, VR only): aniso = texture filtering 0 (off) or 2..16;"
                " sharpen = sharpening of the headset's pictures 0.0 (off) .. 1.0\n");
     fprintf(f, "vr_aniso=%d\nvr_sharpen=%.2f\n", g_vr_aniso, (double)g_vr_sharpen);
@@ -2193,7 +2356,11 @@ static void poll_controllers(void) {
         }
     }
 #endif
-    if (b != g_pad_bits || ax != g_pad_ax || ay != g_pad_ay || g_fp_stick_on) {   /* first person's turned stick follows the head */
+    if (b != g_pad_bits || ax != g_pad_ax || ay != g_pad_ay || g_fp_stick_on
+#ifdef PSP2I_VR
+        || g_nudge                                                                  /* the attack nudge runs by frames */
+#endif
+        ) {   /* first person's turned stick follows the head */
         g_pad_bits = b; g_pad_ax = ax; g_pad_ay = ay;
         ctrl_commit();
     }

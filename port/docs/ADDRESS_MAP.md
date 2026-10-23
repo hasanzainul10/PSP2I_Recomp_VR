@@ -28,6 +28,9 @@ on; **todo** = needed for a VR phase, not found yet.
 | player +0x28 | player id (1 the other human; NPCs 2, 3) | `host/gamelog.c` |
 | player +0x40 | status link | `host/gamelog.c` |
 | player +0x6A8 | HP | `host/gamelog.c` |
+| player +0x70..+0xAF | **The player's facing**: a 4x4 matrix, rows x (+0x70), y (+0x80, always 0,1,0), z = forward (+0x90), then a position (+0xA0). Facing = `atan2(+0x90, +0x98)` (the same atan2(x, z) as a move); a copy of the rotation at +0xB0..+0xDF. Found in a per-frame player trace (`PSP2I_PL_TRACE`, 2026-10-23, `pltrace1.bin`): within 1 degree of the walk direction in 90% of steady walking frames. The stick turns it 20 degrees a game frame, starting 1-3 frames after the push; letting the stick go mid-turn snaps it to the stick's heading a frame later; Square / Triangle with no stick don't turn it, and a stick pushed during an attack's start doesn't either. Read by the attack nudge (host/main.c `fp_nudge`) | known (trace + headset) |
+| player +0x214, +0x7E0, +0x7E4 | 2 while R is held (lock-on) and ~8 frames after it is let go, else 0 (the trace, two R holds). During it Square combos turned the facing a few degrees (towards the target); without it never. `fp_nudge` skips while it is set | seen (trace) |
+| player +0x87C | Counts 0..3 while L is held, 0xFA otherwise (the trace); not used | seen |
 | `0x08ED8CEC` | Item owner | `host/gamelog.c` |
 | `0x08ED59E8`, `0x08ED5A28` | Session objects | `host/gamelog.c` |
 
@@ -200,10 +203,9 @@ Last, one through-mode draw copies `0x0CC000` to the display buffer
 | The orbit maths (yaw, pitch, distance) in `0x08AFA8E0` / `0x08AFA714` | P3 / P4 | The apply point `0x08AFA598` is found (above); decode its callers, or hook `0x08AFA598` and leave them alone |
 | LOD / map-sector culling, if any (the frustum cull is found, above) | P3 | Gaps or popping far to the side with `vr_cull_scale` high |
 | Bloom / blur passes (signature to skip or redo per eye) | P2 | Redone per eye without a signature: P2 replays every draw per eye, and a render target sampled as a texture is sampled in the same eye's copy (d3d11.c `d3d_draw_eye`). A signature is still needed to switch bloom off |
-| Local player yaw | P4 | Position found (player +0x4B0, above). Yaw: an angle or rotation near +0x4B0 that follows turning |
 | Player skeleton: bone indices for head, neck, spine, hands, feet | P4 / P6 | Skinned draws of the local player: bone palette per batch; hide one bone's triangles at a time |
 | Weapon attach (hand) bones and weapon model draws | P5 | Draws that follow the hand bone; the item / equipment code |
-| Lock-on target | P4 | Write watch on what changes when L locks on |
+| Lock-on target | P4 | Whether lock-on is on is found (player +0x214, above, set by R); the target object is not |
 | Aim direction (guns, techniques) | P5 | Free-aim mode: values that follow the right stick while aiming |
 | Just Attack window | P5 | The attack-combo state: what the game checks to grant a Just Attack |
 | Cutscene / camera-cut state | P2 | A flag or camera mode that changes on cuts and in event scenes |

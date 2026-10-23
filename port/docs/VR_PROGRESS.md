@@ -322,6 +322,30 @@ the world; the user found it overwhelming. Those were removed. Now:
   went where the head pointed within ~10 degrees in all 14 samples (head
   -121 to +48 degrees); the game moves relative to its camera's eye-target
   heading. Only the stick changes (online-safe).
+- **Attack nudge (VR_PLAN F1, 2026-10-23, user: "attacks after strafing go
+  where I look").** After walking left, right or back the character faced
+  where it walked and attacks went that way. A dev per-frame trace
+  (`PSP2I_PL_TRACE=FILE`: the pad as sent, the headings, 4 KB of the player
+  object and 512 bytes of the camera; analysed offline) found the facing
+  (player +0x70's rotation, forward row +0x90 / +0x98), how the stick turns
+  it (20 degrees a frame; let go mid-turn, it snaps to the stick's heading),
+  that attacks don't turn it, and R's lock-on state (+0x214); ADDRESS_MAP.
+  `fp_nudge` (host/main.c, called in `ctrl_commit` before the walk turn):
+  a new Square / Triangle press in first person with the facing more than
+  30 degrees from the view is held back; the stick points ahead (turned to
+  the head by the walk code) for at least 2 frames and until the facing
+  turns the head's way (6 at most), is centred 2 frames (the snap), then the
+  attack is pressed (at least 2 frames, even if let go). Not while R is
+  held or +0x214 is set, and not within 1 s of the last attack (combos and
+  Just Attacks keep their timing). Setting `vr_fp_nudge=on/off`. Log
+  `vr: fp nudge: ...` (dev). Runs: `f1_nudge1.log` turned once right and
+  once wrong (pressed while still walking back: the facing was already
+  turning from the player's stick, so it ended after 1 frame and snapped
+  the old way; fixed with the 2 frames and the nearer-the-view check);
+  `f1_nudge2.log`: 8 Square nudges from 38-124 degrees off all ended
+  within 24 degrees, 2 skipped while locked on. Triangle not pressed in
+  first person since the fix. Circle is not nudged (it talks in town).
+  Only the pad changes (online-safe).
 
 **Next (in order):**
 1. **Try the controller capture in the headset:** left grip + left stick
