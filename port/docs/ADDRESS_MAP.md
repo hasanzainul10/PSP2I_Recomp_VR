@@ -256,7 +256,8 @@ analysed with `.claude/skills/psp2i-static-re/scripts/skeleton.py`.
 The tree (node <- parent, rest length in model units; the head is ~13.3
 above the feet, so ~7.8 model units per metre for a 1.7 m character; the
 model+32 matrix scales it into the world). Sides from the poses: model +z
-is forward, so +x is the character's left; not yet checked in the headset.
+is forward, so +x is the character's left: **confirmed in the headset** (node 15
+turned the left arm).
 
 | Nodes | What |
 |---|---|
@@ -273,9 +274,16 @@ Palette slots: only 15 of the 28 nodes skin this model (1, 3, 6, 9, 10,
 12-16, 19-21, 24-26). The knees, ankles, wrists and hands (4, 5, 7, 8, 17,
 18, 22, 23) have none: the lower legs and the hands are other models (the
 character's parts: the first run's 14- and 16-bone models near the player).
-Open for IK: whether those parts read this model's nodes (then changing
-`*(model+100)` moves them too) or have their own (then they need the same
-change), and where the weapon hangs.
+**The parts share the nodes** (parts log and the shoulder test in the
+headset, 2026-10-24): the player's model goes through `0x08A846DC` three
+times a frame, with three 28-node skeletons (`0x09B30D80` the body,
+`0x09B3B7C0`, `0x09B37450`: the other meshes, each with its own palette
+slots), all reading the same node matrices. Turning node 15 in each call
+(put back after it) moved the **left** arm, with the hand and the weapon
+(user). So one pose change, applied in each of the model's calls, moves
+the whole character. The container `*(player+0x178)` also holds, at +0x10,
+an 8-node model with its own nodes (skeleton `0x09B3F330`), ~14.5 units
+from the body: not attached to the arm, not identified.
 
 ## Needed for VR (todo)
 
@@ -284,7 +292,7 @@ change), and where the weapon hangs.
 | The orbit maths (yaw, pitch, distance) in `0x08AFA8E0` / `0x08AFA714` | P3 / P4 | The apply point `0x08AFA598` is found (above); decode its callers, or hook `0x08AFA598` and leave them alone |
 | LOD / map-sector culling, if any (the frustum cull is found, above) | P3 | Gaps or popping far to the side with `vr_cull_scale` high |
 | Bloom / blur passes (signature to skip or redo per eye) | P2 | Redone per eye without a signature: P2 replays every draw per eye, and a render target sampled as a texture is sampled in the same eye's copy (d3d11.c `d3d_draw_eye`). A signature is still needed to switch bloom off |
-| Player skeleton: bone indices for head, neck, spine, hands, feet | P4 / P6 | **Found** ("The player's skeleton" above); left/right still to confirm in the headset |
+| Player skeleton: bone indices for head, neck, spine, hands, feet | P4 / P6 | **Found** ("The player's skeleton" above), left / right confirmed in the headset |
 | Weapon attach (hand) bones and weapon model draws | P5 | Draws that follow the hand bone; the item / equipment code |
 | Lock-on target | P4 | Whether lock-on is on is found (player +0x214, above, set by R); the target object is not |
 | Aim direction (guns, techniques) | P5 | Free-aim mode: values that follow the right stick while aiming |

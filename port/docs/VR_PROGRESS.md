@@ -29,19 +29,25 @@ controls are fine; manual aim in first person not tried yet. They chose to
   `.claude/skills/psp2i-static-re/scripts/skeleton.py DUMP` (positions,
   inferred parents, the game's own tree, chains). Dumps in
   `port/testwork/skel/` (git-ignored).
-- **Not checked:** which side is left (from the poses, model +x is the
-  character's left); anything in the headset (no IK code yet).
+- **Checked in the headset (user):** `PSP2I_SKEL_TEST=15,60` (node 15 and
+  everything below it swung about model +z, 0..60 degrees every 4 s, put
+  back after each palette) swings the **left** arm, and the hand and the
+  weapon go with it. The parts log shows why: the player's model goes
+  through `0x08A846DC` three times a frame (three skeletons, the body and
+  two other meshes) and all three read the same node matrices. So IK only
+  has to change the nodes, in each of the model's calls.
+- **Not identified:** an 8-node model at container +0x10 with its own
+  nodes, ~14.5 units from the body.
 
 **Next for M2:**
-1. The parts: the knees, ankles, wrists and hands have no palette slot in
-   this model, so they are other models. Find whether those read the same
-   `*(model+100)` (log each model's nodes pointer at `0x08A846DC`), and
-   which model is the weapon.
-2. A first override at `0x08A846DC`: rotate one shoulder (node 15 or 20)
-   in a copy of the nodes, swapped in for the call only, and see it in the
-   headset; that also settles left and right.
-3. Then 2-bone IK (shoulder 15/20, elbow 16/21, wrist 17/22; upper arm and forearm 2.56 each) to the
-   hand poses (`hands_frame`, game units), in first and third person.
+1. 2-bone IK in `vr_body.c` at `0x08A846DC`: shoulder 15 / 20, elbow 16 /
+   21, wrist 17 / 22 (upper arm and forearm 2.56 each, model units), to the
+   hand poses (`hands_frame`, game units: the model -> world scale comes
+   from model+32 and the view), in a copy put back after each call as the
+   test does. Gate on INPUT MODE = MOTION, a `vr_arms=` setting.
+2. First person: the arms in view (the head is hidden there already?), and
+   whether the weapon's hits follow the drawn hand (they shouldn't: only
+   the drawing changes, nothing in the game's state).
 
 ## Start here (handoff 2026-10-23)
 

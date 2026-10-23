@@ -13,7 +13,10 @@
 /* Registers the hook. Development builds: PSP2I_SKEL=FILE finds the local
  * player's model (by its address in the player object), writes its node
  * matrices twice a second and its skeleton records once to FILE, and logs
- * what it found every 5 s. */
+ * what it found every 5 s, with the character's other parts (the same model
+ * comes three times a frame, one skeleton per mesh, all on its nodes).
+ * PSP2I_SKEL_TEST=NODE,DEGREES[,keep] swings one node and those below it
+ * (15 = the left shoulder: the arm, hand and weapon follow, headset-checked). */
 void vr_body_init(void);
 
 #endif
