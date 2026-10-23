@@ -207,20 +207,25 @@ static void test_restore(uint32_t model, uint32_t skel) {
  * changes (the parts' three skeletons all read them: hands and weapon
  * follow, headset-checked with the shoulder test).
  *
- * The target is the controller's offset from the headset, in the
- * headset's heading (right, up, forward), from the model's eyes (the head
- * node, a little up and ahead), in model units: the model's own arm length
- * over a human's (shoulder to wrist ~0.55 m). Model space: +x the
- * character's left, +y up, +z forward (headset-checked). So it works the
- * same in first and third person, with no camera matrix. */
+ * The target is the controller's offset from your shoulder (estimated
+ * from the headset: ARM_SHOULDER_* in its heading), applied from the
+ * model's shoulder joint, in model units: the model's own arm length over a
+ * human's (shoulder to grip ~0.62 m). So a bent arm stays bent (from the
+ * eyes, as first built, the target was past the arm's reach in half the
+ * samples: the model's shoulders sit elsewhere than yours). Model space:
+ * +x the character's left, +y up, +z forward (headset-checked). It works
+ * the same in first and third person, with no camera matrix. */
 #define PLAYER_MODEL_BOX 0x178u               /* *(player+0x178)+0x8: the player's animated model */
-#define ARM_HUMAN_M      0.55f
+#define ARM_HUMAN_M      0.62f                 /* shoulder joint to the grip */
+#define ARM_SHOULDER_X   0.18f                 /* your shoulder from your eyes, metres: to the side, */
+#define ARM_SHOULDER_Y   0.22f                 /* down, */
+#define ARM_SHOULDER_Z   0.08f                 /* back */
 static const int ARM_NODE[2][3] = { { 15, 16, 17 }, { 20, 21, 22 } };   /* shoulder, elbow, wrist; left, right */
 
 static int      g_arms_on;                     /* vr_body_arms */
 static uint64_t g_arms_vb = ~0ull;
 static int      g_arms_ok[2];                  /* this frame's target per hand */
-static float    g_arms_off[2][3];              /* the hand from the eyes, metres: right, up, forward */
+static float    g_arms_off[2][3];              /* the hand from its shoulder, metres: right, up, forward */
 static float    g_arms_saved[NODES_MAX][16];
 static int      g_arms_n_saved;
 #ifndef PSP2I_PROD
@@ -232,7 +237,7 @@ void vr_body_arms(int on) {
     g_arms_on = on;
 }
 
-/* Once a frame: the controllers from the headset, in its heading. */
+/* Once a frame: the controllers from your shoulders, in the headset's heading. */
 static void arms_frame(void) {
     const uint64_t vb = psp_sched_vblank_count();
     if (vb == g_arms_vb) return;
@@ -251,9 +256,9 @@ static void arms_frame(void) {
         if (!vh[hd].ok) continue;
         float d[3];
         for (int k = 0; k < 3; k++) d[k] = vh[hd].p[k] - h.p[k];
-        g_arms_off[hd][0] = d[0] * r[0] + d[2] * r[2];
-        g_arms_off[hd][1] = d[1];
-        g_arms_off[hd][2] = d[0] * f[0] + d[2] * f[2];
+        g_arms_off[hd][0] = d[0] * r[0] + d[2] * r[2] - (hd ? ARM_SHOULDER_X : -ARM_SHOULDER_X);
+        g_arms_off[hd][1] = d[1] + ARM_SHOULDER_Y;
+        g_arms_off[hd][2] = d[0] * f[0] + d[2] * f[2] + ARM_SHOULDER_Z;
         g_arms_ok[hd] = 1;
     }
 }
@@ -306,8 +311,6 @@ static int arms_pose(uint32_t model, uint32_t skel) {
     if (n < 23 || n > NODES_MAX || !user_ptr(nodes) || !user_ptr(recs)) return 0;
     for (int b = 0; b < n; b++) node_get(nodes, b, g_arms_saved[b]);
     g_arms_n_saved = n;
-    float head[16];
-    node_get(nodes, 13, head);
     for (int hd = 0; hd < 2; hd++) {
         if (!g_arms_ok[hd]) continue;
         const int *J = ARM_NODE[hd];
@@ -320,10 +323,9 @@ static int arms_pose(uint32_t model, uint32_t skel) {
         const float a = len3(se), b = len3(ew);
         if (a < 1e-3f || b < 1e-3f) continue;
         const float upm = (a + b) / ARM_HUMAN_M;              /* model units per metre */
-        /* model x = the character's left = minus the headset's right; the
-         * eyes 6 cm above and 8 cm ahead of the head node */
+        /* model x = the character's left = minus the headset's right */
         const float *o = g_arms_off[hd];
-        const float T0[3] = { head[12] - upm * o[0], head[13] + upm * (o[1] + 0.06f), head[14] + upm * (o[2] + 0.08f) };
+        const float T0[3] = { S[0] - upm * o[0], S[1] + upm * o[1], S[2] + upm * o[2] };
         float st[3];
         for (int k = 0; k < 3; k++) st[k] = T0[k] - S[k];
         float d = len3(st);
@@ -361,7 +363,7 @@ static int arms_pose(uint32_t model, uint32_t skel) {
 #ifndef PSP2I_PROD
         if (hd == 1 && psp_sched_vblank_count() - g_arms_log >= 300) {
             g_arms_log = psp_sched_vblank_count();
-            fprintf(stderr, "vr: arms: right hand %.2f right %.2f up %.2f ahead of the eyes (m); reach %.0f%% of the arm"
+            fprintf(stderr, "vr: arms: right hand %.2f right %.2f up %.2f ahead of its shoulder (m); reach %.0f%% of the arm"
                             " (%.2f + %.2f units, %.1f a metre)\n", (double)o[0], (double)o[1], (double)o[2],
                     (double)(100.0f * len3(st) / (a + b)), (double)a, (double)b, (double)upm);
         }

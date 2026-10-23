@@ -45,23 +45,23 @@ controls are fine; manual aim in first person not tried yet. They chose to
   Shoulder 15 / 20 turns to a solved elbow (pole down, a little out and
   back), elbow 16 / 21 turns the wrist 17 / 22 onto the target; the nodes
   are put back after each palette (drawn only). Target = the controller's
-  offset from the headset, in the headset's heading, from the model's eyes
+  offset from the headset, from the model's eyes (first build, replaced below)
   (head node 13 + 6 cm up, 8 cm ahead), at the model's arm over 0.55 m
   (measured live: upper arm and forearm 2.2 units each, 8.0 units a metre:
   the node scales make them shorter than the records' 2.56).
-- **Seen in the log** (`port/testwork/arms/arms1.log`): the right hand's
-  reach was over 100% of the arm in 21 of 40 samples (up to 146%), so the
-  arm is often clamped straight: the eyes-to-shoulder offset or the 0.55 m
-  arm doesn't match. Not yet judged by the user.
+- **Reach anchored at the shoulders** (2026-10-24): the controller's
+  offset from your estimated shoulder (18 cm to the side, 22 cm below and
+  8 cm behind the eyes, in the headset's heading) is applied from the
+  model's shoulder joint, at the model's arm over 0.62 m (shoulder to grip).
+  From the eyes (the first build) the reach was over 100% in 21 of 40 log
+  samples; now 1 of 19 (`arms2.log`: 20-100%, median 77%). **User, in the
+  headset: "the arms bend with mine now and straighten when I reach out."**
 
 **Next for M2:**
-1. The reach: anchor at the shoulder instead (the headset's shoulder
-   estimate: eyes minus ~0.25 m down and ~0.18 m to the side, as PSUEx-VR
-   does), or a calibration (both grips + both triggers with arms out).
-2. The hand's rotation from the controller's (the weapon tilting with the
+1. The hand's rotation from the controller's (the weapon tilting with the
    wrist): wrist 17 / 22 axes from the grip pose, with a fixed offset.
-3. A VR > ARMS item on the engine menu (run `test_menu`).
-4. First person: how the arms look in view; the weapon's hits stay the
+2. A VR > ARMS item on the engine menu (run `test_menu`).
+3. First person: how the arms look in view; the weapon's hits stay the
    game's (only the drawing changes).
 
 ## Start here (handoff 2026-10-23)
