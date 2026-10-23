@@ -1,0 +1,19 @@
+/* The local player's skeleton, for VR arms and body (VR_PLAN M2 / P6).
+ *
+ * A skinned character is an animated model: 0x08A850A8(model) evaluates its
+ * animation into node matrices (model space, at *(model+100)), then
+ * 0x08A846DC(model, &palette, skeleton) builds the skinning palette from
+ * them: palette[slot] = model+32 (model -> eye) x node x the node's inverse
+ * bind matrix. A hook on 0x08A846DC sees the finished pose of each model in
+ * model space before it is drawn, and can change it for the local player
+ * only (nothing in the game's state changes: online play is untouched). */
+#ifndef PSP2I_VR_BODY_H
+#define PSP2I_VR_BODY_H
+
+/* Registers the hook. Development builds: PSP2I_SKEL=FILE finds the local
+ * player's model (by its address in the player object), writes its node
+ * matrices twice a second and its skeleton records once to FILE, and logs
+ * what it found every 5 s. */
+void vr_body_init(void);
+
+#endif

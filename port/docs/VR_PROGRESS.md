@@ -5,9 +5,45 @@ this file at the end of every working session: what changed, what was checked,
 what is next. The plan itself is [VR_PLAN.md](VR_PLAN.md); user-facing docs are
 [VR.md](VR.md); reverse-engineering results go in [ADDRESS_MAP.md](ADDRESS_MAP.md).
 
-_Last updated: 2026-10-23, end of the motion-controls session (handoff below)._
+_Last updated: 2026-10-24, skeleton mapping for arm IK (section below)._
 
-## Start here (handoff 2026-10-23, latest)
+## Skeleton mapped for arm IK (M2, 2026-10-24, latest)
+
+The user's answers to the last handoff: the intro movie and the MOTION
+controls are fine; manual aim in first person not tried yet. They chose to
+**skip the menu D-pad hook** and start on IK.
+
+- **Found from the GE side down** (all in ADDRESS_MAP "The player's
+  skeleton"): bone commands are patched per model by `0x08D8D4E8`; the
+  palette is built by `0x08D74E84` from node matrices; **`0x08A846DC`
+  (model, &palette, skeleton)** is where the local player's pose (model
+  space, before the camera) can be changed for IK, and it is hooked.
+- **The local player's model** is `*(player+0x178)+0x8`: found by
+  searching the player object for each model's address (the first run
+  picked the nearest model and mixed party members in). 28 nodes, a clean
+  humanoid tree from the skeleton records (parents agree with the poses):
+  arms 14-18 and 19-23 (clavicle, shoulder, elbow, wrist, hand end), legs
+  3-5 / 6-8, spine 9-11, neck 12, head 13.
+- **Tools:** `port/vr/vr_body.c` (dev `PSP2I_SKEL=FILE`: logs the model,
+  dumps its nodes twice a second and its records once), and
+  `.claude/skills/psp2i-static-re/scripts/skeleton.py DUMP` (positions,
+  inferred parents, the game's own tree, chains). Dumps in
+  `port/testwork/skel/` (git-ignored).
+- **Not checked:** which side is left (from the poses, model +x is the
+  character's left); anything in the headset (no IK code yet).
+
+**Next for M2:**
+1. The parts: the knees, ankles, wrists and hands have no palette slot in
+   this model, so they are other models. Find whether those read the same
+   `*(model+100)` (log each model's nodes pointer at `0x08A846DC`), and
+   which model is the weapon.
+2. A first override at `0x08A846DC`: rotate one shoulder (node 15 or 20)
+   in a copy of the nodes, swapped in for the call only, and see it in the
+   headset; that also settles left and right.
+3. Then 2-bone IK (shoulder 15/20, elbow 16/21, wrist 17/22; upper arm and forearm 2.56 each) to the
+   hand poses (`hands_frame`, game units), in first and third person.
+
+## Start here (handoff 2026-10-23)
 
 The user switches Claude accounts. Read `CLAUDE.md`, this section, then the
 older "Handoff: start here (2026-10-22)" below for how to build and run.

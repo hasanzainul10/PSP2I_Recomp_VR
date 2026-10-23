@@ -235,6 +235,48 @@ is not found yet; what is known:
 | task updates `0x089D06E8`, `0x089F0BBC`, `0x089DB0AC` | The title / continue menu's tasks: they exist only while that screen is up | seen (task log) |
 | field menus (start menu, palette) | Add no tasks: a state inside always-running tasks, not mapped | open |
 
+### The player's skeleton (disassembly, write watch, PSP2I_SKEL dumps, 2026-10-23)
+
+For VR arms (M2) and the body (P6). Found from the GE side down: the bone
+commands, who patches them, who writes the matrices they come from. Three
+windowed runs in town with party members (`port/testwork/skel/skel1..3`),
+analysed with `.claude/skills/psp2i-static-re/scripts/skeleton.py`.
+
+| Address | What | Status |
+|---|---|---|
+| `0x08D8D320` / `0x08D8D3B8` / `0x08D8D450` | Copy one 4x4 matrix (64 bytes) into 12 GE bone / world / texture-matrix commands (`0x2B` / `0x3B` / `0x41`) | known (disassembly) |
+| `0x08D8D4E8`(model) | Per model, just before it is drawn: its matrices (+8 of them, array at +64[part], times the scale at +24) into the bone records of its prebuilt display list (+68[part], 52 bytes: 12 commands + RET); +72 / +76 the same for world and texture matrices. Scheduled through 0x08D8D7B0 | known (disassembly) |
+| `0x08D74E54` / `0x08D74E84`(palette, skeleton, nodes, M) | The skinning palette: for each of the skeleton's +40 nodes (144-byte records at +48), `palette[slot] = M x node x inverse bind` (slot = record +4 as a short, -1 = no slot; inverse bind at record +48 unless flag 0x8) | known (disassembly + write watch on a palette entry) |
+| `0x08A846DC`(model, &palette, skeleton) | Calls the above with nodes = `*(model+100)`, M = model+32 (model -> eye). **Hooked** (port/vr/vr_body.c, dev `PSP2I_SKEL`): the place to change the local player's pose for IK | known (disassembly + hook) |
+| `0x08A850A8`(model) | Evaluates the animation into `*(model+100)` (through `0x08A846B8` -> `0x08D74BD8`), then calls the model's callback `*(model+112)`(nodes) if set (0 for the player) | seen (disassembly) |
+| `*(player+0x178)+0x8` | **The local player's animated model** (in all three runs, town, with party members; the address changes per area) | seen (hook, 3 runs) |
+| player model `+100` | Its node matrices: 28 x 4x4 (64 bytes, VFPU columns), model space, each bone along its local +x | seen (dumps) |
+| skeleton record (144 bytes) | +0 flags, +4 palette slot (short) and parent (short at +6), +8 first child (short), +10 next sibling, +12..+20 rest offset from the parent (floats), +24..+32 rest rotation (16-bit angles), +36..+44 scale, +48 inverse bind 4x4 | seen (dumps; parents agree with the poses) |
+
+The tree (node <- parent, rest length in model units; the head is ~13.3
+above the feet, so ~7.8 model units per metre for a 1.7 m character; the
+model+32 matrix scales it into the world). Sides from the poses: model +z
+is forward, so +x is the character's left; not yet checked in the headset.
+
+| Nodes | What |
+|---|---|
+| 0, 27 | root (feet), a second root child (locator) |
+| 1, 2 | hips (9.78 up), pelvis |
+| 3 <- 4 <- 5 / 6 <- 7 <- 8 | left / right leg: hip (0.91 to the side), knee (thigh 3.91), ankle (shin 4.32) |
+| 9, 10, 11, 26 | spine (1.39), chest (1.51), upper chest (2.32); 26 a waist piece on 9 |
+| 12, 13 | neck (at 11), head (1.07) |
+| 14 <- 15 <- 16 <- 17 <- 18 | **left arm:** clavicle (0.32 from 11), shoulder (1.36), elbow (upper arm 2.56), wrist (forearm 2.56), hand end (0.65) |
+| 19 <- 20 <- 21 <- 22 <- 23 | **right arm:** the same, mirrored |
+| 24, 25 | chest pieces on 10 (both sides) |
+
+Palette slots: only 15 of the 28 nodes skin this model (1, 3, 6, 9, 10,
+12-16, 19-21, 24-26). The knees, ankles, wrists and hands (4, 5, 7, 8, 17,
+18, 22, 23) have none: the lower legs and the hands are other models (the
+character's parts: the first run's 14- and 16-bone models near the player).
+Open for IK: whether those parts read this model's nodes (then changing
+`*(model+100)` moves them too) or have their own (then they need the same
+change), and where the weapon hangs.
+
 ## Needed for VR (todo)
 
 | What | Phase | How to find it |
@@ -242,7 +284,7 @@ is not found yet; what is known:
 | The orbit maths (yaw, pitch, distance) in `0x08AFA8E0` / `0x08AFA714` | P3 / P4 | The apply point `0x08AFA598` is found (above); decode its callers, or hook `0x08AFA598` and leave them alone |
 | LOD / map-sector culling, if any (the frustum cull is found, above) | P3 | Gaps or popping far to the side with `vr_cull_scale` high |
 | Bloom / blur passes (signature to skip or redo per eye) | P2 | Redone per eye without a signature: P2 replays every draw per eye, and a render target sampled as a texture is sampled in the same eye's copy (d3d11.c `d3d_draw_eye`). A signature is still needed to switch bloom off |
-| Player skeleton: bone indices for head, neck, spine, hands, feet | P4 / P6 | Skinned draws of the local player: bone palette per batch; hide one bone's triangles at a time |
+| Player skeleton: bone indices for head, neck, spine, hands, feet | P4 / P6 | **Found** ("The player's skeleton" above); left/right still to confirm in the headset |
 | Weapon attach (hand) bones and weapon model draws | P5 | Draws that follow the hand bone; the item / equipment code |
 | Lock-on target | P4 | Whether lock-on is on is found (player +0x214, above, set by R); the target object is not |
 | Aim direction (guns, techniques) | P5 | Free-aim mode: values that follow the right stick while aiming |

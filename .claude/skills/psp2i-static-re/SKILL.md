@@ -25,6 +25,7 @@ function, and every original MIPS instruction as a comment:
 | What does function X do? | `python -I .claude/skills/psp2i-static-re/scripts/disasm.py 08AFCE90` (`--all` for the whole body) |
 | Who calls X? | `python -I .claude/skills/psp2i-static-re/scripts/callers.py 08D7D63C` |
 | Who reads or writes globals in a range? | `python -I .claude/skills/psp2i-static-re/scripts/global_refs.py 08FA97A0 08FA97E0` |
+| The local player's skeleton (nodes, parents, arm / leg chains)? | Run a dev build with `PSP2I_SKEL=FILE` (port/vr/vr_body.c: the player's model, node matrices twice a second, skeleton records once), then `python -I .claude/skills/psp2i-static-re/scripts/skeleton.py FILE` |
 | Which player-object field follows play (facing, a button's state)? | Run a dev build with `PSP2I_PL_TRACE=FILE` (one record per game frame: pad as sent, headings, 4 KB of the local player, 512 bytes of the camera), then `python -I .claude/skills/psp2i-static-re/scripts/pltrace.py FILE facing` (fields that follow the walk direction), `changes` (button presses), `dump OFF` |
 
 Tips:

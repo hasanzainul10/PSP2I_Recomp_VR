@@ -101,6 +101,7 @@
 #include "present.h"
 #ifdef PSP2I_VR
 #include "vr.h"
+#include "vr_body.h"
 #endif
 #include "vr_probe.h"
 #if defined(PSP2I_VR) && !defined(PSP2I_PROD)
@@ -4325,6 +4326,9 @@ int main(int argc, char **argv) {
     psp_hook_set(FN_APPLY_CAMERA, hook_apply_camera);       /* a no-op unless first person is on */
 #if defined(PSP2I_VR) && !defined(PSP2I_PROD)
     menu_path_init();                                       /* dev: count the menu path's calls */
+#endif
+#ifdef PSP2I_VR
+    vr_body_init();                                         /* a no-op unless PSP2I_SKEL is set (dev) */
 #endif
     psp_hook_set(FN_SET_PROJECTION, hook_set_projection);   /* a no-op unless first person is on */
 #ifndef PSP2I_PROD
