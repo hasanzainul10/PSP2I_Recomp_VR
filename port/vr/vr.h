@@ -94,6 +94,10 @@ void vr_submit_overlay(const uint32_t *argb);
  * VR_IPD_DEFAULT until the session reports it. */
 #define VR_IPD_DEFAULT 0.064f
 float vr_ipd(void);
+/* The headset's widest eye view: the largest tangent of the two eyes' half
+ * FOVs across (left or right) and up/down, from the session's views. 1 when
+ * known, 0 before. The eye pictures must cover it, or their edge shows. */
+int  vr_view_tan(float *tan_x, float *tan_y);
 
 /* Phase 3, head tracking: the newest predicted head pose, relative to the
  * recentred one (vr_recenter: its position, and its heading with the floor

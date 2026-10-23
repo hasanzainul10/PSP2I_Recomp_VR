@@ -152,6 +152,7 @@ enum { A_LSTICK, A_RSTICK, A_CROSS, A_CIRCLE, A_SQUARE, A_TRIANGLE, A_LTRIG, A_R
 static XrAction g_act[A_COUNT];
 static int g_ltrig_on, g_rtrig_on;           /* trigger hysteresis */
 static int g_lclick_prev, g_rclick_prev;
+static float g_view_tan[2];                  /* vr_view_tan, under g_cfg_lock */
 
 static const char *res_name(XrResult r) {
     static char buf[XR_MAX_RESULT_STRING_SIZE];
@@ -865,6 +866,25 @@ static void update_ipd(XrTime t) {
     XrView v[2] = { { XR_TYPE_VIEW }, { XR_TYPE_VIEW } };
     uint32_t n = 0;
     if (XR_FAILED(p_xrLocateViews(g_sess, &li, &vs, 2, &n, v)) || n != 2) return;
+    {   /* the eyes' widest view (vr_view_tan) */
+        float tx = 0, ty = 0;
+        for (int e = 0; e < 2; e++) {
+            const float a[4] = { tanf(-v[e].fov.angleLeft), tanf(v[e].fov.angleRight), tanf(v[e].fov.angleUp),
+                                 tanf(-v[e].fov.angleDown) };
+            if (a[0] > tx) tx = a[0];
+            if (a[1] > tx) tx = a[1];
+            if (a[2] > ty) ty = a[2];
+            if (a[3] > ty) ty = a[3];
+        }
+        if (tx > 0.1f && ty > 0.1f && tx < 20.0f && ty < 20.0f) {
+            AcquireSRWLockExclusive(&g_cfg_lock);
+            if (fabsf(tx - g_view_tan[0]) > 0.01f || fabsf(ty - g_view_tan[1]) > 0.01f)
+                fprintf(stderr, "vr: the headset's eye view: %.0f x %.0f degrees at most (tangents %.2f / %.2f)\n",
+                        2.0 * atan((double)tx) * 57.29578, 2.0 * atan((double)ty) * 57.29578, (double)tx, (double)ty);
+            g_view_tan[0] = tx; g_view_tan[1] = ty;
+            ReleaseSRWLockExclusive(&g_cfg_lock);
+        }
+    }
     if (!(vs.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT)) return;
     const float dx = v[1].pose.position.x - v[0].pose.position.x, dy = v[1].pose.position.y - v[0].pose.position.y,
                 dz = v[1].pose.position.z - v[0].pose.position.z;
@@ -1285,6 +1305,13 @@ void vr_submit_overlay(const uint32_t *argb) {
 }
 
 int vr_share_failed(void) { return (int)InterlockedCompareExchange(&g_share_failed, 0, 0); }
+
+int vr_view_tan(float *tan_x, float *tan_y) {
+    AcquireSRWLockShared(&g_cfg_lock);
+    *tan_x = g_view_tan[0]; *tan_y = g_view_tan[1];
+    ReleaseSRWLockShared(&g_cfg_lock);
+    return *tan_x > 0 && *tan_y > 0;
+}
 
 float vr_ipd(void) {
     AcquireSRWLockShared(&g_cfg_lock);

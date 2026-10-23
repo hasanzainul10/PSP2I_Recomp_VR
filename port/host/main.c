@@ -890,6 +890,13 @@ static int      g_vr_head = 1, g_vr_level = 1;
 #define VR_FOV_SCALE_Y_DEFAULT 2.6f
 #define VR_CULL_SCALE_DEFAULT 8.0f
 static float    g_vr_fov = VR_FOV_SCALE_DEFAULT, g_vr_fov_y = VR_FOV_SCALE_Y_DEFAULT, g_vr_cull = VR_CULL_SCALE_DEFAULT;
+/* vr_fov_auto=on: the fov scales follow the headset's own eye view
+ * (vr_view_tan) plus 5%, so the eye pictures always fill it. At 1.6 / 2.6
+ * (99 x 94 degrees) the PS VR2's wider view showed the pictures' edge, moving
+ * with the head: "a transparent rectangle overhead", dark or light where an
+ * area tints the screen (user, 2026-10-23). The picture's rows are set at the
+ * start from the saved scales, so a change is fully sharp from the next start. */
+static int      g_vr_fov_auto = 1;
 /* The HUD panel (as PSUEx-VR does it): the HUD pass's HUD and menus, drawn
  * as the game drew them into their own picture (d3d11.c draw_hud), on a flat
  * panel vr_hud_distance= metres ahead, a little below eye level, as wide as
@@ -1483,7 +1490,26 @@ static void hook_frustum_planes(void (*original)(void)) {
 
 /* Once per vblank: the eyes are drawn while the headset shows the game (or
  * --stereo), with Direct3D 11 only (the backend with eye copies). */
+static void display_save(int res);            /* below */
+static int  g_res_saved;
+/* vr_fov_auto: the scales from the headset's eye view (the field's FOV:
+ * PSP2I_FIELD_PROJ_X across, 480:272), saved when they change. */
+static void fov_auto_update(void) {
+    float tx, ty;
+    if (!g_vr_fov_auto || !g_vr_live || !vr_view_tan(&tx, &ty)) return;
+    const float gx = 1.0f / PSP2I_FIELD_PROJ_X, gy = gx * (float)SCREEN_H / (float)SCREEN_W;
+    float fx = tx * 1.05f / gx, fy = ty * 1.05f / gy;
+    fx = fx < 1.0f ? 1.0f : fx > 3.0f ? 3.0f : fx;
+    fy = fy < 1.0f ? 1.0f : fy > 4.0f ? 4.0f : fy;
+    if (fabsf(fx - g_vr_fov) < 0.05f && fabsf(fy - g_vr_fov_y) < 0.05f) return;
+    g_vr_fov = fx; g_vr_fov_y = fy;
+    fprintf(stderr, "vr: fov scales %.2f / %.2f (the headset's view; the eye pictures' rows follow at the next start)\n",
+            (double)fx, (double)fy);
+    if (!g_headless) display_save(g_res_saved);
+}
+
 static void stereo_update(void) {
+    fov_auto_update();
     /* Through short drops out of RUNNING too: the session left VISIBLE /
      * FOCUSED for moments while the user still saw the game in 3D, and each
      * drop turned the 3D off. Off after 3 s without RUNNING. */
@@ -1705,6 +1731,7 @@ static int display_load(void) {
         else if (!strncmp(line, "vr_stereo=", 10))     g_vr_stereo = strncmp(line + 10, "off", 3) != 0;
         else if (!strncmp(line, "vr_head=", 8))        g_vr_head = strncmp(line + 8, "off", 3) != 0;
         else if (!strncmp(line, "vr_level=", 9))       g_vr_level = strncmp(line + 9, "off", 3) != 0;
+        else if (!strncmp(line, "vr_fov_auto=", 12)) g_vr_fov_auto = strncmp(line + 12, "off", 3) != 0;
         else if (!strncmp(line, "vr_fov_scale=", 13)) {
             const float k = (float)atof(line + 13);
             if (k >= 1.0f && k <= 3.0f) g_vr_fov = k;
@@ -1819,6 +1846,9 @@ static void display_save(int res) {
     fprintf(f, "vr_head=%s\nvr_level=%s\n", g_vr_head ? "on" : "off", g_vr_level ? "on" : "off");
     fprintf(f, "; with head tracking: fov scale = the view as that many times the game's across (1.0..3.0) and up (_y, 1.0..4.0;"
                " wider = less sharp); cull scale = the game's object culling that much wider (1 = the game's)\n");
+    fprintf(f, "; with head tracking: fov auto = on: the fov scales follow the headset's own view (no edge of the picture in"
+               " sight), off = the fov scales below as set\n");
+    fprintf(f, "vr_fov_auto=%s\n", g_vr_fov_auto ? "on" : "off");
     fprintf(f, "vr_fov_scale=%.1f\nvr_fov_scale_y=%.1f\nvr_cull_scale=%.1f\n", (double)g_vr_fov, (double)g_vr_fov_y,
             (double)g_vr_cull);
     fprintf(f, "; with head tracking: cull all = on: every object the game has loaded is drawn (nothing missing behind you"
