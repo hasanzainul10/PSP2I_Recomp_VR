@@ -196,6 +196,31 @@ are drawn the same way, already projected for the game camera on the CPU.
 Last, one through-mode draw copies `0x0CC000` to the display buffer
 `0x000000`.
 
+- **The minimap's window** (GE dumps and VR captures, 2026-10-23): the
+  minimap's 3D map is drawn in the HUD pass clipped to scissor
+  `403,6-473,76`, the only sub-screen scissor on `0x0CC000` in 58 dumps
+  (town, field, Ruins). Its clip w is not one layer: it follows the area's
+  map (above 2300 in town; −1035 to 883 in the Ruins), so psprecomp's
+  `stereo_classify` sends any HUD-pass draw clipped to a window to the HUD
+  panel, whatever its w. Status: fix built, waiting for the headset.
+- **Effect sprites carry their target's depth** (GE dump `draws_011461`,
+  2026-10-23): an enemy's glow is small orthographic sprites (w 1, vt
+  `0x00019F`, tex `0x087B68C0`) in the scene pass whose depth value is the
+  enemy's (screen z 41223 against the body's 41264 at clip w 106). Read
+  through the latest scene draw's depth row (that projection's z row is
+  about −0.001, −14 for models, not the first scene draw's −0.0067, −201),
+  it gives the body's distance; psprecomp `fx_vertex` places effects there
+  instead of at a fixed `fx_dist`. Status: fix built, waiting for the
+  headset.
+- **The minimap's camera** (dev apply log, `f1_nudge1.log`, 2026-10-23):
+  a field frame applies (OrbitCamera_Apply's hook point `FN_APPLY_CAMERA`)
+  `[cam 09557DA0]`, the scene walk, `[cam 094AFD40]` three times, then
+  `[cam 09557DA0]` again. Both have projection x 1.368 (+0x90). The second
+  is the minimap's (with it moved to the head in first person, the map
+  turned into a flat eye-level view). Pointers are per session; told apart
+  by order: the frame's first field camera is the field camera. Status:
+  inferred from the log and the map's change; fix built, not yet confirmed.
+
 ## Needed for VR (todo)
 
 | What | Phase | How to find it |

@@ -30,6 +30,7 @@ RUNNING. Without a headset the game keeps running in its window as before.
 | RESOLUTION | The render scale, 1X to 6X (the eye pictures are 480 times it wide): higher is sharper and slower; from the next start (RESTART shows until then) |
 | SHARPEN | Sharpening of the headset's pictures, OFF or 10 to 100% (default 50%); at once |
 | TEXTURE FILTER | OFF, 2X, 4X, 8X or 16X anisotropic (default 16X); at once, but mipmaps need a start with it on (RESTART shows then) |
+| GLOW | the game's glow (bloom) in the headset, ON or OFF (default OFF: with it on, glows can sit off what glows); at once |
 | RECENTER | Put the screen in front of you again |
 
 The screen stays where it was put (world-locked), level and upright. Recenter

@@ -5,7 +5,87 @@ this file at the end of every working session: what changed, what was checked,
 what is next. The plan itself is [VR_PLAN.md](VR_PLAN.md); user-facing docs are
 [VR.md](VR.md); reverse-engineering results go in [ADDRESS_MAP.md](ADDRESS_MAP.md).
 
-_Last updated: 2026-10-22 (the HUD panel seen in the headset: a ring of HUD pictures; NPC portraits on the panel)._
+_Last updated: 2026-10-23 (merged vr-map-glow-fix: minimap fixed in first person, per-eye glow, VR > GLOW off by default; motion controls M0 hands and M3 swing prototype)._
+
+## Minimap and enemy glow in the headset (2026-10-23)
+
+- **Report (PS VR2, `vr-theater`):** "the map seems buggy and the glow from
+  enemy somehow become separate from body". Two L3 captures in the Ruins
+  (`vrshot_010170`, `vrshot_011460`) with GE dumps.
+- **The map:** 12 of the minimap's 3D map draws were traced `world`, moved
+  per eye with their scissor moved to `302,97-330,118`; the HUD picture's
+  minimap was a flat sheet. `psp2i_hud_panel` puts the map on the panel by
+  clip w > 1000, but in the Ruins the map's w is −1035..883. Fixed in
+  psprecomp `stereo_classify`: a HUD-pass draw clipped to a window smaller
+  than the screen (the minimap's `403,6-473,76`, the only one in 58 dumps)
+  goes to the panel.
+- **The glow:** the enemy's glow is `fx` draws (small orthographic sprites,
+  w 1), placed at a fixed `fx_dist` (55, or the player's distance in first
+  person) along the camera ray, while the body was ~106 units away: the two
+  eyes saw the glow at another depth. The sprites carry the body's depth
+  value, so `fx_vertex` now reads the distance from it through the latest
+  scene draw's projection (`stereo_fx_latch` follows PROJ changes; the
+  frame's first draw, the sky, has another depth row), with `fx_dist` as
+  the fallback. Hit sparks and techniques get their own depth the same way.
+- **Second report (first person, old build):** "basically any glowing
+  effect", and "the minimap still behave like we are seeing it in first
+  person, like it lay flat". The map's 3D draws had vertices behind their
+  camera (w down to −1399) only in the first-person runs; in the 16:03 and
+  16:12 dumps it was a correct top-down map. Cause: the minimap's camera
+  (`094AFD40`, applied 3 times a frame after the scene walk) has the
+  field's projection x scale 1.368, so `hook_apply_camera` put it at the
+  head too, and `hook_set_projection` widened its projection. Fixed: only
+  the frame's first field camera is the field camera; others are applied,
+  and their projection set, as the game made them (`g_fp_other_cam`).
+- **Minimap: confirmed fixed in the headset** (user, 2026-10-23).
+- **The glow pass** (glowing parts drawn into `0x154000`, shrunk and
+  blurred through `0x044000` / `0x066000`, added over the scene): it was the
+  same picture in both eyes (0 px apart in a capture, against the body's
+  3 px): d3d11 `texture_view` decoded the 512x512 glow texture from VRAM
+  (the mono, left picture) as it is taller than the target's 272 rows.
+  Fixed: a target with eye copies is always sampled from the GPU, each eye
+  its own copy (a dev log line names any eye draw that still samples a
+  target without its copy: none in the next run). The user still saw glows
+  drift off enemies and weapons with it on, so **VR > GLOW** (`vr_glow=`,
+  psprecomp `no_glow`: a frame's 3D draws into another target than its
+  scene's are dropped) turns the glow pass off in the headset; with it off,
+  enemies and weapons look right (user). **Off by default** (user's choice)
+  until the drift below is fixed.
+- **The door (user's annotated capture `vrshot_011413`, GLOW off):** the
+  small light in the door is the door's own lamp and sits on it; its larger
+  halo is the glow pass, so with GLOW off it is gone and with GLOW on it
+  drifts like the rest. The red cluster in `vrshot_004157` is a weapon's
+  spell (`fx` sprites), placed on its caster.
+
+### Open: the glow pass drifts with GLOW on (next step)
+
+State: branch `vr-map-glow-fix` (psprecomp's branch of the same name),
+pushed to `origin`; built in the worktree
+`.claude/worktrees/objective-davinci-e360ad`. The user confirmed the
+minimap and that GLOW off looks right for enemies and weapons; GLOW is off
+by default (their choice), and the branch is pushed to `origin`.
+
+What is known about the drift (captures in `port/build/Release/captures`
+of that worktree, logs `port/testwork/p3/vr_mapglow1..5.log`):
+- At render scale 5 the game's blur hardly blurs: the glow in the eyes is
+  a sharp copy of the glowing parts, displaced from them by 40-80 eye px
+  (`vrshot_003647`: the NPC's yellow glow left of her, a green arc up-left
+  of the shark's blade). The game's own picture of the frame after shows
+  neither, so it is the eyes' copy, not the game's.
+- Each eye samples its own copies through the whole chain (the dev log
+  "eye N samples VRAM+... without its own copy" never fired), the frame
+  latches once (one `latched:` per trace), and the chain's targets are all
+  `stride x 512` with the same S x SY scale, so the copies line up.
+- Many glow-buffer draws have vertices at or behind the game camera
+  (clip w −25..2: the first-person player's own glowing parts) and
+  `vrshot_007260` / `006782` show long yellow wedges in the sky: those are
+  glow-buffer geometry, drawn stretched in the eyes.
+- Next: trace the glow-buffer draws themselves (fb `0x154000`) per eye:
+  their eye-space w after `g_st_k`, whether `g_st_k_ok` holds for their
+  PROJ, and whether `near_w` clips them as it clips the body; compare one
+  glow draw's eye box with the body draw it belongs to. `psp2i-hook-re` /
+  the stereo trace (`st_trace_draw` lists only non-moved draws; add the
+  glow target's moved draws).
 
 ## Handoff: start here (2026-10-22)
 
