@@ -3,7 +3,7 @@
  * (loader, runtime, session, swapchain, bindings) can be checked on its own,
  * e.g. against SteamVR's null headset. The hands are shown as in input mode
  * MOTION, their poses printed each second, and Cross / Square buzz the right /
- * left controller (P5 M0's check without the game).
+ * left controller, and swings are printed (P5 M0 and M3 checks without the game).
  *
  *   vr_test [seconds]        default 30; Ctrl+C ends it early */
 #include <stdio.h>
@@ -54,6 +54,8 @@ int main(int argc, char **argv) {
         if (s == VR_NO_LOADER || s == VR_NO_RUNTIME || s == VR_FAILED) break;
         vr_pad p;
         const int live = vr_pad_get(&p);
+        for (int i = 0; i < 2; i++)
+            if (p.swing[i]) { printf("swing %s %.1f m/s%s\n", i ? "right" : "left", p.swing_speed[i], p.swing[i] == 2 ? " with the grip" : ""); fflush(stdout); }
         if (live && memcmp(&p, &last, sizeof p)) {
             printf("pad: buttons %04X  left %3u,%3u  right %3u,%3u  host %X\n", p.buttons, p.ax, p.ay, p.rx, p.ry, p.host);
             fflush(stdout);

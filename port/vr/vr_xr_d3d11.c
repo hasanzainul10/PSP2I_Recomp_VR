@@ -76,7 +76,8 @@ static char g_dir[600];
 
 static SRWLOCK  g_cfg_lock = SRWLOCK_INIT;
 static vr_config g_cfg = { VR_DISTANCE_DEFAULT, VR_WIDTH_DEFAULT, VR_SCALE_DEFAULT, 0,
-                           VR_HUD_DISTANCE_DEFAULT, VR_HUD_DROP_DEFAULT, 2.4f, VR_HUD_FOLLOW_DEFAULT };
+                           VR_HUD_DISTANCE_DEFAULT, VR_HUD_DROP_DEFAULT, 2.4f, VR_HUD_FOLLOW_DEFAULT, 0, 0,
+                           VR_SWING_SPEED_DEFAULT };
 static float     g_ipd = VR_IPD_DEFAULT;    /* under g_cfg_lock */
 static float     g_tan_fov = 0.7311f;       /* the pictures' horizontal half-FOV tangent (the game's: fovy 45, 480:272) */
 static float     g_tan_fov_y;               /* ... and vertical; 0 = from the picture's shape */
@@ -108,6 +109,15 @@ static float    g_buzz_amp[2], g_buzz_s[2];
 
 static SRWLOCK  g_pad_lock = SRWLOCK_INIT;
 static vr_pad   g_pad = { 0, 128, 128, 128, 128, 0 };
+/* Swings (P5 M3, as PSUEx-VR detects them): a hand over the swing speed for
+ * 2 headset frames in a row is one swing; it counts again only once the hand
+ * has slowed under SWING_REARM. Latched here until vr_pad_get takes it. */
+#define SWING_REARM 0.8f
+static uint8_t  g_swing[2];                 /* under g_pad_lock */
+static float    g_swing_top[2];
+static int      g_swing_armed[2] = { 1, 1 }, g_swing_n[2];
+static float    g_swing_peak[2];
+static float    g_hand_speed[2];            /* this headset frame's (track_hands) */
 static int      g_pad_live;
 
 /* ---- the VR thread's state -------------------------------------------------- */
@@ -527,7 +537,29 @@ static void input_update(int focused) {
         if (get_bool(A_TRIANGLE)) p.buttons |= P_TRIANGLE;
         if (trigger(get_float(A_LTRIG), &g_ltrig_on)) p.buttons |= P_L;
         if (trigger(get_float(A_RTRIG), &g_rtrig_on)) p.buttons |= P_R;
-        if (get_float(A_RGRIP) > 0.5f) p.buttons |= P_SELECT;
+        AcquireSRWLockShared(&g_cfg_lock);
+        const int motion = g_cfg.motion;
+        const float swing_speed = g_cfg.swing_speed;
+        ReleaseSRWLockShared(&g_cfg_lock);
+        const int grip[2] = { get_float(A_LGRIP) > 0.5f, get_float(A_RGRIP) > 0.5f };
+        if (grip[1] && !motion) p.buttons |= P_SELECT;   /* MOTION: the right grip picks the Photon Art */
+        for (int h = 0; h < 2; h++) {
+            const float v = g_hand_speed[h];
+            if (!motion || v < SWING_REARM) {
+                g_swing_armed[h] = 1;
+                g_swing_n[h] = 0;
+                g_swing_peak[h] = 0;
+                continue;
+            }
+            if (v > g_swing_peak[h]) g_swing_peak[h] = v;
+            if (g_swing_armed[h] && v > swing_speed && ++g_swing_n[h] >= 2) {
+                g_swing_armed[h] = 0;
+                AcquireSRWLockExclusive(&g_pad_lock);
+                g_swing[h] = (uint8_t)(grip[h] ? 2 : 1);
+                g_swing_top[h] = g_swing_peak[h];
+                ReleaseSRWLockExclusive(&g_pad_lock);
+            }
+        }
         if (get_bool(A_START)) p.buttons |= P_START;
         const int rc = get_bool(A_RCLICK);
         if (rc) p.host |= VR_HOST_MENU;
@@ -1029,11 +1061,30 @@ static void track_hands(XrTime t) {
     vr_hand h[2];
     memset(h, 0, sizeof h);
     const XrQuaternionf unyaw = { 0, -sinf(g_ref_yaw * 0.5f), 0, cosf(g_ref_yaw * 0.5f) };
+    static XrVector3f prev_p[2];
+    static XrTime prev_t[2];
     for (int i = 0; i < 4; i++) {
         XrSpaceLocation loc = { XR_TYPE_SPACE_LOCATION };
+        XrSpaceVelocity vel = { XR_TYPE_SPACE_VELOCITY };
+        if (i < 2) loc.next = &vel;                          /* the grips' speed: swings */
         g_hloc_ok[i] = g_hspace[i] && XR_SUCCEEDED(p_xrLocateSpace(g_hspace[i], g_local, t, &loc)) &&
                        (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) &&
                        (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT);
+        if (i < 2) {
+            /* The runtime's velocity, or the change since the last frame. */
+            float sp = 0;
+            if (!g_hloc_ok[i]) prev_t[i] = 0;
+            else if (vel.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT)
+                sp = sqrtf(vel.linearVelocity.x * vel.linearVelocity.x + vel.linearVelocity.y * vel.linearVelocity.y +
+                           vel.linearVelocity.z * vel.linearVelocity.z);
+            else if (prev_t[i] && t > prev_t[i]) {
+                const float dx = loc.pose.position.x - prev_p[i].x, dy = loc.pose.position.y - prev_p[i].y,
+                            dz = loc.pose.position.z - prev_p[i].z;
+                sp = sqrtf(dx * dx + dy * dy + dz * dz) / (float)((double)(t - prev_t[i]) * 1e-9);
+            }
+            if (g_hloc_ok[i]) { prev_p[i] = loc.pose.position; prev_t[i] = t; }
+            g_hand_speed[i] = sp;
+        }
         if (!g_hloc_ok[i]) continue;
         g_hloc[i] = loc.pose;
         const XrQuaternionf q = qmul(unyaw, loc.pose.orientation);
@@ -1487,6 +1538,7 @@ void vr_configure(const vr_config *cfg) {
     g_cfg.width_m = cfg->width_m;
     g_cfg.stereo = cfg->stereo;
     g_cfg.motion = cfg->motion;
+    g_cfg.swing_speed = cfg->swing_speed > 0 ? cfg->swing_speed : VR_SWING_SPEED_DEFAULT;
     if (cfg->hud_distance_m > 0) {
         g_cfg.hud_distance_m = cfg->hud_distance_m;
         g_cfg.hud_drop_m = cfg->hud_drop_m;
@@ -1604,6 +1656,13 @@ int vr_pad_get(vr_pad *out) {
     const int live = g_pad_live;
     *out = g_pad;
     ReleaseSRWLockShared(&g_pad_lock);
+    AcquireSRWLockExclusive(&g_pad_lock);
+    for (int h = 0; h < 2; h++) {
+        out->swing[h] = live ? g_swing[h] : 0;
+        out->swing_speed[h] = g_swing_top[h];
+        g_swing[h] = 0;
+    }
+    ReleaseSRWLockExclusive(&g_pad_lock);
     if (!live) { out->buttons = 0; out->ax = out->ay = out->rx = out->ry = 128; out->host = 0; }
     if (InterlockedExchange(&g_shot, 0) && live) out->host |= VR_HOST_SHOT;
     return live;

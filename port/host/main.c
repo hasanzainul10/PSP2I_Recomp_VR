@@ -1026,6 +1026,16 @@ typedef struct {
     float aim_p[3], aim_d[3];   /* the pointer ray, world */
 } game_hand;
 static game_hand g_hand_w[2];
+/* M3 prototype, melee by swinging (vr_swing_speed= m/s, MOTION only): a swing
+ * of either hand presses Square, with that hand's grip held Triangle (the
+ * palette's second action, the Photon Art slot), for SWING_PRESS game frames.
+ * It goes through the pad like a button, so the first-person attack nudge
+ * turns the character to the view first. */
+#define SWING_SPEED_INI_DEFAULT 1.8f            /* = vr.h VR_SWING_SPEED_DEFAULT */
+#define SWING_PRESS 3
+static float    g_vr_swing = SWING_SPEED_INI_DEFAULT;
+static uint32_t g_swing_btn;                    /* the attack being pressed, 0 = none */
+static uint64_t g_swing_flip;                   /* ... since this flip */
 /* ... and its projection that much wider across / up (1 = the game's): the
  * eyes' view plus VR_FP_VIEW_MARGIN, so the game culls nothing the eyes see,
  * even as they turn before the next frame (user: "when I look up the bottom
@@ -1081,7 +1091,7 @@ static void vr_apply(void) {
     const vr_config cfg = { g_vr_dist_dm / 10.0f, g_vr_width_dm / 10.0f, g_hi_s > 1 ? g_hi_s : VR_SCALE_DEFAULT,
                             g_vr_stereo && g_renderer == REN_D3D11, g_vr_hud_dist, VR_HUD_DROP_DEFAULT,
                             2.0f * g_vr_hud_dist * 0.7311f * g_vr_hud_size, g_vr_hud_follow,
-                            g_hi_s > 1 ? g_hi_sy : 0, g_vr_motion };
+                            g_hi_s > 1 ? g_hi_sy : 0, g_vr_motion, g_vr_swing };
     if (g_vr_on && !g_vr_live && !g_headless) {
         vr_set_swap_circle_cross(g_swap_oc);
         g_vr_live = vr_start(g_exe_dir, &cfg) == 0;
@@ -2075,6 +2085,10 @@ static int display_load(void) {
         }
         else if (!strncmp(line, "vr_fp_nudge=", 12)) g_vr_fp_nudge = strncmp(line + 12, "off", 3) != 0;
         else if (!strncmp(line, "vr_input=", 9))     g_vr_motion = !strncmp(line + 9, "motion", 6);
+        else if (!strncmp(line, "vr_swing_speed=", 15)) {
+            const float k = (float)atof(line + 15);
+            if (k >= 1.0f && k <= 5.0f) g_vr_swing = k;
+        }
         else if (!strncmp(line, "vr_fp_scale=", 12)) {
             const float k = (float)atof(line + 12);
             if (k >= 0.5f && k <= 20.0f) g_vr_fp_scale = k;
@@ -2165,6 +2179,9 @@ static void display_save(int res) {
     fprintf(f, "; VR input: pad = a gamepad (or the VR controllers as one), motion = the VR controllers' hands shown"
                " where they are (motion controls build on it; the buttons stay the pad's)\n");
     fprintf(f, "vr_input=%s\n", g_vr_motion ? "motion" : "pad");
+    fprintf(f, "; with motion: swing a controller faster than swing speed (m/s, 1.0..5.0) to attack (Square); with that hand's"
+               " grip held, Triangle (the Photon Art slot)\n");
+    fprintf(f, "vr_swing_speed=%.1f\n", (double)g_vr_swing);
     fprintf(f, "; VR image quality (from the next start, VR only): aniso = texture filtering 0 (off) or 2..16;"
                " sharpen = sharpening of the headset's pictures 0.0 (off) .. 1.0\n");
     fprintf(f, "vr_aniso=%d\nvr_sharpen=%.2f\n", g_vr_aniso, (double)g_vr_sharpen);
@@ -2402,6 +2419,23 @@ static void poll_controllers(void) {
 #ifndef PSP2I_PROD
         if (vp.host & VR_HOST_SHOT) vrshot_request();   /* left grip + left stick click: like F11 */
 #endif
+        /* Swings (MOTION): a press of Square / Triangle for a few game frames;
+         * a new swing restarts it. A buzz on that hand says it went. */
+        const uint64_t fl = psp_display_flips();
+        for (int h = 0; h < 2; h++) {
+            if (!vp.swing[h] || !g_vr_motion) continue;
+            const uint32_t btn = vp.swing[h] == 2 ? 0x1000u : 0x8000u;   /* Triangle with the grip, else Square */
+            if (g_menu.open) continue;
+            g_swing_btn = btn;
+            g_swing_flip = fl;
+            vr_haptic(h, 0.4f, 0.05f);
+#ifndef PSP2I_PROD
+            fprintf(stderr, "vr: swing %s %.1f m/s%s: %s\n", h ? "right" : "left", (double)vp.swing_speed[h],
+                    vp.swing[h] == 2 ? " with the grip" : "", btn == 0x1000u ? "Triangle" : "Square");
+#endif
+        }
+        if (g_swing_btn && fl - g_swing_flip < SWING_PRESS) b |= g_swing_btn;
+        else g_swing_btn = 0;
     }
     /* A gamepad in VR (no motion controllers needed): L3 tapped recenters,
      * L3 held a second saves a VR capture (dev builds) instead. L3 is no

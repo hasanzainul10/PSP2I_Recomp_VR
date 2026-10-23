@@ -385,6 +385,26 @@ the world; the user found it overwhelming. Those were removed. Now:
     Hands logged 2.0-3.6 units above the feet and 3.2-4.7 across (first
     person, 3.8 units/m): far out, partly the eyes' 1.2-unit forward
     offset; check against the body when M2's arms need it.
+- **M3 prototype, melee by swinging (2026-10-23): built, not yet tried in
+  the headset.**
+  - **Detection:** in the VR thread at the headset's rate, as PSUEx-VR does
+    it. A grip moving faster than `vr_swing_speed` (default 1.8 m/s) for
+    2 headset frames is one swing. It counts again only once the hand has
+    slowed under 0.8 m/s. The speed is the runtime's velocity (a
+    `XrSpaceVelocity` on the grip's locate), or the position change when the
+    runtime gives none. Swings are latched in `vr_pad.swing[]` (1 a swing, 2
+    with that hand's grip), with the top speed.
+  - **The press:** in `poll_controllers`, Square for 3 game frames
+    (`SWING_PRESS`), or Triangle (the palette's second, Photon Art, slot)
+    with the grip held. Either hand counts. Each swing buzzes that hand.
+    It goes through the pad, so `fp_nudge` turns the character to the view
+    first (F1). There's no Just Attack timing or combo buffer yet: that
+    needs the game's attack state (VR_PLAN M3's reverse engineering).
+  - **Changed in MOTION mode:** the right grip no longer presses Select
+    (it picks the Photon Art). The left grip still turns the left stick
+    into the D-pad.
+  - **Logs and tools:** dev log `vr: swing right 2.6 m/s: Square`.
+    `vr_test` prints swings too. Not in the engine menu yet (ini only).
 
 **Next (in order):**
 1. **Try the controller capture in the headset:** left grip + left stick

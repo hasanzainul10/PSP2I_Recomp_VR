@@ -29,8 +29,12 @@ typedef struct {
      * hud_follow_deg away (0: it stays where recenter put it). */
     float hud_distance_m, hud_drop_m, hud_width_m, hud_follow_deg;
     int   scale_y;      /* swapchain pixels per game pixel down, scale..8 (taller eye pictures); 0 = scale */
-    int   motion;       /* input mode MOTION: the hands are shown where the controllers are (vr_hands_get) */
+    int   motion;       /* input mode MOTION: the hands are shown where the controllers are (vr_hands_get), swings
+                           are reported (vr_pad.swing) and the right grip is no longer Select */
+    float swing_speed;  /* m/s a hand must pass to count as a swing (0 = VR_SWING_SPEED_DEFAULT) */
 } vr_config;
+
+#define VR_SWING_SPEED_DEFAULT 1.8f   /* PSUEx-VR's */
 
 #define VR_DISTANCE_DEFAULT 2.5f
 #define VR_WIDTH_DEFAULT    3.0f
@@ -136,6 +140,11 @@ typedef struct {
     uint32_t buttons;
     uint8_t  ax, ay, rx, ry;
     uint32_t host;
+    /* Input mode MOTION: a swing per hand since the last call (0 none, 1 a
+     * swing, 2 a swing with that hand's grip held), each reported once, and
+     * the hand's top speed in it (m/s). */
+    uint8_t  swing[2];
+    float    swing_speed[2];
 } vr_pad;
 enum {
     VR_HOST_MENU = 1 << 0,        /* the engine menu's toggle (right stick click) */
