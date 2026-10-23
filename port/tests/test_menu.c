@@ -888,10 +888,10 @@ static void test_vr_page(void) {
     CHECK(menu_vr_filter_aniso(VR_FILTER_OFF) == 0 && menu_vr_filter_aniso(VR_FILTER_4X) == 4 &&
           menu_vr_filter_aniso(VR_FILTER_16X) == 16 && menu_vr_filter_of(16) == VR_FILTER_16X && menu_vr_filter_of(0) == VR_FILTER_OFF);
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
-    CHECK(m.sel == MENU_VR_GLOW && m.vr_glow == 1);              /* the game's glow, on by default */
-    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_VR && m.vr_glow == 0);
+    CHECK(m.sel == MENU_VR_GLOW && m.vr_glow == 0);              /* the game's glow, off by default */
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_VR && m.vr_glow == 1);
     menu_update(&m, 0, 0);
-    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_VR && m.vr_glow == 1);
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_VR && m.vr_glow == 0);
     menu_update(&m, 0, 0);
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_VR_RECENTER && menu_update(&m, MI_CONFIRM, 0) == MFX_VR_RECENTER);

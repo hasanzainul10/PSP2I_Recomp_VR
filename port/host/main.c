@@ -1333,12 +1333,13 @@ static int      g_vr_cull_all = 1;
  * culling (psp_gpu_stereo.two_sided): "angles not viewable in the original
  * game are not rendered" (user): one-sided walls and roofs seen from behind. */
 static int      g_vr_two_sided = 1;
-/* vr_glow=off (head tracking; VR > GLOW): the game's glow pass is left out
- * of the eyes (psp_gpu_stereo.no_glow): the parts that glow are drawn into
- * their own buffer, blurred on the game's 480x272 screen and added over the
- * scene, which in the eyes sat off what glows (user, 2026-10-23: "the glow
- * move around"). */
-static int      g_vr_glow = 1;
+/* vr_glow=off (head tracking; VR > GLOW; the default): the game's glow pass
+ * is left out of the eyes (psp_gpu_stereo.no_glow): the parts that glow are
+ * drawn into their own buffer, blurred on the game's 480x272 screen and
+ * added over the scene, which in the eyes sat off what glows (user,
+ * 2026-10-23: "the glow move around"; off by the user's choice until that
+ * is fixed). */
+static int      g_vr_glow = 0;
 static uint64_t n_cull_all;
 static void hook_cull_test(void (*original)(void)) {
     if (!g_head_on || !g_vr_cull_all) { original(); return; }

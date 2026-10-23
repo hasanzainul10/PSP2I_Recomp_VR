@@ -49,7 +49,8 @@ _Last updated: 2026-10-23 (minimap fixed in first person; per-eye glow; VR > GLO
   drift off enemies and weapons with it on, so **VR > GLOW** (`vr_glow=`,
   psprecomp `no_glow`: a frame's 3D draws into another target than its
   scene's are dropped) turns the glow pass off in the headset; with it off,
-  enemies and weapons look right (user).
+  enemies and weapons look right (user). **Off by default** (user's choice)
+  until the drift below is fixed.
 - **The door (user's annotated capture `vrshot_011413`, GLOW off):** the
   small light in the door is the door's own lamp and sits on it; its larger
   halo is the glow pass, so with GLOW off it is gone and with GLOW on it
@@ -58,11 +59,11 @@ _Last updated: 2026-10-23 (minimap fixed in first person; per-eye glow; VR > GLO
 
 ### Open: the glow pass drifts with GLOW on (next step)
 
-State: branch `vr-map-glow-fix` (commit `29cf6a4`, psprecomp `5fc8a2c`
-on psprecomp's `vr-map-glow-fix`), **not pushed**; built in the worktree
+State: branch `vr-map-glow-fix` (psprecomp's branch of the same name),
+pushed to `origin`; built in the worktree
 `.claude/worktrees/objective-davinci-e360ad`. The user confirmed the
-minimap and that GLOW off looks right for enemies and weapons; push once
-they decide the GLOW default.
+minimap and that GLOW off looks right for enemies and weapons; GLOW is off
+by default (their choice), and the branch is pushed to `origin`.
 
 What is known about the drift (captures in `port/build/Release/captures`
 of that worktree, logs `port/testwork/p3/vr_mapglow1..5.log`):

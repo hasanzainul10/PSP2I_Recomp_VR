@@ -27,7 +27,7 @@ void menu_init(menu_state *m, int fps, int show_fps) {
     m->vr_res = m->vr_res_now = 3;
     m->vr_sharpen = 5;
     m->vr_filter = VR_FILTER_16X;
-    m->vr_glow = 1;
+    m->vr_glow = 0;
     /* The touch host shows the touch items; a host built with VR shows VR. */
     m->hidden = MENU_BIT(MENU_TOUCH_COLOR) | MENU_BIT(MENU_TOUCH_ALPHA) | MENU_BIT(MENU_VR);
 }
