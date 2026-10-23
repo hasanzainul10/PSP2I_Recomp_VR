@@ -1027,6 +1027,18 @@ typedef struct {
     float aim_p[3], aim_d[3];   /* the pointer ray, world */
 } game_hand;
 static game_hand g_hand_w[2];
+/* vr_menu_dpad=on (VR only): in the game's menus the left stick is the
+ * D-pad, as PSUEx-VR switches it (PSP2i's menus take only the D-pad). The
+ * game's own "a menu is open" isn't mapped yet; this follows the menus'
+ * cursor pulse counter 0x08EE2F70 (ADDRESS_MAP: 0..0x3F a game frame at a
+ * time while a field or shop menu runs, pausing at 0 up to ~22 vblanks,
+ * still at 0 in the field). It finishes its cycle after a menu closes (1-2
+ * s), so Start, which closes the start menu, ends it at once until the
+ * counter starts again. */
+#define PSP2I_MENU_CURSOR_COUNTER 0x08EE2F70u
+#define MENU_DPAD_HOLD_VB 30                    /* vblanks after the counter's last change */
+static int g_vr_menu_dpad = 1;
+static int g_menu_dpad_on;                      /* the stick is the D-pad now (logged on change) */
 /* M3 prototype, melee by swinging (vr_swing_speed= m/s, MOTION only): a swing
  * or a trigger pull of either hand presses Square, with that hand's grip held
  * Triangle (the palette's second action, the Photon Art slot), for SWING_PRESS
@@ -1466,6 +1478,21 @@ static void mf_sample(void) {
             last[k] = v;
         }
         have = 1;
+        /* Each menu's own start gets a stack: once the counter has been 0 for
+         * 90 vblanks (a menu closed, not a wrap inside one) the write watch is
+         * armed again. The first 32 writes all came from the title menu, whose
+         * path the in-game menus don't take (run 2026-10-23: its functions ran
+         * 0 times in the start menu). */
+        static uint64_t zero_since;
+        static int armed;
+        const uint64_t vbn = psp_sched_vblank_count();
+        if (last[0] == 0) {                       /* from the start: no label needed */
+            if (!zero_since) zero_since = vbn;
+            if (!armed && vbn - zero_since >= 90) { psp_mem_watch_write(0x08EE2F70u); armed = 1; }
+        } else if (last[0] != 0) {
+            zero_since = 0;
+            armed = 0;
+        }
     }
     const uint64_t fl = psp_display_flips();
     if (!g_mf_on || fl < g_mf_from_flip || fl - g_mf_last_flip < MENUF_EVERY) return;
@@ -1489,6 +1516,86 @@ static void mf_sample(void) {
             if (m[i] != g_mf_field[i] && g_mf_fbad[i] < 65535) g_mf_fbad[i]++;
         if (g_mf_n[0] < 65535) g_mf_n[0]++;
     }
+}
+#endif
+
+#ifndef PSP2I_PROD
+/* Dev: the functions on the path that starts the menus' cursor counter
+ * (0x08EE2F70's first write, its stack: ... 0x089D161C < 0x089DC598 <
+ * 0x089DDF1C < 0x089F0C20 < 0x089F0BBC < 0x089D06E8 < the scene dispatcher
+ * 0x089F7A64), counted per second against the menu finder's label: the one
+ * that runs exactly while a menu is open is the game's own "a menu is open". */
+#define MENU_PATH_N 5
+static const uint32_t MENU_PATH[MENU_PATH_N] = { 0x089D06E8u, 0x089F0BBCu, 0x089DDF1Cu, 0x089DC598u, 0x089D161Cu };
+static unsigned g_mp_n[MENU_PATH_N];
+static uint32_t g_mp_obj[MENU_PATH_N];        /* the last $a0 */
+static void mp_count(int k) { g_mp_n[k]++; g_mp_obj[k] = psp_cpu.r[4]; }
+#define MENU_PATH_HOOK(k) static void hook_menu_path##k(void (*original)(void)) { mp_count(k); original(); }
+MENU_PATH_HOOK(0) MENU_PATH_HOOK(1) MENU_PATH_HOOK(2) MENU_PATH_HOOK(3) MENU_PATH_HOOK(4)
+static void hook_task_walk(void (*original)(void));   /* below: the live tasks */
+static void menu_path_init(void) {
+    psp_hook_set(MENU_PATH[0], hook_menu_path0); psp_hook_set(MENU_PATH[1], hook_menu_path1);
+    psp_hook_set(MENU_PATH[2], hook_menu_path2); psp_hook_set(MENU_PATH[3], hook_menu_path3);
+    psp_hook_set(MENU_PATH[4], hook_menu_path4);
+    psp_hook_set(0x089F7A48u, hook_task_walk);
+}
+/* Dev: the game's live tasks (the scene dispatcher 0x089F7A64 runs each
+ * task's update, vtable +8; 0x089F7A48 walks a parent's children: first
+ * +20, next +12, flags +4). Each second the set of task vtables seen is
+ * compared with the last second's, and the ones that came or went are
+ * logged with their update function: a menu opening shows as its tasks
+ * appearing, with no labels needed. */
+#define TASKS_MAX 256
+static uint32_t g_task_vt[TASKS_MAX], g_task_upd[TASKS_MAX], g_task_prev[TASKS_MAX];
+static int      g_task_n, g_task_prev_n;
+static void hook_task_walk(void (*original)(void)) {
+    uint32_t c = psp_read32(psp_cpu.r[4] + 20u);
+    for (int guard = 0; c && guard < 64; guard++, c = psp_read32(c + 12u)) {
+        const uint32_t vt = psp_read32(c);
+        int k = 0;
+        while (k < g_task_n && g_task_vt[k] != vt) k++;
+        if (k == g_task_n && g_task_n < TASKS_MAX) { g_task_vt[g_task_n] = vt; g_task_upd[g_task_n] = psp_read32(vt + 8u); g_task_n++; }
+    }
+    original();
+}
+static void tasks_log(uint64_t vb) {
+    static uint64_t since;
+    static unsigned lines;
+    if (vb - since < 60) return;
+    since = vb;
+    if (!g_task_n) return;                         /* no walks this second (loading): keep the last set */
+    if (g_task_prev_n) {
+        for (int k = 0; k < g_task_n; k++) {
+            int j = 0;
+            while (j < g_task_prev_n && g_task_prev[j] != g_task_vt[k]) j++;
+            if (j == g_task_prev_n && lines++ < 2000)
+                fprintf(stderr, "vr: task + vtable %08X update %08X (vblank %llu)\n", g_task_vt[k], g_task_upd[k], (unsigned long long)vb);
+        }
+        for (int j = 0; j < g_task_prev_n; j++) {
+            int k = 0;
+            while (k < g_task_n && g_task_vt[k] != g_task_prev[j]) k++;
+            if (k == g_task_n && lines++ < 2000)
+                fprintf(stderr, "vr: task - vtable %08X (vblank %llu)\n", g_task_prev[j], (unsigned long long)vb);
+        }
+    }
+    memcpy(g_task_prev, g_task_vt, sizeof g_task_prev);
+    g_task_prev_n = g_task_n;
+    g_task_n = 0;
+}
+
+/* Each second (60 vblanks), when anything was called or the label is on. */
+static void menu_path_log(uint64_t vb, int labelled, int menu) {
+    static uint64_t since;
+    if (vb - since < 60) return;
+    since = vb;
+    unsigned any = 0;
+    for (int k = 0; k < MENU_PATH_N; k++) any |= g_mp_n[k];
+    if (any || labelled) {
+        fprintf(stderr, "vr: menu path per s (%s, vblank %llu):", !labelled ? "-" : menu ? "menu" : "field", (unsigned long long)vb);
+        for (int k = 0; k < MENU_PATH_N; k++) fprintf(stderr, " %08X %u [a0 %08X]", MENU_PATH[k], g_mp_n[k], g_mp_obj[k]);
+        fprintf(stderr, "\n");
+    }
+    memset(g_mp_n, 0, sizeof g_mp_n);
 }
 #endif
 
@@ -2233,6 +2340,7 @@ static int display_load(void) {
         }
         else if (!strncmp(line, "vr_fp_nudge=", 12)) g_vr_fp_nudge = strncmp(line + 12, "off", 3) != 0;
         else if (!strncmp(line, "vr_input=", 9))     g_vr_motion = !strncmp(line + 9, "motion", 6);
+        else if (!strncmp(line, "vr_menu_dpad=", 13)) g_vr_menu_dpad = strncmp(line + 13, "off", 3) != 0;
         else if (!strncmp(line, "vr_swing_speed=", 15)) {
             const float k = (float)atof(line + 15);
             if (k >= 1.0f && k <= 5.0f) g_vr_swing = k;
@@ -2334,6 +2442,9 @@ static void display_save(int res) {
     fprintf(f, "; with motion: swing a controller faster than swing speed (m/s, 1.0..5.0) to attack (Square); with that hand's"
                " grip held, Triangle (the Photon Art slot)\n");
     fprintf(f, "vr_swing_speed=%.1f\n", (double)g_vr_swing);
+    fprintf(f, "; VR: menu dpad = on: in the game's menus the left stick moves the cursor as the D-pad (for a moment after a"
+               " menu closes too; Start ends it at once), off = the stick stays the stick\n");
+    fprintf(f, "vr_menu_dpad=%s\n", g_vr_menu_dpad ? "on" : "off");
     fprintf(f, "; VR image quality (from the next start, VR only): aniso = texture filtering 0 (off) or 2..16;"
                " sharpen = sharpening of the headset's pictures 0.0 (off) .. 1.0\n");
     fprintf(f, "vr_aniso=%d\nvr_sharpen=%.2f\n", g_vr_aniso, (double)g_vr_sharpen);
@@ -2607,6 +2718,32 @@ static void poll_controllers(void) {
         }
         if (g_swing_btn && fl - g_swing_flip < SWING_PRESS) b |= g_swing_btn;
         else g_swing_btn = 0;
+    }
+    if (g_vr_live) {
+        /* In the game's menus the left stick presses the D-pad (vr_menu_dpad). */
+        static uint32_t last_v, prev_b;
+        static uint64_t changed_vb;
+        static int ended;
+        const uint64_t vb = psp_sched_vblank_count();
+        const uint32_t v = psp_read32(PSP2I_MENU_CURSOR_COUNTER);
+        if (v != last_v) {
+            if (last_v == 0) ended = 0;                 /* it starts again: a menu runs */
+            changed_vb = vb;
+            last_v = v;
+        }
+        int on = g_vr_menu_dpad && changed_vb && vb - changed_vb < MENU_DPAD_HOLD_VB && !ended && !g_menu.open;
+        if (on && (b & ~prev_b & 0x0008u)) { ended = 1; on = 0; }   /* Start: the start menu closes */
+        prev_b = b;
+        if (on != g_menu_dpad_on) fprintf(stderr, "vr: left stick %s (vblank %llu)\n", on ? "is the D-pad (a game menu)" : "moves again",
+                                          (unsigned long long)vb);
+        g_menu_dpad_on = on;
+        if (on && (stick_off_centre(ax, ay))) {
+            if (ay < 64)  b |= 0x0010u;                 /* up */
+            if (ay > 192) b |= 0x0040u;                 /* down */
+            if (ax < 64)  b |= 0x0080u;                 /* left */
+            if (ax > 192) b |= 0x0020u;                 /* right */
+        }
+        if (on) ax = ay = 128;
     }
     /* A gamepad in VR (no motion controllers needed): L3 tapped recenters,
      * L3 held a second saves a VR capture (dev builds) instead. L3 is no
@@ -2913,6 +3050,8 @@ static void on_vblank(void) {
 #ifndef PSP2I_PROD
         vrshot_vblank(vb);
         mf_sample();
+        menu_path_log(vb, g_mf_on, g_mf_menu_now);
+        tasks_log(vb);
 #endif
 #endif
         if (p == 1 && getenv("PSP2I_PRESENT_VERIFY")) {
@@ -4156,6 +4295,9 @@ int main(int argc, char **argv) {
     g_menu.vr_width_dm = g_vr_width_dm;
     psp_hook_set(FN_FRUSTUM_PLANES, hook_frustum_planes);   /* a no-op unless head tracking is on */
     psp_hook_set(FN_APPLY_CAMERA, hook_apply_camera);       /* a no-op unless first person is on */
+#if defined(PSP2I_VR) && !defined(PSP2I_PROD)
+    menu_path_init();                                       /* dev: count the menu path's calls */
+#endif
     psp_hook_set(FN_SET_PROJECTION, hook_set_projection);   /* a no-op unless first person is on */
 #ifndef PSP2I_PROD
     psp_hook_set(FN_NODE_VIS, hook_node_vis);               /* counts only */

@@ -221,6 +221,20 @@ Last, one through-mode draw copies `0x0CC000` to the display buffer
   by order: the frame's first field camera is the field camera. Status:
   inferred from the log and the map's change; fix built, not yet confirmed.
 
+### Menus and tasks (menu finder, write watch, task log, 2026-10-23)
+
+For the left stick as the D-pad in menus. The game's own "a menu is open"
+is not found yet; what is known:
+
+| Address | What | Status |
+|---|---|---|
+| `0x08EE2F70` | The menus' cursor pulse counter: 0..0x3F one step per game frame, wrapping, pausing at 0 up to ~22 vblanks; runs in the title menu, start menu, shops, salon, palette; 0 in the field. Finishes its cycle 1-2 s after a menu closes; one menu left it at 0 for 20 s while open. Likely +0x510 of a structure at `0x08EE2A60` (`0x088ADC34` / `0x088ADDC4` build that base). Used for `vr_menu_dpad` | seen (menu finder + change log) |
+| `0x08DA0DC4` < `0x08DA1264` < `0x08D55690` < the main update `0x08B821B8` | Writes the counter each frame (UI animation tick) | seen (write watch) |
+| `0x08DA0FB8` < `0x08DA1194` < `0x08D5F900` < `0x08D5EE58` < `0x089D172C` < ... < `0x089D06E8` | Starts the counter (writes 1) for the title / continue menu | seen (write watch) |
+| `0x089F7A64` / `0x089F7A48` | The scene dispatcher: walks a tree of tasks (children +20, next +12, vtable +0, update = vtable +8, flags +4: update skipped while flags & 0x1B) | seen (decoded) |
+| task updates `0x089D06E8`, `0x089F0BBC`, `0x089DB0AC` | The title / continue menu's tasks: they exist only while that screen is up | seen (task log) |
+| field menus (start menu, palette) | Add no tasks: a state inside always-running tasks, not mapped | open |
+
 ## Needed for VR (todo)
 
 | What | Phase | How to find it |

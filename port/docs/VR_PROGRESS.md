@@ -549,10 +549,25 @@ the world; the user found it overwhelming. Those were removed. Now:
     1-2 s after a menu closes. One menu (round 7) left it at 0 for 20 s
     while open. Nothing references the address directly. `0x088ADC34` and
     `0x088ADDC4` build the base `0x08EE2A60` (+0x510 = it).
-  - **Next:** a write watch on it, armed at the first label (stacks of its
-    first 32 writes in the log, `write... from fn`), to find the code that
-    runs menus and its "open" state. Built, not run. Which menus the rounds
-    were: asked, not answered yet.
+  - **Which menus ran it** (the user): the title / continue menu, the start
+    menu, an interior shop, the salon, the palette. Round 7 (0 for 20 s)
+    is still unknown.
+  - **Write watch and task log** (`vr_menuwatch1.log`, `vr_tasks1.log`,
+    ADDRESS_MAP "Menus and tasks"): the counter is ticked by a UI animation
+    update every frame. Its start was caught only for the title menu, whose
+    own tasks (updates `0x089D06E8` / `0x089F0BBC` / `0x089DB0AC`) exist only
+    while it is up. The field menus add no tasks: their open state sits
+    inside always-running tasks and isn't mapped.
+- **Left stick as the D-pad in menus (`vr_menu_dpad=on`, the user's pick
+  "A for now"): built, not yet tried in the headset.** In
+  `poll_controllers`, with VR on, for any left stick (controllers or
+  gamepad). While the counter `0x08EE2F70` has changed within the last 30
+  vblanks, the stick presses the D-pad (past half way) and is centred.
+  Known flaw: it stays on for up to 1-2 s after a menu closes, until the
+  counter's cycle ends. Start (closing the start menu) ends it at once,
+  until the counter starts again. Log `vr: left stick is the D-pad / moves
+  again`. VR off: unchanged (checked headless). The exact flag for field
+  menus would remove the lag (open).
 
 **Next (in order):**
 1. **Try the controller capture in the headset:** left grip + left stick
