@@ -1069,6 +1069,7 @@ static int      g_stereo_on;                /* the eyes are drawn now */
 static const uint32_t *g_eye_px[2];         /* the latest eye pictures (d3d11.c), or NULL */
 static int      g_eye_w, g_eye_h;
 static int      g_eye_new;                  /* g_eye_px changed this vblank */
+static int      g_present_p;                /* this vblank's gpu_present: 1 a new copy, 0 from VRAM, 2 kept (dev counts) */
 /* The headset takes the eyes on the GPU (d3d11_eye_share) unless sharing
  * failed; the overlay then goes as its own layer (vr_submit_overlay). */
 static int      g_overlay_up;               /* the last compose() drew something */
@@ -1367,6 +1368,129 @@ static void head_frame(psp_gpu_stereo *s) {
                 g_fp_head_ok ? "measured" : "not measured", (double)g_fp_head_off[0], (double)g_fp_head_off[2]);
 #endif
 }
+
+#ifndef PSP2I_PROD
+/* Dev: the menu finder (2026-10-23, for the left stick as the D-pad in the
+ * game's menus). The user labels the game's state (both grips + Triangle in
+ * MOTION, or gamepad L3 held + R3): each press flips "a menu is open" / "the
+ * field". Every MENUF_EVERY game frames (from a second after a flip) user RAM
+ * is sampled. Each 32-bit word keeps its first field value and counts the
+ * field samples that differ from it and the menu samples that do: its score
+ * is the share of menu samples that differ minus the share of field samples
+ * that differ (1 = the game's "a menu is open", 0 = unrelated). A strict
+ * rule (never the field value in a menu) lost every candidate to a second
+ * kind of menu that leaves the first one's flags alone (run 2026-10-23).
+ * Each flip, and the exit report, log the MENUF_SHOW best-scoring words
+ * with their counts: the game's own menu state, without guessing where. */
+#define MENUF_BASE  0x08800000u
+#define MENUF_END   0x0A000000u
+#define MENUF_WORDS ((MENUF_END - MENUF_BASE) / 4u)
+#define MENUF_EVERY 10
+#define MENUF_SHOW  40
+static uint32_t *g_mf_field, *g_mf_menu;     /* the first field value; the last menu value */
+static uint16_t *g_mf_fbad, *g_mf_mhit;      /* field samples != the field value; menu samples != it */
+static int      g_mf_menu_now, g_mf_on;
+static unsigned g_mf_flips, g_mf_n[2];
+static uint64_t g_mf_from_flip, g_mf_last_flip;
+
+static void mf_report(const char *why) {
+    if (!g_mf_fbad || !g_mf_n[0] || !g_mf_n[1]) {
+        if (g_mf_on) fprintf(stderr, "vr: menu finder (%s): %u field / %u menu samples: nothing to compare yet\n", why, g_mf_n[0], g_mf_n[1]);
+        return;
+    }
+    /* The best MENUF_SHOW by score, kept sorted (insertion into a short list). */
+    uint32_t best[MENUF_SHOW];
+    float bs[MENUF_SHOW];
+    int nb = 0;
+    const float fn = (float)g_mf_n[0], mn = (float)g_mf_n[1];
+    unsigned perfect = 0;
+    for (uint32_t i = 0; i < MENUF_WORDS; i++) {
+        if (!g_mf_mhit[i]) continue;
+        const float sc = (float)g_mf_mhit[i] / mn - (float)g_mf_fbad[i] / fn;
+        if (sc > 0.999f) perfect++;
+        if (nb == MENUF_SHOW && sc <= bs[nb - 1]) continue;
+        int k = nb < MENUF_SHOW ? nb++ : nb - 1;
+        while (k > 0 && bs[k - 1] < sc) { bs[k] = bs[k - 1]; best[k] = best[k - 1]; k--; }
+        bs[k] = sc; best[k] = i;
+    }
+    fprintf(stderr, "vr: menu finder (%s): %u field / %u menu samples over %u label flips; %u words score 1; the best:\n", why,
+            g_mf_n[0], g_mf_n[1], g_mf_flips, perfect);
+    for (int k = 0; k < nb; k++) {
+        const uint32_t i = best[k];
+        fprintf(stderr, "vr:   0x%08X score %.2f (menu %u/%u differ, field %u/%u): field 0x%08X, menu 0x%08X\n", MENUF_BASE + 4u * i,
+                (double)bs[k], g_mf_mhit[i], g_mf_n[1], g_mf_fbad[i], g_mf_n[0], g_mf_field[i], g_mf_menu[i]);
+    }
+}
+
+static void mf_mark(void) {
+    if (!g_mf_on) {
+        g_mf_field = (uint32_t *)malloc((size_t)MENUF_WORDS * 4);
+        g_mf_menu = (uint32_t *)malloc((size_t)MENUF_WORDS * 4);
+        g_mf_fbad = (uint16_t *)calloc(MENUF_WORDS, 2);
+        g_mf_mhit = (uint16_t *)calloc(MENUF_WORDS, 2);
+        if (!g_mf_field || !g_mf_menu || !g_mf_fbad || !g_mf_mhit) { fprintf(stderr, "vr: menu finder: no memory\n"); return; }
+        g_mf_on = 1;
+        g_mf_menu_now = 1;                        /* the first press: a menu is open now */
+        /* The menus' cursor counter (0x08EE2F70: 0..0x3F a game frame at a
+         * time while a menu runs, run 2026-10-23): its first 32 writes get a
+         * stack in game_log.txt, which leads to the code that runs menus. */
+        psp_mem_watch_write(0x08EE2F70u);
+        fprintf(stderr, "vr: menu finder: write watch armed on 0x08EE2F70 (stacks in game_log.txt)\n");
+    } else {
+        g_mf_menu_now = !g_mf_menu_now;
+        g_mf_flips++;
+    }
+    g_mf_from_flip = psp_display_flips() + 30;    /* a second for the menu to open or close */
+    fprintf(stderr, "vr: menu finder: now labelled %s (vblank %llu)\n", g_mf_menu_now ? "A MENU IS OPEN" : "the field",
+            (unsigned long long)psp_sched_vblank_count());
+    vr_haptic(-1, 0.3f, 0.08f);
+    mf_report("flip");
+}
+
+/* Menu samples taken before the first field sample have no field value to
+ * compare with: their values are kept (the last one) and counted against
+ * the field value once it is known, as one sample. */
+static void mf_sample(void) {
+    {   /* The best candidates so far (run 2026-10-23: 0x08EE2F70, 0 in the
+         * field, 0x15..0x3B in most menus): each change with its vblank and
+         * the label, to see which menus set them. */
+        static const uint32_t WATCH[] = { 0x08EE2F70u, 0x09866FF8u };
+        static uint32_t last[2];
+        static int have;
+        static unsigned lines;
+        for (int k = 0; k < 2; k++) {
+            const uint32_t v = psp_read32(WATCH[k]);
+            if (have && v != last[k] && lines++ < 3000)
+                fprintf(stderr, "vr: menu word 0x%08X: 0x%08X -> 0x%08X (vblank %llu, labelled %s)\n", WATCH[k], last[k], v,
+                        (unsigned long long)psp_sched_vblank_count(), !g_mf_on ? "-" : g_mf_menu_now ? "menu" : "field");
+            last[k] = v;
+        }
+        have = 1;
+    }
+    const uint64_t fl = psp_display_flips();
+    if (!g_mf_on || fl < g_mf_from_flip || fl - g_mf_last_flip < MENUF_EVERY) return;
+    g_mf_last_flip = fl;
+    const uint32_t *m = (const uint32_t *)psp_mem_ptr(MENUF_BASE, MENUF_END - MENUF_BASE);
+    if (!m) return;
+    const int menu = g_mf_menu_now;
+    if (menu) {
+        if (!g_mf_n[0]) { memcpy(g_mf_menu, m, (size_t)MENUF_WORDS * 4); g_mf_n[1] = 1; return; }
+        for (uint32_t i = 0; i < MENUF_WORDS; i++)
+            if (m[i] != g_mf_field[i]) { if (g_mf_mhit[i] < 65535) g_mf_mhit[i]++; g_mf_menu[i] = m[i]; }
+        if (g_mf_n[1] < 65535) g_mf_n[1]++;
+    } else {
+        if (!g_mf_n[0]) {                         /* the field value, and the early menu sample against it */
+            memcpy(g_mf_field, m, (size_t)MENUF_WORDS * 4);
+            if (g_mf_n[1]) for (uint32_t i = 0; i < MENUF_WORDS; i++) g_mf_mhit[i] = g_mf_menu[i] != g_mf_field[i];
+            g_mf_n[0] = 1;
+            return;
+        }
+        for (uint32_t i = 0; i < MENUF_WORDS; i++)
+            if (m[i] != g_mf_field[i] && g_mf_fbad[i] < 65535) g_mf_fbad[i]++;
+        if (g_mf_n[0] < 65535) g_mf_n[0]++;
+    }
+}
+#endif
 
 #ifndef PSP2I_PROD
 /* VR captures (dev): F11, or every PSP2I_VR_SHOT_EVERY=N seconds. For one
@@ -2258,7 +2382,12 @@ static void menu_step(void) {
     uint8_t ax = g_pad_ax, ay = g_pad_ay;
     if (g_script_stick >= 0) { ax = g_stick[g_script_stick].x; ay = g_stick[g_script_stick].y; }
     uint32_t held = menu_inputs(psp, ax, ay) | g_host_held;
-    if (input_sdl_host_buttons() & (INPUT_HOST_GUIDE | INPUT_HOST_RSTICK)) held |= MI_TOGGLE;
+    {   /* R3 or Guide opens the engine menu; not R3 while L3 is held in VR
+         * (L3 held + R3: the menu finder's label, dev builds) */
+        const uint32_t hb = input_sdl_host_buttons();
+        const int l3_chord = g_vr_live && (hb & INPUT_HOST_LSTICK);
+        if ((hb & INPUT_HOST_GUIDE) || ((hb & INPUT_HOST_RSTICK) && !l3_chord)) held |= MI_TOGGLE;
+    }
 #ifdef PSP2I_VR
     if (g_vr_host & VR_HOST_MENU) held |= MI_TOGGLE;
     snprintf(g_menu.vr_status, sizeof g_menu.vr_status, "%s", g_vr_live ? vr_status_name(vr_status()) : "");
@@ -2448,6 +2577,7 @@ static void poll_controllers(void) {
         g_vr_rx = vp.rx; g_vr_ry = vp.ry;
 #ifndef PSP2I_PROD
         if (vp.host & VR_HOST_SHOT) vrshot_request();   /* left grip + left stick click: like F11 */
+        if (vp.host & VR_HOST_MARK) mf_mark();          /* both grips + Triangle: the menu finder's label */
 #endif
         /* MOTION's shortcuts (both grips + Cross / Circle), as the gamepad's L3. */
         if (vp.host & VR_HOST_RECENTER) { vr_recenter(); g_fp_yaw_ok = 0; }
@@ -2487,6 +2617,15 @@ static void poll_controllers(void) {
         const int l3 = (input_sdl_host_buttons() & INPUT_HOST_LSTICK) != 0;
         const ULONGLONG now = GetTickCount64();
         if (l3 && !down) { down = now; held_done = 0; }
+#ifndef PSP2I_PROD
+        {   /* L3 held, then R3: the menu finder's label (as both grips + Triangle);
+             * L3's own tap and hold are then skipped */
+            static int r3_prev;
+            const int r3 = (input_sdl_host_buttons() & INPUT_HOST_RSTICK) != 0;
+            if (l3 && r3 && !r3_prev) { held_done = 1; mf_mark(); }
+            r3_prev = r3;
+        }
+#endif
         if (l3 && !held_done && now - down >= 1000) {
             held_done = 1;
 #ifndef PSP2I_PROD
@@ -2744,6 +2883,7 @@ static void on_vblank(void) {
         psp_display_get(&addr, &stride, &fmt);
 #ifdef _WIN32
         const int p = addr ? gpu_present(addr, stride, (int)fmt, g_frame, SCREEN_W, SCREEN_H) : 0;
+        g_present_p = p;
         if (p == 1) have_frame = 1;
         if (p == 1 && g_hi_s > 1) {                      /* the S-times picture of the same frame */
             int hw, hh;
@@ -2772,6 +2912,7 @@ static void on_vblank(void) {
         }
 #ifndef PSP2I_PROD
         vrshot_vblank(vb);
+        mf_sample();
 #endif
 #endif
         if (p == 1 && getenv("PSP2I_PRESENT_VERIFY")) {
@@ -2830,6 +2971,35 @@ static void on_vblank(void) {
                 vr_submit_overlay(NULL);
                 g_ovl_sent_valid = 0;
             }
+#ifndef PSP2I_PROD
+            /* Dev: what each vblank's picture was and what the headset got, every
+             * 5 s while VR is on (the intro movie never reached the headset with
+             * it on, 2026-10-23: which branch drops it?). */
+            {
+                static unsigned n_p[3], n_shared, n_cpu_eyes, n_frame, n_hold, n_recent, n_noframe;
+                static uint64_t since;
+                if (g_vr_live) {
+                    n_p[g_present_p < 0 ? 0 : g_present_p > 2 ? 2 : g_present_p]++;
+                    const int shared = g_eye_shared != NULL, cpu_eyes = !g_eye_shared && g_eye_px[0] != NULL;
+                    const int recent = g_stereo_on && vb - g_eye_shared_vb < 8;
+                    if (shared) n_shared++;
+                    else if (cpu_eyes) n_cpu_eyes++;
+                    else if (!have_frame) n_noframe++;
+                    else if (recent) n_recent++;
+                    else if (hold_flat) n_hold++;
+                    else n_frame++;
+                    if (!since) since = vb;
+                    if (vb - since >= 300) {
+                        fprintf(stderr, "vr: pictures in 5 s: present copy %u, VRAM %u, kept %u; to the headset: shared %u, CPU eyes %u,"
+                                        " frame %u; not sent: no frame %u, shared just before %u, held for 3D %u\n",
+                                n_p[1], n_p[0], n_p[2], n_shared, n_cpu_eyes, n_frame, n_noframe, n_recent, n_hold);
+                        memset(n_p, 0, sizeof n_p);
+                        n_shared = n_cpu_eyes = n_frame = n_hold = n_recent = n_noframe = 0;
+                        since = vb;
+                    }
+                }
+            }
+#endif
             if (g_vr_live && !g_eye_shared && g_eye_px[0]) {
                 if (g_eye_new || g_overlay_up) {
                     compose_eyes();
@@ -2938,6 +3108,9 @@ static void on_vblank(void) {
 static void prof_report(void);
 #endif
 static void report(void) {
+#if defined(PSP2I_VR) && !defined(PSP2I_PROD)
+    mf_report("exit");
+#endif
     fprintf(stderr, "\n==== psp2i report ====\n");
     fprintf(stderr, "  run time            %.2f s\n", psp_sched_now_us() / 1e6);
     report_fps();

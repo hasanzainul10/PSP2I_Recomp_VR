@@ -527,6 +527,32 @@ the world; the user found it overwhelming. Those were removed. Now:
   - **Check:** dev log `vr: N pictures through the CPU in 10 s (WxH),
     conversion up to M ms`, every 10 s while they come. If the movie still
     sticks, that line and the frame rate tell whether this was the cause.
+  - **Headset run** (`vr_menufind1.log`, dev counters `vr: pictures in 5
+    s: ...` per branch): during the movie, all 300 vblanks per 5 s were
+    VRAM frames and all were sent to the headset. Before the fix
+    (`vr_movie1.log`) none were. The user hasn't yet said how it looks.
+- **The game's "a menu is open" (for the left stick as the D-pad in menus,
+  PSUEx-VR's auto switch): not found yet; a lead.**
+  - **Method** (psp2i-hook-re): a dev menu finder labelled by the user
+    (MOTION both grips + Triangle, or gamepad L3 held + R3). It samples
+    user RAM every 10 game frames and scores each word: the share of menu
+    samples that differ from its field value, minus the share of field
+    samples that do. A strict "never the field value in a menu" rule lost
+    every candidate at the second kind of menu. The framebuffer swap words
+    (`0x04000000` / `0x04044000`) score high by chance and are noise.
+  - **Best word: `0x08EE2F70`** (`vr_menufind3.log`, 15 flips): 0 in 375 of
+    381 field samples, non-zero in 154 of 198 menu samples. Its change log
+    (`vr_menuword1.log`) shows a counter, not a flag: 0..0x3F one step per
+    game frame, wrapping, with pauses of 8-22 vblanks at 0 inside a menu.
+    It is most likely the menu cursor's pulse animation. It started within
+    ~1 s of 6 of 7 menus opening. It stops only at the end of its cycle,
+    1-2 s after a menu closes. One menu (round 7) left it at 0 for 20 s
+    while open. Nothing references the address directly. `0x088ADC34` and
+    `0x088ADDC4` build the base `0x08EE2A60` (+0x510 = it).
+  - **Next:** a write watch on it, armed at the first label (stacks of its
+    first 32 writes in the log, `write... from fn`), to find the code that
+    runs menus and its "open" state. Built, not run. Which menus the rounds
+    were: asked, not answered yet.
 
 **Next (in order):**
 1. **Try the controller capture in the headset:** left grip + left stick
