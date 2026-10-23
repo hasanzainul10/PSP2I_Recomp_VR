@@ -568,6 +568,20 @@ the world; the user found it overwhelming. Those were removed. Now:
   until the counter starts again. Log `vr: left stick is the D-pad / moves
   again`. VR off: unchanged (checked headless). The exact flag for field
   menus would remove the lag (open).
+  - **Headset runs** (`vr_menudpad1/2.log`): the start menu worked; in a
+    shop the counter ran only one cycle as it opened, then stayed 0 for the
+    item list, so the stick stopped working. A second signal was added: the
+    menu layer's share of the screen per frame (HUD-pass sheets at w < 80),
+    over 30%. Measured in the field 0-11%, probably a shop 27-32%, loading
+    106-210%. The user: "it randomly works and doesn't".
+  - **Now off by default** (`vr_menu_dpad=off`, the user's choice). The
+    manual toggle stays (MOTION both grips + left stick click). The
+    in-menu flicker is fixed (60 vblanks, not 30).
+  - **The way to make it exact** (not started): menus ask the game's input
+    library for D-pad presses (with repeat; `0x08D5B844` is that library's
+    repeat timer), while walking reads the analog stick. Hook the
+    library's query and let the left stick answer it, so no "menu open"
+    detection is needed.
 
 **Next (in order):**
 1. **Try the controller capture in the headset:** left grip + left stick

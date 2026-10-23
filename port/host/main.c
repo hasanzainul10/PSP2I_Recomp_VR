@@ -914,7 +914,14 @@ static int      g_vr_fov_auto = 1;
  * Unknown layers stay in the world. Any sheet covering more than a fifth of
  * the screen goes on the panel too: NPC portraits share the labels' layer
  * (86: the shop's portrait, GE dump 2026-10-22), and labels are small. */
+/* The menu layer's share of the screen this game frame (HUD-pass sheets at
+ * clip w < 80, summed): big while a shop's or a dialog's windows are up, for
+ * vr_menu_dpad (the menus' cursor counter runs only one cycle as a shop
+ * opens, headset run 2026-10-23). Added up here, taken per game frame in
+ * poll_controllers. */
+static float g_menu_layer_acc;
 static int psp2i_hud_panel(float w, float frac) {
+    if (w < 80.0f && frac > 0.0f) g_menu_layer_acc += frac;
     const int layer = w < 80.0f || (w >= 84.0f && w < 85.995f) || (w >= 86.85f && w <= 87.05f) || (w >= 91.5f && w <= 92.5f) ||
                       w > 1000.0f;
 #ifndef PSP2I_PROD
@@ -1036,8 +1043,10 @@ static game_hand g_hand_w[2];
  * s), so Start, which closes the start menu, ends it at once until the
  * counter starts again. */
 #define PSP2I_MENU_CURSOR_COUNTER 0x08EE2F70u
-#define MENU_DPAD_HOLD_VB 30                    /* vblanks after the counter's last change */
-static int g_vr_menu_dpad = 1;
+#define MENU_DPAD_LAYER   0.30f                 /* the menu layer's share of the screen that counts as a menu */
+#define MENU_DPAD_HOLD_VB 60                    /* vblanks after the counter's last change: its pauses inside a menu
+                                                   last up to ~50 (headset run 2026-10-23: 30 flickered) */
+static int g_vr_menu_dpad = 0;                  /* off by default: the signals below misfire (headset run 2026-10-23: "randomly works") */
 static int g_menu_dpad_on;                      /* the stick is the D-pad now (logged on change) */
 /* M3 prototype, melee by swinging (vr_swing_speed= m/s, MOTION only): a swing
  * or a trigger pull of either hand presses Square, with that hand's grip held
@@ -2731,7 +2740,26 @@ static void poll_controllers(void) {
             changed_vb = vb;
             last_v = v;
         }
-        int on = g_vr_menu_dpad && changed_vb && vb - changed_vb < MENU_DPAD_HOLD_VB && !ended && !g_menu.open;
+        /* The menu layer's share of the screen, per game frame (the last
+         * finished frame's). */
+        static uint64_t layer_flip;
+        static float layer;
+        const uint64_t flips = psp_display_flips();
+        if (flips != layer_flip) { layer = g_menu_layer_acc; g_menu_layer_acc = 0; layer_flip = flips; }
+#ifndef PSP2I_PROD
+        {   /* Dev: the menu layer's share each second (the threshold's tuning). */
+            static uint64_t lvb;
+            static float lmax;
+            if (layer > lmax) lmax = layer;
+            if (vb - lvb >= 60) {
+                fprintf(stderr, "vr: menu layer up to %.0f%% of the screen in the last second (vblank %llu)\n",
+                        (double)(lmax * 100.0f), (unsigned long long)vb);
+                lvb = vb; lmax = 0;
+            }
+        }
+#endif
+        const int counter = changed_vb && vb - changed_vb < MENU_DPAD_HOLD_VB && !ended;
+        int on = g_vr_menu_dpad && (counter || layer > MENU_DPAD_LAYER) && !g_menu.open;
         if (on && (b & ~prev_b & 0x0008u)) { ended = 1; on = 0; }   /* Start: the start menu closes */
         prev_b = b;
         if (on != g_menu_dpad_on) fprintf(stderr, "vr: left stick %s (vblank %llu)\n", on ? "is the D-pad (a game menu)" : "moves again",
