@@ -992,17 +992,35 @@ static void upload(void) {
     void *shared = g_frame_shared;
     ReleaseSRWLockShared(&g_frame_lock);
     if (shared) { g_uploaded_seq = seq; upload_shared(shared); return; }
+    /* The picture is copied out under the lock and converted after it: the
+     * conversion of a big picture held the lock most of each vblank, and the
+     * game thread's next vr_submit_frame waited on it (the intro movie, a
+     * picture from VRAM every vblank, stalled with the headset on). */
+    static uint32_t *pic_copy;
+    static size_t pic_cap;
     AcquireSRWLockShared(&g_frame_lock);
-    const int fw = g_frame_w, fh = g_frame_h, half = g_chain_w / 3;   /* one eye's part */
+    const int fw = g_frame_w, fh = g_frame_h, stereo = g_frame_stereo, half = g_chain_w / 3;   /* one eye's part */
+    const size_t npx = (size_t)fw * fh;
+    if (pic_cap < npx * 2) {
+        free(pic_copy);
+        pic_copy = (uint32_t *)malloc(npx * 2 * 4);
+        pic_cap = pic_copy ? npx * 2 : 0;
+    }
+    if (pic_copy) {
+        memcpy(pic_copy, g_frame, npx * 4);
+        if (stereo) memcpy(pic_copy + npx, g_frame_r, npx * 4);
+    }
+    ReleaseSRWLockShared(&g_frame_lock);
+    const ULONGLONG t0 = GetTickCount64();
     const int s = half / fw;                                     /* swapchain pixels per picture pixel across */
     if (s >= 1)                                                  /* no HUD picture on this path */
         for (int y = 0; y < g_chain_h; y++) memset(&g_upload[(size_t)y * g_chain_w + 2 * (size_t)half], 0, (size_t)half * 4);
-    if (s < 1 || fw * s != half || fh < 1 || fh > g_chain_h) { ReleaseSRWLockShared(&g_frame_lock); g_uploaded_seq = seq; return; }
+    if (!pic_copy || s < 1 || fw * s != half || fh < 1 || fh > g_chain_h) { g_uploaded_seq = seq; return; }
     /* Down, the nearest picture row for each swapchain row: the chain may
      * have more rows than the picture's scale (taller eye pictures,
      * vr_config.scale_y) while a mono picture is S x S. */
     for (int eye = 0; eye < 2; eye++) {                          /* mono: the same picture twice */
-        const uint32_t *pic = eye && g_frame_stereo ? g_frame_r : g_frame;
+        const uint32_t *pic = eye && stereo ? pic_copy + npx : pic_copy;
         int prev = -1;
         for (int Y = 0; Y < g_chain_h; Y++) {
             const int y = (int)((int64_t)Y * fh / g_chain_h);
@@ -1017,8 +1035,20 @@ static void upload(void) {
             }
         }
     }
-    ReleaseSRWLockShared(&g_frame_lock);
     g_uploaded_seq = seq;
+    {   /* how long the CPU pictures take (pictures from VRAM: movies), every 10 s while they come */
+        static ULONGLONG since, worst;
+        static unsigned n;
+        const ULONGLONG ms = GetTickCount64() - t0;
+        if (ms > worst) worst = ms;
+        n++;
+        if (!since) since = t0;
+        if (t0 - since >= 10000) {
+            fprintf(stderr, "vr: %u pictures through the CPU in %.0f s (%dx%d), conversion up to %llu ms\n", n,
+                    (double)(t0 - since) / 1000.0, fw, fh, (unsigned long long)worst);
+            since = t0; worst = 0; n = 0;
+        }
+    }
 
     uint32_t idx;
     XrSwapchainImageAcquireInfo ai = { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };

@@ -2838,8 +2838,12 @@ static void on_vblank(void) {
                                          eye_tan_y(g_eye_px_tag), g_eye_px_tag);
                 }
             } else if (g_vr_live && have_frame && !(g_stereo_on && vb - g_eye_shared_vb < 8) && !hold_flat) {
-                /* the same picture, in the headset (not between shared stereo frames) */
-                if (g_hi_s > 1) vr_submit_frame(g_hi_rgba, SCREEN_W * g_hi_s, SCREEN_H * g_hi_s);
+                /* the same picture, in the headset (not between shared stereo frames).
+                 * A frame from VRAM (movies: g_hi_valid 0) goes at 480x272: its
+                 * S-times picture is the same one scaled up, 16 times the pixels
+                 * to copy and convert every vblank (the intro movie stalled with
+                 * the headset on, 2026-10-23). */
+                if (g_hi_s > 1 && g_hi_valid) vr_submit_frame(g_hi_rgba, SCREEN_W * g_hi_s, SCREEN_H * g_hi_s);
                 else vr_submit_frame(g_rgba, SCREEN_W, SCREEN_H);
             }
 #endif

@@ -506,6 +506,27 @@ the world; the user found it overwhelming. Those were removed. Now:
   - **Open:** in first person the walk code turns the left stick to the
     head; in manual aim that may turn the aim too (not seen yet). Whether
     the same L + down leaves manual aim isn't known.
+- **The intro movie stuck with the headset on (user, 2026-10-23): a likely
+  cause fixed, not yet seen in the headset.**
+  - **Evidence:** in `vr_m0_2.log` the movie started with the session
+    FOCUSED, and the game went on only once the headset was off (the
+    session SYNCHRONIZED, stereo off, then the title music). Windowed runs
+    without the headset (`testwork/movie/`: plain, and `--stereo` with
+    `PSP2I_VR_FAKE_HEAD`) play it alike: 29.8 fps, and the captures
+    through the movie all differ. So it isn't the stereo drawing.
+  - **The decision:** movie frames come from VRAM (`gpu_present` 0, about
+    3700 in 75 s), so they reach the headset through the CPU
+    (`vr_submit_frame`), not shared on the GPU. At render scale S the game
+    sent the S-times picture (1920x1088 at 4x) every vblank. The VR thread
+    converted it into its 5760x1632 upload while holding `g_frame_lock`,
+    which each `vr_submit_frame` waits on. With the headset off the
+    runtime asks for no frames, so no upload runs.
+  - **Fix:** a VRAM frame goes at 480x272 (the S-times one is the same
+    picture scaled up), and `upload()` copies the picture out under the
+    lock and converts it after.
+  - **Check:** dev log `vr: N pictures through the CPU in 10 s (WxH),
+    conversion up to M ms`, every 10 s while they come. If the movie still
+    sticks, that line and the frame rate tell whether this was the cause.
 
 **Next (in order):**
 1. **Try the controller capture in the headset:** left grip + left stick
