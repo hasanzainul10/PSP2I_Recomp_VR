@@ -234,6 +234,36 @@ separately (below).
 
 **P5: Motion controls.** Actions and bindings, laser UI, weapon on hand, swing / Just Attack / guns / techniques, haptics, setup wizard.
 
+### P5 roadmap (2026-10-23)
+
+Where it starts: the VR controllers already work as a PSP pad (buttons and
+sticks through OpenXR actions, `vr_xr_d3d11.c`), but no hand poses are read
+and nothing is known yet about the skeleton's hand bones, the attack state
+or the aim. The user's controllers are PS VR2 Sense on SteamVR. The model is
+PSUEx-VR (`D:\work\PSUEx\docs\VR_GUIDE.md` "Motion controllers"). Each step
+ends playable, and gamepad mode stays as it is (input mode pad / motion is
+its own setting, apart from 1st / 3rd person). Online: hands and weapons are
+bone overrides drawn locally; attacks are synthetic button presses. Nothing
+else changes in what other players see.
+
+| Step | What the player gets | Work | Reverse engineering needed (psp2i-hook-re / static-re / vr-probe) |
+|---|---|---|---|
+| **F1 Attack nudge (first person, pad and motion)** | After walking left, right or back the character faces where it walked; now an attack goes where you look: pressing an attack (or a swing, from M3) first turns the character to the view | On an attack press in first person, when the character's facing is more than ~30 degrees from the head's heading (`g_fp_yaw` + head yaw, as the walk uses), hold the stick briefly toward the head (turned as in `ctrl_commit`), then send the attack; skipped while locked on (the lock-on picks the target) | The player's facing angle (near player +0x4B0, open in ADDRESS_MAP: an angle that follows turning), and how many frames of stick the game needs to turn; whether a pushed stick during an attack's startup turns it (then the nudge and the press can go together) |
+| **M0 Hands in the world** | Two hand markers where the controllers are, in 1st and 3rd person; INPUT MODE (PAD / MOTION) on the R3 > VR page | Grip and aim poses (`xrCreateActionSpace`) handed to the game thread with each head pose, in game units through the same level frame and world scale as the eyes; a marker drawn per eye (psprecomp: an extra draw after the scene); haptics output (`xrApplyHapticFeedback`); emulated controllers and a command file for headset-free tests (as PSUEx) | None |
+| **M1 Pointer for the engine menu** | Point at the R3 menu with the right controller, trigger to click, stick to scroll | A ray against the HUD/menu quad, its hit turned into menu rows (`menu.c` knows them) | None (game menus keep the D-pad; their item rectangles are unknown) |
+| **M2 Arms and weapon on the hands** | First person: your arms and the weapon follow the controllers; third person: the character's arms do | Override the arm bones with 2-bone IK to the controller poses before skinning; hand calibration (both grips + both triggers, as PSUEx) | The bone palette per skinned draw (`0x0955A990` region, ADDRESS_MAP), which indices are the shoulders, elbows, hands; where the CPU writes them (hook the writer, override after it). The weapon model: whether it hangs off the hand bone (then it follows for free) |
+| **M3 Melee by swinging** | Swing to attack, grip + swing for the Photon Art; a buzz marks Just Attack timing and early swings are held until it | Swing detection (hand speed over a threshold, per hand) into the attack button; the combo buffer | The weapon type in hand; the attack state and the Just Attack window (hook the code that grades a Just Attack: count it per frame, read its timer); which PSP button is which palette action |
+| **M4 Guns and aim** | Point the gun to aim, trigger fires, grip + trigger is the Photon Art | The controller ray turned into the game's aim direction | The aim (free aim / lock-on) direction the shot uses: hook it and override with the controller's ray (local: the shot direction other players see comes from the game's own sync, check that first) |
+| **M5 Techniques** | Rod / wand: swing or trigger casts a slot, grip picks the other | Slot buttons from gestures | The technique slots and how a cast is chosen (the palette) |
+| **M6 Guard, dodge, feedback** | Guard and dodge by gesture; buzz on hits, damage, item pickup | Gestures into buttons; haptic events | Hit / damage / pickup events (hook their handlers, count) |
+| **M7 Setup and polish** | First-run wizard, controller label cards, settings for every choice above | PSUEx `VRUiPointer`, `VRControllerLabels`, wizard ported to the engine menu | None |
+
+F1 needs no controllers and helps the gamepad first person of today, so it
+can come first. Order of risk: M2 is the big unknown (bones), so its reverse engineering
+(the hand bone indices and their writer) can start alongside M0. M3 needs
+M2 only for looks: swing detection works on the poses alone, so a
+"swing = attack button" prototype can follow M0 directly.
+
 **P6: Body.** 3-point IK, then the Meta, Pico and SteamVR tracker sources, then calibration (T-pose, height, arm span) and finger tracking.
 
 **P7: Quest and Pico.** GLES XR binding, multiview, manifest and flavour.
