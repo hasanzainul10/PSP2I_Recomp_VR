@@ -5,7 +5,70 @@ this file at the end of every working session: what changed, what was checked,
 what is next. The plan itself is [VR_PLAN.md](VR_PLAN.md); user-facing docs are
 [VR.md](VR.md); reverse-engineering results go in [ADDRESS_MAP.md](ADDRESS_MAP.md).
 
-_Last updated: 2026-10-23 (merged vr-map-glow-fix: minimap fixed in first person, per-eye glow, VR > GLOW off by default; motion controls M0 hands and M3 swing prototype)._
+_Last updated: 2026-10-23, end of the motion-controls session (handoff below)._
+
+## Start here (handoff 2026-10-23, latest)
+
+The user switches Claude accounts. Read `CLAUDE.md`, this section, then the
+older "Handoff: start here (2026-10-22)" below for how to build and run.
+
+**Branches:** `vr-theater` (main repo, last commit before this handoff
+`cf02e54`) and `vr-draw-observer` (psprecomp, `5fc8a2c`), both pushed. The
+side branch `vr-map-glow-fix` (minimap in first person, per-eye glow,
+VR > GLOW) is **merged** into both. Before re-debugging anything the user
+says "came back", check for unmerged side branches
+(`git log vr-theater..<branch>` over local and remote, both repos).
+
+**Done this session (all in the headset unless noted):**
+- **F1 attack nudge** and **walk where you look** (earlier the same day).
+- **M0 hands:** rings and rays at the controllers (compositor quad layers),
+  hand poses in game units (`hands_frame`), haptics (`vr_haptic`). INPUT
+  MODE (PAD / MOTION) on the R3 > VR page. Seen by the user.
+- **M3 prototype, melee by swing:** a swing or a trigger pull = Square,
+  with that hand's grip = Triangle (Photon Art), a buzz per swing. Swings
+  registered in the logs, and the user said "it works". No Just Attack
+  timing yet.
+- **MOTION mapped as in PSUEx-VR** (VR.md "Controls", the user's pick of
+  layout). Left grip alone = R (lock-on), right grip alone = L, right stick
+  click = START, left stick click = manual aim (L + D-pad down). Both grips
+  + Cross / Circle / Square / left click = recenter / first-third person /
+  engine menu / left stick as the D-pad. All registered in the logs. Not
+  yet judged by the user: how it feels, and manual aim in first person
+  (the walk code may turn the aim).
+- **The intro movie stuck with the headset on:** fixed in the log (all of
+  its VRAM frames now reach the headset, at 480x272, converted outside the
+  frame lock). The user hasn't said yet whether it plays properly.
+- **Menu D-pad, automatic:** built and tried, unreliable ("randomly works
+  and doesn't"), now **off by default** (`vr_menu_dpad=off`). The manual
+  toggle (both grips + left stick click) stays. Details, and what is known
+  about the game's menus, in "The game's 'a menu is open'" below and
+  ADDRESS_MAP "Menus and tasks".
+
+**Next (suggested order):**
+1. Ask the user how the movie, the MOTION controls and manual aim feel.
+2. Menu D-pad done properly: hook the game's input-library query that menus
+   use for D-pad presses (with repeat; `0x08D5B844` is that library's
+   repeat timer, already hooked in host/framerate.c) and let the left
+   stick answer it. Then no "menu open" detection is needed. Find the
+   query with `psp2i-static-re` (callers of the library) first, then one
+   hook run.
+3. M3 for real: Just Attack timing and the combo buffer (needs the
+   attack state: VR_PLAN M3's reverse engineering).
+4. M1 pointer for the engine menu, M2 arms (bones), M4 guns.
+
+**How to work with the user (lessons from this session):**
+- Give run instructions as numbered steps with "before / after" spelled
+  out. The user can't see the log and was confused by label chords.
+- Prefer measurements that need no user input (auto-armed watches, logs
+  that diff by themselves) over labelling by the user.
+- Narrow live log watches to the lines you act on; tell the user when the
+  watch changes. Don't narrate every repeated line.
+- Dev tools left in the build (dev builds only): the menu finder
+  (`mf_*`, labels on both grips + Triangle or gamepad L3 held + R3), the
+  `0x08EE2F70` change log and auto-armed write watch, the menu-path hooks
+  and the task log (`hook_task_walk`, hooks.txt), the headset picture
+  counters (`vr: pictures in 5 s`). They are noisy: remove or gate them
+  once the menu D-pad is done.
 
 ## Minimap and enemy glow in the headset (2026-10-23)
 
