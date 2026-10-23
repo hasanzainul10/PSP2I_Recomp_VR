@@ -2355,6 +2355,18 @@ static int display_load(void) {
         else if (!strncmp(line, "vr_fp_nudge=", 12)) g_vr_fp_nudge = strncmp(line + 12, "off", 3) != 0;
         else if (!strncmp(line, "vr_input=", 9))     g_vr_motion = !strncmp(line + 9, "motion", 6);
         else if (!strncmp(line, "vr_arms=", 8))      g_vr_arms = strncmp(line + 8, "off", 3) != 0;
+#ifdef PSP2I_VR
+        else if (!strncmp(line, "vr_hand_cal=", 12)) {  /* 18 floats: the hands' rotation offsets (vr_body.h) */
+            float c[18];
+            const char *q = line + 12;
+            int k = 0;
+            for (char *e; k < 18; k++, q = e) {
+                c[k] = strtof(q, &e);
+                if (e == q) break;
+            }
+            if (k == 18) vr_body_hand_cal_set(c);
+        }
+#endif
         else if (!strncmp(line, "vr_menu_dpad=", 13)) g_vr_menu_dpad = strncmp(line + 13, "off", 3) != 0;
         else if (!strncmp(line, "vr_swing_speed=", 15)) {
             const float k = (float)atof(line + 15);
@@ -2457,6 +2469,18 @@ static void display_save(int res) {
     fprintf(f, "; VR arms (with VR input motion): on = your character's arms reach for the controllers (only how it is drawn"
                " here), off = the game's own arm animation\n");
     fprintf(f, "vr_arms=%s\n", g_vr_arms ? "on" : "off");
+#ifdef PSP2I_VR
+    {   /* written once calibrated (both grips + both triggers in MOTION) */
+        float c[18];
+        if (vr_body_hand_cal_get(c)) {
+            fprintf(f, "; VR hands: their rotation against the controllers, from the hand calibration (both grips + both"
+                       " triggers, holding the controllers as your character holds its hands); delete the line to undo it\n");
+            fprintf(f, "vr_hand_cal=");
+            for (int k = 0; k < 18; k++) fprintf(f, "%s%.5f", k ? " " : "", (double)c[k]);
+            fputc('\n', f);
+        }
+    }
+#endif
     fprintf(f, "; with motion: swing a controller faster than swing speed (m/s, 1.0..5.0) to attack (Square); with that hand's"
                " grip held, Triangle (the Photon Art slot)\n");
     fprintf(f, "vr_swing_speed=%.1f\n", (double)g_vr_swing);
@@ -2710,6 +2734,8 @@ static void poll_controllers(void) {
 #endif
         /* MOTION's shortcuts (both grips + Cross / Circle), as the gamepad's L3. */
         if (vp.host & VR_HOST_RECENTER) { vr_recenter(); g_fp_yaw_ok = 0; }
+        if (vp.host & VR_HOST_HANDCAL) vr_body_hand_calibrate();   /* both grips + both triggers */
+        if (vr_body_hand_cal_changed() && !g_headless) display_save(g_res_saved);
         if (vp.host & VR_HOST_VIEW) {
             g_vr_first = !g_vr_first;
             fprintf(stderr, "vr: both grips + Circle: %s person\n", g_vr_first ? "first" : "third");

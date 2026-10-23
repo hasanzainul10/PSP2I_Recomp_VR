@@ -153,7 +153,8 @@ enum {
     VR_HOST_SHOT = 1 << 1,        /* a VR capture (left grip + left stick click): once per press */
     VR_HOST_RECENTER = 1 << 2,    /* MOTION: both grips + Cross, once per press */
     VR_HOST_VIEW = 1 << 3,        /* MOTION: both grips + Circle (first / third person), once per press */
-    VR_HOST_MARK = 1 << 4         /* MOTION: both grips + Triangle, once per press (dev: the menu finder's label) */
+    VR_HOST_MARK = 1 << 4,        /* MOTION: both grips + Triangle, once per press (dev: the menu finder's label) */
+    VR_HOST_HANDCAL = 1 << 5      /* MOTION: both grips + both triggers, once per press (the hands' rotation calibration) */
 };
 int  vr_pad_get(vr_pad *out);
 void vr_set_swap_circle_cross(int on);

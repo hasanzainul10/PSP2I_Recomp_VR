@@ -24,4 +24,14 @@ void vr_body_init(void);
  * the game's state changes). The host sets it each frame. */
 void vr_body_arms(int on);
 
+/* The hands' rotation: vr_body_hand_calibrate (both grips + both triggers)
+ * takes, at the next pose, each hand's rotation relative to its controller
+ * (hold the controllers as your character holds its hands); after it the
+ * hands, and the weapon with them, turn with the controllers. The 18
+ * floats (left, right: 3x3 row-major) are saved in the ini by the host. */
+void vr_body_hand_calibrate(void);
+int  vr_body_hand_cal_get(float cal[18]);         /* 1 when both hands are calibrated */
+void vr_body_hand_cal_set(const float cal[18]);
+int  vr_body_hand_cal_changed(void);              /* 1 once after a calibration */
+
 #endif

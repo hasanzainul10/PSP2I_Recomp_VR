@@ -94,6 +94,17 @@ and your character's arms reach for them, in first and third person
 how your character is drawn on your side changes: other players see the
 game's animation.
 
+To make the hands and weapon turn with the controllers, calibrate once: in
+third person, hold the controllers the way your character holds its hands
+and weapon, then press **both grips + both triggers** (both controllers
+buzz). It is saved (`vr_hand_cal=` in `psp2i_display.ini`; delete the line
+to undo it). Until then the hands keep the game's rotation.
+
+Your weapon goes into your hand once you have held **R** (the left grip)
+with it out: the game itself only holds a weapon in the hand while R is
+held, and from then on it stays in your hand. After switching weapons, hold
+R once again.
+
 | Control | Left hand | Right hand |
 |---|---|---|
 | Stick | Move (in manual aim: aim) | Camera / turn |
@@ -110,7 +121,8 @@ Swings count above 1.8 m/s (`vr_swing_speed=`).
 
 **Hold both grips** for the VR shortcuts: + Cross recenter, + Circle first /
 third person, + Square engine menu, + left stick click switches the left
-stick to the D-pad (again to switch back). Left grip + left stick click saves
+stick to the D-pad (again to switch back), + both triggers calibrates the
+hands. Left grip + left stick click saves
 a VR capture (dev builds only).
 
 ### PAD

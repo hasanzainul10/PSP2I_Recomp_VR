@@ -20,7 +20,7 @@
  * node. Node matrices are 4x4, 64 bytes each, VFPU columns (disassembly and
  * a write watch on a palette entry, 2026-10-23). */
 #define FN_PALETTE    0x08A846DCu
-#define USER_LO       0x08800000u
+#define USER_LO       0x08000000u              /* main RAM: the drawing lists' objects sit below 0x08800000 (0x085F1B70) */
 #define USER_HI       0x0A000000u
 #define NODES_MAX     128
 
@@ -228,9 +228,44 @@ static int      g_arms_ok[2];                  /* this frame's target per hand *
 static float    g_arms_off[2][3];              /* the hand from its shoulder, metres: right, up, forward */
 static float    g_arms_saved[NODES_MAX][16];
 static int      g_arms_n_saved;
+/* The hands' rotation (both grips + both triggers: vr_body_hand_calibrate):
+ * the hand node's rotation relative to the controller's, taken while you
+ * hold the controllers as your character holds its hands; after it, each
+ * hand turns with its controller by that offset. 3x3 row-major, model axes. */
+static float    g_ctrl_rot[2][9];              /* this frame's controllers in model axes */
+static float    g_cal[2][9];
+static int      g_cal_ok[2], g_cal_req, g_cal_changed;
 #ifndef PSP2I_PROD
 static uint64_t g_arms_log;
 #endif
+
+void vr_body_hand_calibrate(void) { g_cal_req = 1; }
+int vr_body_hand_cal_get(float cal[18]) {
+    memcpy(cal, g_cal, sizeof g_cal);
+    return g_cal_ok[0] && g_cal_ok[1];
+}
+void vr_body_hand_cal_set(const float cal[18]) {
+    memcpy(g_cal, cal, sizeof g_cal);
+    g_cal_ok[0] = g_cal_ok[1] = 1;
+}
+int vr_body_hand_cal_changed(void) {
+    const int c = g_cal_changed;
+    g_cal_changed = 0;
+    return c;
+}
+
+static void mat3_mul(const float *a, const float *b, float *o) {        /* o = a b */
+    for (int r = 0; r < 3; r++)
+        for (int c = 0; c < 3; c++) o[r * 3 + c] = a[r * 3] * b[c] + a[r * 3 + 1] * b[3 + c] + a[r * 3 + 2] * b[6 + c];
+}
+static void mat3_tmul(const float *a, const float *b, float *o) {       /* o = a^T b */
+    for (int r = 0; r < 3; r++)
+        for (int c = 0; c < 3; c++) o[r * 3 + c] = a[r] * b[c] + a[3 + r] * b[3 + c] + a[6 + r] * b[6 + c];
+}
+static void mat3_mult(const float *a, const float *b, float *o) {       /* o = a b^T */
+    for (int r = 0; r < 3; r++)
+        for (int c = 0; c < 3; c++) o[r * 3 + c] = a[r * 3] * b[c * 3] + a[r * 3 + 1] * b[c * 3 + 1] + a[r * 3 + 2] * b[c * 3 + 2];
+}
 
 void vr_body_arms(int on) {
     if (on != g_arms_on) fprintf(stderr, "vr: arms %s\n", on ? "on (they follow the controllers)" : "off");
@@ -260,6 +295,14 @@ static void arms_frame(void) {
         g_arms_off[hd][1] = d[1] + ARM_SHOULDER_Y;
         g_arms_off[hd][2] = d[0] * f[0] + d[2] * f[2] + ARM_SHOULDER_Z;
         g_arms_ok[hd] = 1;
+        /* The grip's axes (columns of its rotation), tracking -> model:
+         * model x = minus the heading's right, y up, z = the heading's forward. */
+        const float *g = vh[hd].q, x = g[0], y = g[1], z = g[2], w = g[3];
+        const float Rq[9] = { 1 - 2 * (y * y + z * z), 2 * (x * y - z * w),     2 * (x * z + y * w),
+                              2 * (x * y + z * w),     1 - 2 * (x * x + z * z), 2 * (y * z - x * w),
+                              2 * (x * z - y * w),     2 * (y * z + x * w),     1 - 2 * (x * x + y * y) };
+        const float T[9] = { -r[0], 0, -r[2], 0, 1, 0, f[0], 0, f[2] };
+        mat3_mul(T, Rq, g_ctrl_rot[hd]);
     }
 }
 
@@ -360,6 +403,22 @@ static int arms_pose(uint32_t model, uint32_t skel) {
         for (int k = 0; k < 3; k++) { ew2[k] /= l1; et[k] /= l2; }
         rot_between(ew2, et, R);
         turn_below(nodes, recs, n, J[1], R, E2);
+        /* The hand: its node's axes now (normalized: the nodes carry scale). */
+        node_get(nodes, J[2], m);
+        float H[9];
+        for (int c = 0; c < 3; c++) {
+            const float l = len3(&m[c * 4]);
+            for (int k = 0; k < 3; k++) H[k * 3 + c] = l > 1e-6f ? m[c * 4 + k] / l : 0.0f;
+        }
+        if (g_cal_req) {
+            mat3_tmul(g_ctrl_rot[hd], H, g_cal[hd]);          /* C^T H: the hand in the controller's frame */
+            g_cal_ok[hd] = 1;
+        } else if (g_cal_ok[hd]) {
+            float Ht[9];
+            mat3_mul(g_ctrl_rot[hd], g_cal[hd], Ht);           /* where the hand should be: C x the offset */
+            mat3_mult(Ht, H, R);                               /* Ht H^T: from where it is */
+            turn_below(nodes, recs, n, J[2], R, &m[12]);
+        }
 #ifndef PSP2I_PROD
         if (hd == 1 && psp_sched_vblank_count() - g_arms_log >= 300) {
             g_arms_log = psp_sched_vblank_count();
@@ -369,12 +428,327 @@ static int arms_pose(uint32_t model, uint32_t skel) {
         }
 #endif
     }
+    if (g_cal_req) {
+        g_cal_req = 0;
+        g_cal_changed = 1;
+        vr_haptic(-1, 0.6f, 0.2f);
+        fprintf(stderr, "vr: arms: hands calibrated (left %s, right %s)\n", g_cal_ok[0] ? "yes" : "no", g_cal_ok[1] ? "yes" : "no");
+    }
     return 1;
 }
 
 static void arms_restore(uint32_t model) {
     const uint32_t nodes = psp_read32(model + 100u);
     for (int b = 0; b < g_arms_n_saved; b++) node_put(nodes, b, g_arms_saved[b]);
+}
+
+/* ---- What rides on the hands: the weapon
+ *
+ * The weapon isn't part of the body's model, so the arm IK alone leaves it
+ * where the animation had it (user, in the headset). Nor is it the extra
+ * model next to the body in its container: that one rides on the head (node
+ * 13: hair or headgear, measured). So every matrix the game copies into a
+ * display list (0x08D8D4E8: skinned palettes and rigid world matrices
+ * alike, eye space, just before drawing) near the player's hands is
+ * checked: its placement in the frame of each arm node, inv(body M x node)
+ * x it, stays the same through the animation only for the node it hangs on.
+ * Once found, it is moved by what the IK did to that node (D = posed node x
+ * inv(animated node), model space, from the latest pose), for its copy only,
+ * and put back after it. The body's own palettes are skipped (they are
+ * posed already), and a party member's weapon never holds still against
+ * our hands. */
+#define ATT_MAX     128                        /* ~20-80 matrices sit near the hands each frame (logged) */
+#define ATT_FRAMES  20                         /* frames of agreement before a node is trusted */
+#define ATT_ERR_OK  0.05f                      /* model units: how still a true attachment stays */
+#define ATT_NEAR    15.0f                      /* only matrices this close to a hand (eye space) */
+#define ATT_HAND_NEAR 5.0f                     /* a held thing sits this close to its node */
+#define ATT_GRIP_NEAR 2.5f                     /* ... and a gun in the aiming hand this close (grips 1.6-2.1; the head 6.5) */
+#define ATT_STATE   0x214u                     /* player +0x214: 2 while R is held (lock-on) and a moment after */
+#define ATT_EVIDENCE  1.0f                     /* units of drift against the torso, more than against the arm */
+/* The arm nodes a held thing can hang on (left 16-18, right 21-23: forearm,
+ * wrist, hand's end), then the torso's (hips, chest, head): standing still,
+ * the head and a floating Rabbit look as still against the forearm as the
+ * weapon does (user: "it drags the head and the Rabbit too"), so a thing is
+ * held only once the arm has moved against the torso and it went with the
+ * arm, not the torso. */
+static const int ATT_NODE[] = { 16, 17, 18, 21, 22, 23, 1, 11, 13 };
+#define ATT_NN  ((int)(sizeof ATT_NODE / sizeof ATT_NODE[0]))
+#define ATT_ARM 6                              /* the first ATT_ARM are the arms' */
+
+static float    g_att_d[NODES_MAX][16];        /* per body node: the IK's change, model space */
+static int      g_att_dn;                      /* nodes in it (0 = no pose yet) */
+static int      g_att_moved[NODES_MAX];        /* D isn't the identity */
+static uint32_t g_att_pal[4];                  /* this frame's body palettes (skipped) */
+static uint64_t g_att_pal_vb;
+typedef struct {
+    uint32_t key;                              /* the matrix's address */
+    uint64_t seen;
+    uint32_t obj;                              /* dev log: whose, and the last fit */
+    int      fit_node;
+    float    fit_err, fit_torso, fit_dist;
+    int      frames;
+    int      node[2];                          /* the node it rides on per state (ATT_STATE), -1 = none */
+    int      off[2];                           /* frames in a row it has drifted off that node */
+    int      grip_node;                        /* learned with R held: the hand it is aimed from, -1 = none */
+    float    grip[16];                         /* ... and where it sits in that hand */
+    float    err[ATT_NN];                      /* recent drift per frame (decaying) */
+    float    sum[2][ATT_NN];                   /* all its drift since it was first seen, per state */
+    float    prev[ATT_NN][12];
+} att_rec;
+static att_rec g_att[ATT_MAX];
+#ifndef PSP2I_PROD
+/* Dev: what the copy hook sees, logged every 5 s with the arms on (which
+ * step stops it when nothing follows). */
+static unsigned g_ad_calls, g_ad_posed, g_ad_flags, g_ad_bodypal, g_ad_mats, g_ad_near;
+static float    g_ad_min = 1e30f;
+static uint32_t g_ad_min_mat, g_ad_min_obj, g_ad_cur_obj;
+static uint64_t g_ad_log;
+#endif
+
+static void mul44(const float *a, const float *b, float *o) {            /* o = a b, VFPU columns */
+    for (int c = 0; c < 4; c++)
+        for (int r = 0; r < 4; r++)
+            o[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] + a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
+}
+/* An affine matrix's inverse (3x3 with scale, then the translation). */
+static int inv_affine(const float *m, float *o) {
+    const float a = m[0], b = m[4], c = m[8], d = m[1], e = m[5], f = m[9], g = m[2], h = m[6], i = m[10];
+    const float det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    if (fabsf(det) < 1e-12f) return 0;
+    const float k = 1.0f / det;
+    o[0] = (e * i - f * h) * k; o[4] = (c * h - b * i) * k; o[8] = (b * f - c * e) * k;
+    o[1] = (f * g - d * i) * k; o[5] = (a * i - c * g) * k; o[9] = (c * d - a * f) * k;
+    o[2] = (d * h - e * g) * k; o[6] = (b * g - a * h) * k; o[10] = (a * e - b * d) * k;
+    o[3] = o[7] = o[11] = 0.0f;
+    for (int r = 0; r < 3; r++) o[12 + r] = -(o[r] * m[12] + o[4 + r] * m[13] + o[8 + r] * m[14]);
+    o[15] = 1.0f;
+    return 1;
+}
+
+/* After a pose (nodes posed, g_arms_saved the animated ones): each node's change. */
+static void att_keep_pose(uint32_t nodes, int n) {
+    for (int b = 0; b < n; b++) {
+        float now[16], inv[16];
+        node_get(nodes, b, now);
+        g_att_moved[b] = memcmp(now, g_arms_saved[b], sizeof now) != 0;
+        if (!g_att_moved[b] || !inv_affine(g_arms_saved[b], inv)) {
+            static const float I[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+            memcpy(g_att_d[b], I, sizeof I);
+            g_att_moved[b] = 0;
+            continue;
+        }
+        mul44(now, inv, g_att_d[b]);
+    }
+    g_att_dn = n;
+}
+
+/* One matrix (eye space, at `mat`): learns which arm node it hangs on and,
+ * once known, moves it with that node. Returns 1 with it changed (the
+ * original in `keep`). */
+static int att_follow(uint32_t mat, int st, uint32_t body, const float *Mb, const float (*W)[16], const float (*Wi)[16], float *keep) {
+    float Mw[16];
+    for (uint32_t i = 0; i < 16; i++) Mw[i] = psp_read_f32(mat + 4u * i);
+    float near = 1e30f;
+    for (int j = 0; j < ATT_ARM; j++) {
+        const float dx = Mw[12] - W[j][12], dy = Mw[13] - W[j][13], dz = Mw[14] - W[j][14];
+        const float d = dx * dx + dy * dy + dz * dz;
+        if (d < near) near = d;
+    }
+#ifndef PSP2I_PROD
+    g_ad_mats++;
+    if (near < g_ad_min) { g_ad_min = near; g_ad_min_mat = mat; g_ad_min_obj = g_ad_cur_obj; }
+#endif
+    if (near > ATT_NEAR * ATT_NEAR) return 0;
+#ifndef PSP2I_PROD
+    g_ad_near++;
+#endif
+    const uint64_t vb = psp_sched_vblank_count();
+    att_rec *a = NULL, *old = &g_att[0];
+    for (int i = 0; i < ATT_MAX && !a; i++) if (g_att[i].key == mat) a = &g_att[i];
+    if (!a) {
+        for (int i = 0; i < ATT_MAX; i++) if (g_att[i].seen < old->seen) old = &g_att[i];
+        a = old;
+        memset(a, 0, sizeof *a);
+        a->key = mat;
+        a->node[0] = a->node[1] = -1;
+        a->grip_node = -1;
+    }
+    a->seen = vb;
+#ifndef PSP2I_PROD
+    a->obj = g_ad_cur_obj;
+#endif
+    /* Its drift against each node, frame to frame: recent (err) and all of
+     * it (sum). Standing still, everything near the hands (the head, the
+     * Rabbit, the scenery) drifts as little against the arm as against the
+     * torso (log, 2026-10-24: both ~0.000), so the evidence is kept: a thing
+     * is held once it has drifted clearly less against an arm node than
+     * against the torso, and sits by the hand (the weapons' grips 1.6-2.1
+     * units from it; the head, the Rabbit and the scenery 6.5-12). */
+    float L[16], use_L[16];
+    int best = -1, have = 0;
+    float best_s = 1e30f, torso_s = 1e30f;
+    for (int j = 0; j < ATT_NN; j++) {
+        mul44(Wi[j], Mw, L);
+        float e = 0.0f;
+        for (int k = 0; k < 12; k++) {
+            const int idx = k < 9 ? (k / 3) * 4 + k % 3 : 12 + (k - 9);
+            e += fabsf(L[idx] - a->prev[j][k]);
+            a->prev[j][k] = L[idx];
+        }
+        a->err[j] = a->frames ? 0.9f * a->err[j] + 0.1f * e : 1.0f;
+        if (a->frames) a->sum[st][j] += e;
+        if (j == a->node[st]) { memcpy(use_L, L, sizeof L); have = 1; }
+        if (j < ATT_ARM) { if (a->sum[st][j] < best_s) { best_s = a->sum[st][j]; best = j; } }
+        else if (a->sum[st][j] < torso_s) torso_s = a->sum[st][j];
+    }
+    if (a->frames < 100000) a->frames++;
+    /* Of nodes that fit about as well on the same arm, the one nearest the
+     * hand (the wrist's calibration turns it and what is below it). */
+    if (best >= 0) {
+        const int arm = best / 3;
+        for (int j = arm * 3 + 2; j > best; j--)
+            if (a->sum[st][j] <= 1.5f * best_s + 0.05f) { best = j; break; }
+    }
+    float dist = 1e30f;
+    if (best >= 0) {
+        mul44(Wi[best], Mw, L);
+        dist = sqrtf(L[12] * L[12] + L[13] * L[13] + L[14] * L[14]);
+        a->fit_node = ATT_NODE[best];                       /* for the dev log */
+        a->fit_err = a->err[best];
+        a->fit_torso = torso_s;
+        a->fit_dist = dist;
+    }
+    /* Let go only of what has left the hand for good (put away, dropped):
+     * a gun coming up into the hand drifts for a few frames. */
+    if (a->node[st] >= 0) a->off[st] = a->err[a->node[st]] > 4.0f * ATT_ERR_OK ? a->off[st] + 1 : 0;
+    if (a->node[st] >= 0 && a->off[st] > 30) {
+        fprintf(stderr, "vr: arms: the matrix at 0x%08X left the hand: let go\n", mat);
+        a->node[st] = -1;
+        memset(a->sum[st], 0, sizeof a->sum[st]);
+        return 0;
+    }
+    /* With R held the arm aims, still against the chest: no torso evidence
+     * comes, so a thing rigid to the hand and at the grip is enough then. */
+    const int held = best >= 0 && a->err[best] < ATT_ERR_OK && dist < ATT_HAND_NEAR &&
+                     (torso_s > 4.0f * a->sum[st][best] + ATT_EVIDENCE || (st && dist < ATT_GRIP_NEAR));
+    if (a->frames >= ATT_FRAMES && held && best != a->node[st] && (a->node[st] < 0 || best / 3 == a->node[st] / 3 ||
+                                                               a->sum[st][best] < 0.5f * a->sum[st][a->node[st]])) {
+        a->node[st] = best;
+        fprintf(stderr, "vr: arms: the matrix at 0x%08X rides on body node %d (drift %.2f against it, %.2f against the"
+                        " torso, %.2f units from it): it follows the hand\n", mat, ATT_NODE[best], (double)a->sum[st][best],
+                (double)torso_s, (double)dist);
+        return 0;                                              /* use_L is the old node's: from the next frame */
+    }
+    /* A gun is in the hand only while R is held; in VR your hand keeps it:
+     * without R, what was learned with R stays in the hand at its grip. */
+    int nb_i;
+    if (a->node[st] >= 0 && have && a->err[a->node[st]] <= 4.0f * ATT_ERR_OK) {
+        nb_i = ATT_NODE[a->node[st]];
+        if (st) { memcpy(a->grip, use_L, sizeof use_L); a->grip_node = a->node[st]; }
+    } else if (!st && a->node[0] < 0 && a->grip_node >= 0) {
+        nb_i = ATT_NODE[a->grip_node];
+        memcpy(use_L, a->grip, sizeof use_L);
+    } else return 0;
+    if (!g_att_moved[nb_i]) return 0;
+    /* M' = Mb x (D x node) x L: the posed node, the same attachment. */
+    const uint32_t nodes = psp_read32(body + 100u);
+    float nb[16], np[16], t[16], out[16];
+    node_get(nodes, nb_i, nb);
+    mul44(g_att_d[nb_i], nb, np);
+    mul44(Mb, np, t);
+    mul44(t, use_L, out);
+    for (uint32_t i = 0; i < 16; i++) { keep[i] = Mw[i]; psp_write_f32(mat + 4u * i, out[i]); }
+    return 1;
+}
+
+/* 0x08D8D4E8(obj): its matrices into its display list (see FN_BONE_PATCH). */
+#define FN_BONE_PATCH 0x08D8D4E8u
+#define ATT_KEEP_MAX  64
+static void hook_bone_patch(void (*original)(void)) {
+    const uint32_t obj = psp_cpu.r[4];
+    uint32_t kept_at[ATT_KEEP_MAX];
+    static float kept[ATT_KEEP_MAX][16];
+    int nk = 0;
+    const uint32_t pl = g_arms_on && g_att_dn ? gamelog_local_player() : 0;
+    const uint32_t box = pl ? psp_read32(pl + PLAYER_MODEL_BOX) : 0;
+    const uint32_t body = user_ptr(box) ? psp_read32(box + 8u) : 0;
+    const uint32_t nodes = user_ptr(body) ? psp_read32(body + 100u) : 0;
+    const uint32_t list = user_ptr(obj) ? psp_read32(obj + 64u) : 0;
+    const int n = user_ptr(obj) ? (int)psp_read32(obj + 8u) : 0;
+#ifndef PSP2I_PROD
+    g_ad_cur_obj = obj;
+    if (g_arms_on && g_skel_map) {                     /* with PSP2I_SKEL: the copy hook's counters and candidates */
+        g_ad_calls++;
+        if (user_ptr(nodes)) g_ad_posed++;
+        if (user_ptr(nodes) && user_ptr(list) && n > 0 && n <= NODES_MAX && (psp_read32(obj + 16u) & 0x08000018u)) g_ad_flags++;
+        const uint64_t vb = psp_sched_vblank_count();
+        if (vb - g_ad_log >= 300) {
+            g_ad_log = vb;
+            fprintf(stderr, "vr: arms: copy hook in 5 s: %u calls, %u with a posed body, %u with matrices; %u body palettes"
+                            " skipped; %u matrices looked at, %u near a hand; nearest %.1f units (0x%08X of obj 0x%08X);"
+                            " body palettes this frame 0x%08X 0x%08X 0x%08X\n",
+                    g_ad_calls, g_ad_posed, g_ad_flags, g_ad_bodypal, g_ad_mats, g_ad_near,
+                    (double)sqrtf(g_ad_min < 1e29f ? g_ad_min : 0.0f), g_ad_min_mat, g_ad_min_obj, g_att_pal[0], g_att_pal[1], g_att_pal[2]);
+            g_ad_calls = g_ad_posed = g_ad_flags = g_ad_bodypal = g_ad_mats = g_ad_near = 0;
+            g_ad_min = 1e30f;
+            /* The candidates that sit still on an arm node, stillest first:
+             * the weapon against the head and the Rabbit. */
+            int order[ATT_MAX], no = 0;
+            for (int i = 0; i < ATT_MAX; i++)
+                if (g_att[i].key && vb - g_att[i].seen < 30 && g_att[i].frames >= ATT_FRAMES && g_att[i].fit_err < ATT_ERR_OK)
+                    order[no++] = i;
+            for (int i = 1; i < no; i++)
+                for (int j = i; j > 0 && g_att[order[j]].fit_err < g_att[order[j - 1]].fit_err; j--) {
+                    const int t = order[j]; order[j] = order[j - 1]; order[j - 1] = t;
+                }
+            for (int i = 0; i < no && i < 10; i++) {
+                const att_rec *c = &g_att[order[i]];
+                fprintf(stderr, "vr: arms:   candidate 0x%08X (obj 0x%08X): node %d drift now %.3f, all of it against the torso %.2f,"
+                                " %.2f units from the node%s\n", c->key, c->obj, c->fit_node, (double)c->fit_err,
+                        (double)c->fit_torso, (double)c->fit_dist, c->node[0] >= 0 || c->node[1] >= 0 ? " (held)" : "");
+            }
+        }
+    }
+#endif
+    if (user_ptr(nodes) && user_ptr(list) && n > 0 && n <= NODES_MAX && (psp_read32(obj + 16u) & 0x08000018u)) {
+        float Mb[16], W[ATT_NN][16], Wi[ATT_NN][16];
+        int ok = 1;
+        for (uint32_t i = 0; i < 16; i++) Mb[i] = psp_read_f32(body + 32u + 4u * i);
+        for (int j = 0; j < ATT_NN && ok; j++) {               /* the arm and torso nodes as animated, eye space */
+            float nb[16];
+            node_get(nodes, ATT_NODE[j], nb);
+            mul44(Mb, nb, W[j]);
+            ok = inv_affine(W[j], Wi[j]);
+        }
+        /* R held (lock-on, player +0x214 != 0, as fp_nudge reads it): a gun
+         * comes up into the hand only then (user), so what rides on the hand
+         * is learned, and followed, for each state apart. */
+        const int st = psp_read32(pl + ATT_STATE) != 0;
+        const int parts = (int)psp_read8(obj + 21u);
+        for (int part = 0; part < parts && ok; part++) {
+            const uint32_t mats = psp_read32(list + 4u * (uint32_t)part);
+            int body_pal = !user_ptr(mats);
+            for (int k = 0; k < 4 && !body_pal; k++) body_pal = g_att_pal_vb + 2 >= psp_sched_vblank_count() && mats == g_att_pal[k];
+            if (body_pal) {
+#ifndef PSP2I_PROD
+                g_ad_bodypal++;
+                static uint64_t told;                          /* that the skip finds them */
+                if (psp_sched_vblank_count() - told >= 600) {
+                    told = psp_sched_vblank_count();
+                    fprintf(stderr, "vr: arms: the body's palette 0x%08X skipped in the copy (obj 0x%08X)\n", mats, obj);
+                }
+#endif
+                continue;
+            }
+            for (int i = 0; i < n && nk < ATT_KEEP_MAX; i++) {
+                const uint32_t m = mats + 64u * (uint32_t)i;
+                if (att_follow(m, st, body, Mb, (const float (*)[16])W, (const float (*)[16])Wi, kept[nk])) kept_at[nk++] = m;
+            }
+        }
+    }
+    original();
+    for (int k = 0; k < nk; k++)
+        for (uint32_t i = 0; i < 16; i++) psp_write_f32(kept_at[k] + 4u * i, kept[k][i]);
 }
 
 static void hook_palette(void (*original)(void)) {
@@ -391,13 +765,20 @@ static void hook_palette(void (*original)(void)) {
     if (g_arms_on && user_ptr(model) && user_ptr(skel)) {
         const uint32_t pl = gamelog_local_player();
         const uint32_t box = pl ? psp_read32(pl + PLAYER_MODEL_BOX) : 0;
-        if (user_ptr(box) && psp_read32(box + 8u) == model) {
+        const uint32_t body = user_ptr(box) ? psp_read32(box + 8u) : 0;
+        if (body == model) {
+            const uint64_t vb = psp_sched_vblank_count();     /* its palettes: skipped by hook_bone_patch */
+            if (vb != g_att_pal_vb) { memset(g_att_pal, 0, sizeof g_att_pal); g_att_pal_vb = vb; }
+            const uint32_t pal = psp_read32(psp_cpu.r[5]);
+            for (int k = 0; k < 4; k++) if (!g_att_pal[k] || g_att_pal[k] == pal) { g_att_pal[k] = pal; break; }
             arms_frame();
             if ((g_arms_ok[0] || g_arms_ok[1]) && arms_pose(model, skel)) {
+                att_keep_pose(psp_read32(model + 100u), g_arms_n_saved);
                 original();
                 arms_restore(model);
                 return;
             }
+            g_att_dn = 0;                                      /* no pose: nothing to follow */
         }
     }
     original();
@@ -420,4 +801,5 @@ void vr_body_init(void) {
     } else g_test_node = -1;
 #endif
     psp_hook_set(FN_PALETTE, hook_palette);                 /* a no-op unless the map, the test or the arms are on */
+    psp_hook_set(FN_BONE_PATCH, hook_bone_patch);           /* the weapon follows the hand: a no-op unless the arms are on */
 }

@@ -550,6 +550,10 @@ static void input_update(int focused) {
             if (face[2]) p.host |= VR_HOST_MENU;     /* held, as the engine menu's toggle reads it */
             if (face[2] && !g_face_prev[2]) fprintf(stderr, "vr: both grips + Square: engine menu\n");
             if (face[3] && !g_face_prev[3]) g_host_latch |= VR_HOST_MARK;   /* dev builds: the menu finder */
+            if (trig[0] && trig[1] && !(g_trig_prev[0] && g_trig_prev[1])) {
+                fprintf(stderr, "vr: both grips + both triggers: hand calibration\n");
+                g_host_latch |= VR_HOST_HANDCAL;
+            }
             if (lc && !g_lclick_prev) {
                 g_dpad_latch = !g_dpad_latch;
                 fprintf(stderr, "vr: both grips + left stick click: the left stick is %s\n", g_dpad_latch ? "the D-pad" : "the stick");
@@ -663,7 +667,7 @@ static void input_update(int focused) {
     AcquireSRWLockExclusive(&g_pad_lock);
     p.host |= g_host_latch;                  /* kept until vr_pad_get takes them */
     g_host_latch = 0;
-    p.host |= g_pad.host & (VR_HOST_RECENTER | VR_HOST_VIEW | VR_HOST_MARK);
+    p.host |= g_pad.host & (VR_HOST_RECENTER | VR_HOST_VIEW | VR_HOST_MARK | VR_HOST_HANDCAL);
     g_pad = p;
     g_pad_live = focused;
     ReleaseSRWLockExclusive(&g_pad_lock);
@@ -1753,7 +1757,7 @@ int vr_pad_get(vr_pad *out) {
     AcquireSRWLockExclusive(&g_pad_lock);
     const int live = g_pad_live;
     *out = g_pad;
-    g_pad.host &= ~(uint32_t)(VR_HOST_RECENTER | VR_HOST_VIEW | VR_HOST_MARK);   /* the latched shortcuts, taken once */
+    g_pad.host &= ~(uint32_t)(VR_HOST_RECENTER | VR_HOST_VIEW | VR_HOST_MARK | VR_HOST_HANDCAL);   /* the latched shortcuts, taken once */
     for (int h = 0; h < 2; h++) {                                  /* ... and the swings */
         out->swing[h] = live ? g_swing[h] : 0;
         out->swing_speed[h] = g_swing_top[h];

@@ -245,13 +245,20 @@ analysed with `.claude/skills/psp2i-static-re/scripts/skeleton.py`.
 | Address | What | Status |
 |---|---|---|
 | `0x08D8D320` / `0x08D8D3B8` / `0x08D8D450` | Copy one 4x4 matrix (64 bytes) into 12 GE bone / world / texture-matrix commands (`0x2B` / `0x3B` / `0x41`) | known (disassembly) |
-| `0x08D8D4E8`(model) | Per model, just before it is drawn: its matrices (+8 of them, array at +64[part], times the scale at +24) into the bone records of its prebuilt display list (+68[part], 52 bytes: 12 commands + RET); +72 / +76 the same for world and texture matrices. Scheduled through 0x08D8D7B0 | known (disassembly) |
+| `0x08D8D4E8`(model) | Per model, just before it is drawn: its matrices (+8 of them, array at +64[part], times the scale at +24) into the bone records of its prebuilt display list (+68[part], 52 bytes: 12 commands + RET); +72 / +76 the same for world and texture matrices. Scheduled through 0x08D8D7B0. The objects live in main RAM below `0x08800000` (e.g. `0x085F1B70`). **Hooked** (vr_body.c `hook_bone_patch`): the weapon's matrices are moved with the IK'd hand there | known (disassembly + hook, ~39 calls a frame) |
 | `0x08D74E54` / `0x08D74E84`(palette, skeleton, nodes, M) | The skinning palette: for each of the skeleton's +40 nodes (144-byte records at +48), `palette[slot] = M x node x inverse bind` (slot = record +4 as a short, -1 = no slot; inverse bind at record +48 unless flag 0x8) | known (disassembly + write watch on a palette entry) |
 | `0x08A846DC`(model, &palette, skeleton) | Calls the above with nodes = `*(model+100)`, M = model+32 (model -> eye). **Hooked** (port/vr/vr_body.c, dev `PSP2I_SKEL`): the place to change the local player's pose for IK | known (disassembly + hook) |
 | `0x08A850A8`(model) | Evaluates the animation into `*(model+100)` (through `0x08A846B8` -> `0x08D74BD8`), then calls the model's callback `*(model+112)`(nodes) if set (0 for the player) | seen (disassembly) |
 | `*(player+0x178)+0x8` | **The local player's animated model** (in all three runs, town, with party members; the address changes per area) | seen (hook, 3 runs) |
 | player model `+100` | Its node matrices: 28 x 4x4 (64 bytes, VFPU columns), model space, each bone along its local +x | seen (dumps) |
 | skeleton record (144 bytes) | +0 flags, +4 palette slot (short) and parent (short at +6), +8 first child (short), +10 next sibling, +12..+20 rest offset from the parent (floats), +24..+32 rest rotation (16-bit angles), +36..+44 scale, +48 inverse bind 4x4 | seen (dumps; parents agree with the poses) |
+
+**The weapon** (the arms' hook, 2026-10-24): not part of the body's model
+and not the container's +0x10 model (that rides on the head, node 13).
+Its matrices reach `0x08D8D4E8` like every model's; while R is held
+(player +0x214 != 0) they are rigid to hand node 18 (left) or 23 (right),
+0.0-0.1 units from it. Without R the game puts it elsewhere (a gun lowered
+or holstered). Found by rigidity per node, as vr_body.c does at run time.
 
 The tree (node <- parent, rest length in model units; the head is ~13.3
 above the feet, so ~7.8 model units per metre for a 1.7 m character; the

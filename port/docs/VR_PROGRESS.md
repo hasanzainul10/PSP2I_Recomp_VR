@@ -56,13 +56,57 @@ controls are fine; manual aim in first person not tried yet. They chose to
   From the eyes (the first build) the reach was over 100% in 21 of 40 log
   samples; now 1 of 19 (`arms2.log`: 20-100%, median 77%). **User, in the
   headset: "the arms bend with mine now and straighten when I reach out."**
+- **Hands and weapon turn with the controllers** (2026-10-24, user in the
+  headset: "calibrated: the hands and weapon turn with the controllers").
+  The hand bone's axes against a real grip can't be read from the game, so
+  it is a calibration, as PSUEx-VR: **both grips + both triggers** (MOTION;
+  the triggers don't attack while both grips are held) takes each hand's
+  rotation in the controller's frame (`C^T H`, model axes, after the arm
+  IK); after it the wrist 17 / 22 turns to `C x offset` each frame, the
+  weapon with it. Saved as `vr_hand_cal=` (18 floats) in the ini; without
+  it the hands keep the game's rotation. A buzz on both controllers says it
+  took. Log: `vr: arms: hands calibrated (left yes, right yes)`.
+
+- **The weapon in the IK hand** (2026-10-24, user in the headset: "after
+  holding R once, my weapons stay in my hand without R", all their weapons).
+  How it was found, as it took six runs:
+  - The weapon is not part of the body's model, so the arm IK alone left it
+    where the animation had it. The extra model in the player's container
+    (+0x10) rides on the head (node 13: hair or headgear), not the hand.
+  - Every matrix the game copies into a display list goes through
+    `0x08D8D4E8` (skinned palettes and rigid world matrices, eye space): a
+    hook there (`hook_bone_patch`) checks those near the hands. A thing's
+    placement in an arm node's frame, `inv(body M x node) x M`, stays fixed
+    only for the node it hangs on; once found, it is moved by what the IK did
+    to that node, for the copy only. The body's own palettes are skipped.
+  - Bug on the way: my pointer check rejected all of these objects (they
+    live at `0x085xxxxx`, below `0x08800000`); widened to `0x08000000`.
+  - Standing still, the head, the floating Rabbit and the scenery look as
+    fixed to the forearm as the weapon (the first build dragged them along):
+    a thing must drift clearly less against the arm than against the torso
+    (nodes 1, 11, 13), with the evidence kept over its life, and sit within
+    5 units of the node.
+  - Weapons are in the hand only while R is held (lock-on, player +0x214;
+    MOTION's left grip): the user saw them attached correctly then and not
+    otherwise. So the evidence is kept per state; with R held, rigid to the
+    hand and within 2.5 units is enough (the weapons sit 0.0-0.1 from node
+    18 / 23); the grip learned with R is then kept without R, so the weapon
+    stays in the hand. Each weapon is learned the first time R is held with
+    it.
+  - Dev logs: `vr: arms: the matrix at ... rides on body node N` / `let go`;
+    with `PSP2I_SKEL` also the copy hook's counters and candidates.
 
 **Next for M2:**
-1. The hand's rotation from the controller's (the weapon tilting with the
-   wrist): wrist 17 / 22 axes from the grip pose, with a fixed offset.
-2. A VR > ARMS item on the engine menu (run `test_menu`).
-3. First person: how the arms look in view; the weapon's hits stay the
-   game's (only the drawing changes).
+1. Not checked: town with the weapon put away (a learned weapon would be
+   drawn in the hand if the game still draws it there), twin and two-handed
+   weapons (each learned on its own hand), the Rabbit with the arms on.
+2. A VR > ARMS item on the engine menu (run `test_menu`), maybe with
+   "calibrate hands" for players who don't know the chord.
+3. First person: how the arms look in view (not judged yet); the weapon's
+   hits stay the game's (only the drawing changes).
+4. Rough edges to look for: the arms during attacks and Photon Arts (the
+   game animates the arms; IK overrides them), two-handed and twin weapons
+   (each hand to its own controller today), and lock-on.
 
 ## Start here (handoff 2026-10-23)
 

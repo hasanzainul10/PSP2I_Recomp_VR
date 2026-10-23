@@ -52,3 +52,4 @@
 0x089D161C   # ... (counted, dev)
 0x089F7A48   # the scene dispatcher's child walk (a0 = parent task; children +20, next +12, vtable +0, update = vtable +8, flags +4): the live tasks logged as they come and go (dev, host/main.c)
 0x08A846DC   # an animated model's skinning palette from its node matrices (*(model+100), model space) and model+32: the local player's skeleton read there (dev PSP2I_SKEL, port/vr/vr_body.c)
+0x08D8D4E8   # a model's matrices (+64[part], eye space) into its display list's bone / world commands, just before drawing: the weapon moved with the IK'd hand (port/vr/vr_body.c)
