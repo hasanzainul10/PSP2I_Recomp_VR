@@ -295,6 +295,19 @@ the world; the user found it overwhelming. Those were removed. Now:
   per 5 s, all visible in both views (none hidden by flags or tests), so
   whatever is still missing is dropped elsewhere. The method is now the
   `psp2i-hook-re` skill.
+- **Edges of the eyes' view, then the "transparent rectangle" (2026-10-23,
+  user: both fixed, "it works now"):**
+  - GE dumps first vs third person: the game left out pieces behind or
+    outside its camera at the head. Fixes: the camera at the head takes the
+    head's full turn (`hook_apply_camera`, `g_fp_cam_hr`); SetProjection
+    (`0x08D7DA78`, hooked) widens a field-like projection in first person
+    (eyes' view x 1.25), measured at the scene walk (x 0.684 / y 0.743);
+    the eyes take the widening out only when the GE's projection is ours.
+  - The headset's view is 123 x 106 degrees (PS VR2, `vr_view_tan`):
+    `vr_fov_auto` sizes the eye pictures to it (scales 2.65 / 3.37).
+  - The rectangle was the game's light-shaft and haze fans: untextured,
+    vertices at clip z -1 (screen space, near plane). psprecomp drops them
+    with eye views (`ST_DROP`, `st_screen_extruded`; ~10k a run).
 - **Open:** hiding the player's own head (bone weights, or an eye-forward
   offset), body-relative movement (today the stick moves relative to the
   game camera, which trails behind), the cull behind the game camera.
