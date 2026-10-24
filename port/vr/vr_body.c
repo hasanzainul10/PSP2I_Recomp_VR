@@ -209,7 +209,7 @@ static void test_restore(uint32_t model, uint32_t skel) {
  * follow, headset-checked with the shoulder test).
  *
  * The target is the controller's offset from your shoulder (estimated
- * from the headset: ARM_SHOULDER_* in its heading), applied from the
+ * from the headset: ARM_SHOULDER_* in the recentred heading), applied from the
  * model's shoulder joint, in model units: the model's own arm length over a
  * human's (shoulder to grip ~0.62 m). So a bent arm stays bent (from the
  * eyes, as first built, the target was past the arm's reach in half the
@@ -289,6 +289,8 @@ void vr_body_head(int hide) {
  * rigid draws within HEAD_RIGID_R of the head node, eye space, from the
  * animated pose of this frame. */
 #define HEAD_RIGID_R 3.0f
+static float    g_head_eye[3], g_head_fwd[3];  /* vr_body_head_eye */
+static uint64_t g_head_vb;
 static void node_get(uint32_t nodes, int b, float *m);
 static void head_rigid_mark(uint32_t model, uint32_t nodes) {
     float Mb[16], nb[16], W[16];
@@ -298,6 +300,17 @@ static void head_rigid_mark(uint32_t model, uint32_t nodes) {
         for (int r = 0; r < 4; r++)
             W[c * 4 + r] = Mb[r] * nb[c * 4] + Mb[4 + r] * nb[c * 4 + 1] + Mb[8 + r] * nb[c * 4 + 2] + Mb[12 + r] * nb[c * 4 + 3];
     psp_gpu_set_rigid_drop(1, &W[12], HEAD_RIGID_R);
+    /* For the first-person eyes: the head joint and the body's forward
+     * (model +z), in the game camera's view space, this frame. */
+    memcpy(g_head_eye, &W[12], sizeof g_head_eye);
+    for (int r = 0; r < 3; r++) g_head_fwd[r] = Mb[8 + r];
+    g_head_vb = psp_sched_vblank_count();
+}
+int vr_body_head_eye(float head[3], float fwd[3]) {
+    if (!g_head_vb || psp_sched_vblank_count() - g_head_vb > 4) return 0;
+    memcpy(head, g_head_eye, sizeof g_head_eye);
+    memcpy(fwd, g_head_fwd, sizeof g_head_fwd);
+    return 1;
 }
 
 void vr_body_arms(int on) {
@@ -305,7 +318,11 @@ void vr_body_arms(int on) {
     g_arms_on = on;
 }
 
-/* Once a frame: the controllers from your shoulders, in the headset's heading. */
+/* Once a frame: the controllers from your shoulders, in the body's frame:
+ * the recentred heading (vr_recenter's forward, the frame vr_head_get and
+ * vr_hands_get already are in), not the head's. In the head's heading, a
+ * look left put the still hands to the right of the gaze, and the
+ * character's arms swung right (user, first and third person). */
 static void arms_frame(void) {
     const uint64_t vb = psp_sched_vblank_count();
     if (vb == g_arms_vb) return;
@@ -314,12 +331,8 @@ static void arms_frame(void) {
     vr_head h;
     vr_hand vh[2];
     if (!vr_head_get(&h) || !vr_hands_get(vh)) return;
-    const float *q = h.q;                                     /* forward = -z of the head, level */
-    float f[3] = { -2.0f * (q[0] * q[2] + q[3] * q[1]), 0.0f, -(1.0f - 2.0f * (q[0] * q[0] + q[1] * q[1])) };
-    const float fl = sqrtf(f[0] * f[0] + f[2] * f[2]);
-    if (fl < 1e-3f) return;
-    f[0] /= fl; f[2] /= fl;
-    const float r[3] = { -f[2], 0.0f, f[0] };
+    static const float f[3] = { 0.0f, 0.0f, -1.0f };          /* forward and right at recenter */
+    static const float r[3] = { 1.0f, 0.0f, 0.0f };
     for (int hd = 0; hd < 2; hd++) {
         if (!vh[hd].ok) continue;
         float d[3];

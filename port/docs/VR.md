@@ -101,8 +101,14 @@ buzz). It is saved (`vr_hand_cal=` in `psp2i_display.ini`; delete the line
 to undo it). Until then the hands keep the game's rotation.
 
 In first person your character's head is hidden (`vr_fp_hide_head=on`, the
-default) and the view sits where its face is; `off` brings the head back,
-with the view further ahead (`vr_fp_forward`, `vr_fp_near`).
+default) and the view sits where its eyes are: `vr_fp_eye_up` /
+`vr_fp_eye_fwd` above and ahead of its head joint (the character is about
+16 of these units tall). `off` brings the head back, with the view further
+ahead (`vr_fp_forward`, `vr_fp_near`).
+
+The arms follow your hands in the frame you recentred in (both grips +
+Cross): turning your head doesn't move them; if you turn your whole body,
+recenter.
 
 Your weapon goes into your hand once you have held **R** (the left grip)
 with it out: the game itself only holds a weapon in the hand while R is

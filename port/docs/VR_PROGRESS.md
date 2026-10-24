@@ -169,6 +169,22 @@ controls are fine; manual aim in first person not tried yet. They chose to
     same-in-both-eyes draws, HUD-depth sheets put in the world, 3D geometry
     on the HUD panel. Quiet in a good frame.
 
+- **First-person eyes where the character's are** (2026-10-24, user: "feels
+  right"). With the head hidden, the eyes are the head joint (node 13, as
+  animated, in the game camera's view space: body M x node) plus
+  `vr_fp_eye_up=0.6` and `vr_fp_eye_fwd=0.4` along world up and the body's
+  level forward, eased like the old head offset. In the GE's space the
+  character is ~16 units tall (head joint 14.5 above its model origin); the
+  old fixed `vr_fp_eye=5.3` over player +0x4B0 was ~0.7 above the top of
+  the head ("the camera is on top of the head"). Note: player +0x4B0 is not
+  the model's origin in that space (it measured 3.05 below the head joint
+  there): use the model's M for anything on the body.
+- **Arms ignore head turns** (user: "arm stay put"): the controllers'
+  offsets from the shoulders are taken in the recentred frame (the one
+  vr_head_get / vr_hands_get use), not the head's heading: a look left had
+  swung the arms right, first and third person. Turning the whole body
+  needs a recenter (both grips + Cross).
+
 **Next for M2:**
 1. Not checked: town with the weapon put away (a learned weapon would be
    drawn in the hand if the game still draws it there), twin and two-handed

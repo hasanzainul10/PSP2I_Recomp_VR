@@ -1006,10 +1006,15 @@ static int      g_menu_loading;
 #define VR_FP_HIDDEN_FWD  0.25f
 #define VR_FP_HIDDEN_NEAR 0.25f
 static int      g_vr_fp_hide_head = 1;
+/* vr_fp_eye_up= / vr_fp_eye_fwd=: with the head hidden, the eyes this many
+ * game units above the head joint (node 13) and ahead of it along the body. */
+static float    g_vr_fp_eye_up = 0.6f, g_vr_fp_eye_fwd = 0.4f;
 static int      g_vr_first;
 static float    g_vr_fp_eye = VR_FP_EYE_DEFAULT, g_vr_fp_scale = VR_FP_SCALE_DEFAULT, g_vr_fp_fwd = VR_FP_FORWARD_DEFAULT;
 static float    g_vr_fp_near = VR_FP_NEAR_DEFAULT;
 static float g_fp_head_off[3];               /* the head's centre across from the feet, world axes (head_frame's probe) */
+static float g_fp_eye_off[3];                /* with the head hidden: the eyes from the feet, world axes (eased) */
+static int   g_fp_eye_ok;
 static int   g_fp_head_ok;
 static int   g_fp_cam;                       /* the last field camera was applied at the head */
 static int   g_fp_other_cam;                 /* the camera applied last is another (the minimap's): left alone */
@@ -1331,6 +1336,37 @@ static void head_frame(psp_gpu_stereo *s) {
             for (int r = 0; r < 3; r++) hv[r] = g_fp_head_ok ? v[r] * g_fp_head_off[0] + v[8 + r] * g_fp_head_off[2] : 0.0f;
             for (int r = 0; r < 3; r++)
                 base[r] = c[r] + g_vr_fp_eye * un[r] + hv[r] - (g_vr_fp_hide_head ? VR_FP_HIDDEN_FWD : g_vr_fp_fwd) * q[6 + r];   /* ahead: -z */
+            /* With the head hidden: the eyes where the character's are, from
+             * its head joint (vr_body: node 13 as animated) vr_fp_eye_up
+             * above it and vr_fp_eye_fwd ahead along the body, not a fixed
+             * height over the feet (user: "make the first person where the
+             * eye should be, now that the head is gone"). Kept as an offset
+             * from the feet in world axes, eased like the head offset above,
+             * so the run's bob and sway don't shake the view. */
+            float hj[3], hf[3];
+            if (g_vr_fp_hide_head && vr_body_head_eye(hj, hf)) {
+                const float fu = hf[0] * un[0] + hf[1] * un[1] + hf[2] * un[2];
+                float fh[3];
+                for (int r = 0; r < 3; r++) fh[r] = hf[r] - fu * un[r];   /* forward, level */
+                const float fl = sqrtf(fh[0] * fh[0] + fh[1] * fh[1] + fh[2] * fh[2]);
+                if (fl > 1e-3f) {
+                    float e[3], ew[3];
+                    for (int r = 0; r < 3; r++) e[r] = hj[r] + g_vr_fp_eye_up * un[r] + g_vr_fp_eye_fwd * fh[r] / fl - c[r];
+                    for (int cc = 0; cc < 3; cc++)            /* view -> world axes: the rotation transposed */
+                        ew[cc] = (v[cc * 4] * e[0] + v[cc * 4 + 1] * e[1] + v[cc * 4 + 2] * e[2]) / (ul * ul);
+                    for (int cc = 0; cc < 3; cc++) g_fp_eye_off[cc] = g_fp_eye_ok ? g_fp_eye_off[cc] + 0.2f * (ew[cc] - g_fp_eye_off[cc]) : ew[cc];
+                    g_fp_eye_ok = 1;
+                    for (int r = 0; r < 3; r++)
+                        base[r] = c[r] + v[r] * g_fp_eye_off[0] + v[4 + r] * g_fp_eye_off[1] + v[8 + r] * g_fp_eye_off[2];
+#ifndef PSP2I_PROD
+                    static unsigned n_eye;
+                    if (++n_eye % 120 == 0)
+                        fprintf(stderr, "vr: fp eyes: %.2f up and %.2f ahead of the head joint; the head joint %.2f below the"
+                                        " game camera\n", (double)g_vr_fp_eye_up, (double)g_vr_fp_eye_fwd,
+                                (double)sqrtf(hj[0] * hj[0] + hj[1] * hj[1] + hj[2] * hj[2]));
+#endif
+                }
+            } else g_fp_eye_ok = 0;
             fx_dist = sqrtf(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]) + PSP2I_FP_FX_AHEAD;
             first = 1;
         }
@@ -2382,6 +2418,14 @@ static int display_load(void) {
         }
         else if (!strncmp(line, "vr_fp_nudge=", 12)) g_vr_fp_nudge = strncmp(line + 12, "off", 3) != 0;
         else if (!strncmp(line, "vr_fp_hide_head=", 16)) g_vr_fp_hide_head = strncmp(line + 16, "off", 3) != 0;
+        else if (!strncmp(line, "vr_fp_eye_up=", 13)) {
+            const float k = (float)atof(line + 13);
+            if (k >= -2.0f && k <= 3.0f) g_vr_fp_eye_up = k;
+        }
+        else if (!strncmp(line, "vr_fp_eye_fwd=", 14)) {
+            const float k = (float)atof(line + 14);
+            if (k >= -1.0f && k <= 3.0f) g_vr_fp_eye_fwd = k;
+        }
         else if (!strncmp(line, "vr_input=", 9))     g_vr_motion = !strncmp(line + 9, "motion", 6);
         else if (!strncmp(line, "vr_arms=", 8))      g_vr_arms = strncmp(line + 8, "off", 3) != 0;
 #ifdef PSP2I_VR
@@ -2493,6 +2537,9 @@ static void display_save(int res) {
     fprintf(f, "; first person: hide head = on: your character's head is drawn shrunk away and the eyes sit where its face"
                " is (fp forward / fp near apply only with it off)\n");
     fprintf(f, "vr_fp_hide_head=%s\n", g_vr_fp_hide_head ? "on" : "off");
+    fprintf(f, "; first person with the head hidden: the eyes this many game units above the character's head joint and ahead"
+               " of it (the character is about 16 of these tall)\n");
+    fprintf(f, "vr_fp_eye_up=%.2f\nvr_fp_eye_fwd=%.2f\n", (double)g_vr_fp_eye_up, (double)g_vr_fp_eye_fwd);
     fprintf(f, "; VR input: pad = a gamepad (or the VR controllers as one), motion = the VR controllers as in PSUEx-VR: hands"
                " shown, swing or trigger attacks, grip + swing / trigger the Photon Art, left grip R (lock-on), right grip L,"
                " left stick click manual aim, right stick click START, both grips + Cross / Circle / Square recenter / first or"

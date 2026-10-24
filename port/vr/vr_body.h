@@ -29,6 +29,11 @@ void vr_body_arms(int on);
  * sets it each frame. */
 void vr_body_head(int hide);
 
+/* First person: the head joint (node 13, as animated) and the body's forward
+ * direction, in the game camera's view space, from this frame's pose (while
+ * the head is hidden). Returns 0 when there is none from the last few vblanks. */
+int  vr_body_head_eye(float head[3], float fwd[3]);
+
 /* Dev: the body's palettes of the next frame to the log (with a VR capture). */
 void vr_body_dump_palettes(void);
 
