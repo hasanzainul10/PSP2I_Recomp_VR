@@ -5,9 +5,58 @@ this file at the end of every working session: what changed, what was checked,
 what is next. The plan itself is [VR_PLAN.md](VR_PLAN.md); user-facing docs are
 [VR.md](VR.md); reverse-engineering results go in [ADDRESS_MAP.md](ADDRESS_MAP.md).
 
-_Last updated: 2026-10-24, skeleton mapping for arm IK (section below)._
+_Last updated: 2026-10-24, the VRChat-style avatar (section below)._
 
-## Skeleton mapped for arm IK (M2, 2026-10-24, latest)
+## The avatar: your character drawn from you (M2, 2026-10-24, latest)
+
+The user asked for the local player to work like a VRChat avatar. Their
+choices: the legs keep walking (strafes from the game's own R-strafe legs),
+the body faces where you look (first and third person), the whole body
+turns, and only with MOTION input (otherwise the game's animation).
+
+- **Upper body still** (user: "that works"): `vr_avatar=on` (default, with
+  `vr_arms=on` and MOTION). vr_body.c `avatar_pose`, before the arm IK at
+  `0x08A846DC`: nodes 9-26 in the skeleton's bind pose (an upright A-pose,
+  ADDRESS_MAP "bind pose"), the spine's rotation taken against the root so the
+  hips' sway doesn't tilt it, the animated offsets and scales kept. Attacks and
+  Photon Arts no longer move it. Drawn only: the nodes are put back after each
+  palette, and the game's facing (player +0x70) is never written.
+- **Faces the gaze:** the host passes the eyes' forward (view space,
+  `vr_body_gaze`); the body turns about the root to its yaw, eased in world
+  terms (20% a vblank), so the game turning the character doesn't swing the
+  drawn body. The arm offsets are taken in the drawn body's heading (the
+  head's yaw less the lag), so the hands stay where yours are as it turns.
+- **Legs:** the game's walk. Walking left, right or back from the gaze draws a
+  learned clip: while R is held and you strafe one way for 2.5-5 s, one gait
+  cycle of nodes 1-8 (in the root's frame) is kept and saved to
+  `psp2i_vr_legs.bin` next to the ini, then replayed at your speed with a
+  6-frame cross-fade. `vr_avatar_legs=still` stands them in the bind pose.
+  **Strafes not seen yet:** in four runs only the forward walk was learned
+  (20 frames a cycle, twice); no R strafe was held long enough to learn one.
+- **Third person head:** the rigid head mesh and pieces the game hangs on
+  the animated head follow the still head: psprecomp
+  `psp_gpu_set_rigid_move` (rigid draws within 3 units of the animated head,
+  WORLD premultiplied by the head's change) and the copy hook for bone
+  matrices. Not reported on separately (the user said "that works").
+- **Weapons fixed in the hand** (user: "steady now"): with the avatar a held
+  weapon's grip is taken once, the first time it sits still in the hand (R
+  again for a gun's aim), and the weapon is then drawn on the hand as posed x
+  that grip every frame, also when a Photon Art throws the game's weapon far
+  from the hand. Two bugs on the way: the near-the-hand test dropped it in
+  PAs, and placing it by D (the IK's change) x this frame's animated hand let
+  the PA's hand motion through ("still in hand but seems to try to move to
+  the animation"), as the weapon can be copied before the body's pose is
+  redone in a frame; fixed weapons now use the posed node itself.
+- Dev logs: `vr: avatar: body turned ...` every 5 s, `learned the X walk`,
+  `vr: arms: ... is fixed in the hand`, `new matrix ... not held yet`, and a
+  2 s count of fixed-grip draws.
+
+**Next:** techniques drawn as if cast from the weapon (drawn only: their
+real spawn is game state); check the strafe learning; town with the weapon
+put away (a fixed weapon may be drawn in the hand); twin and two-handed
+weapons with the avatar; a menu item for the avatar.
+
+## Skeleton mapped for arm IK (M2, 2026-10-24)
 
 The user's answers to the last handoff: the intro movie and the MOTION
 controls are fine; manual aim in first person not tried yet. They chose to

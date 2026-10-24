@@ -34,6 +34,20 @@ void vr_body_head(int hide);
  * the head is hidden). Returns 0 when there is none from the last few vblanks. */
 int  vr_body_head_eye(float head[3], float fwd[3]);
 
+/* The avatar (vr_avatar=, with the arms on): your character drawn from you,
+ * as a VRChat avatar: the upper body in the skeleton's rest pose (no attack
+ * or Photon Art moves it), the arms on the controllers, the whole body
+ * turned to the gaze; the legs walk as the game animates them, and walking
+ * left, right or back from the gaze draws the game's own R-strafe legs,
+ * learned the first time you strafe with R that way (a few seconds) and kept in the
+ * legs file. legs_still: the legs stand in the rest pose instead. Drawn
+ * only; the host sets it each frame. */
+void vr_body_avatar(int on, int legs_still);
+/* Where the eyes look, in the game camera's view space (unit), each frame. */
+void vr_body_gaze(const float fwd[3]);
+/* The learned legs' file (loaded now, written when one is learned). */
+void vr_body_legs_file(const char *path);
+
 /* Dev: the body's palettes of the next frame to the log (with a VR capture). */
 void vr_body_dump_palettes(void);
 

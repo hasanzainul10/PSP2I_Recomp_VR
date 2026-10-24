@@ -260,7 +260,10 @@ analysed with `.claude/skills/psp2i-static-re/scripts/skeleton.py`.
 | `0x08D8D4E8`(model) | Per model, just before it is drawn: its matrices (+8 of them, array at +64[part], times the scale at +24) into the bone records of its prebuilt display list (+68[part], 52 bytes: 12 commands + RET); +72 / +76 the same for world and texture matrices. Scheduled through 0x08D8D7B0. The objects live in main RAM below `0x08800000` (e.g. `0x085F1B70`). **Hooked** (vr_body.c `hook_bone_patch`): the weapon's matrices are moved with the IK'd hand there | known (disassembly + hook, ~39 calls a frame) |
 | `0x08D74E54` / `0x08D74E84`(palette, skeleton, nodes, M) | The skinning palette: for each of the skeleton's +40 nodes (144-byte records at +48), `palette[slot] = M x node x inverse bind` (slot = record +4 as a short, -1 = no slot; inverse bind at record +48 unless flag 0x8) | known (disassembly + write watch on a palette entry) |
 | `0x08A846DC`(model, &palette, skeleton) | Calls the above with nodes = `*(model+100)`, M = model+32 (model -> eye). **Hooked** (port/vr/vr_body.c, dev `PSP2I_SKEL`): the place to change the local player's pose for IK | known (disassembly + hook) |
-| `0x08A850A8`(model) | Evaluates the animation into `*(model+100)` (through `0x08A846B8` -> `0x08D74BD8`), then calls the model's callback `*(model+112)`(nodes) if set (0 for the player) | seen (disassembly) |
+| `0x08A8658C`(model, skeleton) | One animation step: samples the motion (animation player at model+152, `0x08A7E270`) into a local pose buffer `*(0x08ED8A58)` (48 bytes a node), runs the model's optional `*(model+108)` callback on it, then `0x08A850A8` | seen (disassembly, 2026-10-24) |
+| `0x08A850A8`(model, skeleton, local pose) | Evaluates the animation into `*(model+100)` (through `0x08A846B8` -> `0x08D74BD8`), then calls the model's callback `*(model+112)`(nodes) if set (0 for the player) | seen (disassembly) |
+| `0x08D74BD8`(nodes, skeleton, local pose, a3) | Composes each node from the local pose: +0 translation, +16 rotation (`0x08D7AF4C`), +32 scale (`0x08D7B74C`), on the parent's node (record +6); record flags pick special cases (bits 13-16, 0x1000, 0x4/0x8/0x10 << 16) | seen (disassembly, 2026-10-24) |
+| bind pose | `inverse(record +48)` per node: model space, unscaled, an upright **A-pose** (arms ~45 degrees down). The animated nodes' column lengths equal the records' +36 scales (0.80-0.94, not inherited); offsets scale with the parent (the hips 9.78 in the bind, 8.96 animated). Used by vr_body.c's avatar as the rest pose | seen (skel4 dump, 2026-10-24) |
 | `*(player+0x178)+0x8` | **The local player's animated model** (in all three runs, town, with party members; the address changes per area) | seen (hook, 3 runs) |
 | player model `+100` | Its node matrices: 28 x 4x4 (64 bytes, VFPU columns), model space, each bone along its local +x | seen (dumps) |
 | skeleton record (144 bytes) | +0 flags, +4 palette slot (short) and parent (short at +6), +8 first child (short), +10 next sibling, +12..+20 rest offset from the parent (floats), +24..+32 rest rotation (16-bit angles), +36..+44 scale, +48 inverse bind 4x4 | seen (dumps; parents agree with the poses) |
@@ -271,6 +274,17 @@ Its matrices reach `0x08D8D4E8` like every model's; while R is held
 (player +0x214 != 0) they are rigid to hand node 18 (left) or 23 (right),
 0.0-0.1 units from it. Without R the game puts it elsewhere (a gun lowered
 or holstered). Found by rigidity per node, as vr_body.c does at run time.
+
+**The avatar** (vr_body.c, 2026-10-24, headset-checked): the upper body
+(9-26) is drawn in the bind pose (rotation against the parent's from the
+bind, the spine's against the root, the animated offsets and scales), the
+whole body turned about the root to the gaze; the legs stay animated, or a
+learned R-strafe clip (nodes 1-8 in the root's frame, a gait cycle found by
+self-similarity of the ankles). In third person, what the game hangs on the
+animated head (the rigid head mesh at the GE, `psp_gpu_set_rigid_move`;
+bone matrices within 3 units of node 13 in `0x08D8D4E8`) is moved by the
+head node's change. A held weapon is drawn on the posed hand node x its
+grip, fixed the first time it sits still there.
 
 **The head, for first person** (VR captures and GE dumps with each draw's
 bones, 2026-10-24): hair and accessories are body meshes (texture

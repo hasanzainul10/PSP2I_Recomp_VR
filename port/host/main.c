@@ -1044,6 +1044,10 @@ static int   g_vr_motion;
 /* vr_arms=: with MOTION, the character's arms reach for the controllers
  * (vr_body.c: 2-bone IK where the skinning palette is built, drawn only). */
 static int   g_vr_arms = 1;
+/* vr_avatar= / vr_avatar_legs=walk|still: with the arms, your character is
+ * drawn as a VRChat avatar (vr_body.h vr_body_avatar: the upper body still,
+ * the body turned to your gaze, the legs walking; drawn only). */
+static int   g_vr_avatar = 1, g_vr_avatar_still;
 typedef struct {
     int   ok;
     float p[3];          /* the grip, world */
@@ -1412,6 +1416,11 @@ static void head_frame(psp_gpu_stereo *s) {
     }
     hands_frame(base, lev, k);
     vr_body_arms(g_vr_arms && g_vr_motion && live);
+    vr_body_avatar(g_vr_avatar, g_vr_avatar_still);
+    if (live) {                                                 /* the gaze: the head's -z in the game camera's view */
+        const float gz[3] = { -q[6], -q[7], -q[8] };
+        vr_body_gaze(gz);
+    }
     s->tag = live ? h.id : 0;
     /* Menu scenes: as the game draws them, on the flat screen (tag 0). */
     int menu = 0;
@@ -2428,6 +2437,8 @@ static int display_load(void) {
         }
         else if (!strncmp(line, "vr_input=", 9))     g_vr_motion = !strncmp(line + 9, "motion", 6);
         else if (!strncmp(line, "vr_arms=", 8))      g_vr_arms = strncmp(line + 8, "off", 3) != 0;
+        else if (!strncmp(line, "vr_avatar=", 10))   g_vr_avatar = strncmp(line + 10, "off", 3) != 0;
+        else if (!strncmp(line, "vr_avatar_legs=", 15)) g_vr_avatar_still = !strncmp(line + 15, "still", 5);
 #ifdef PSP2I_VR
         else if (!strncmp(line, "vr_hand_cal=", 12)) {  /* 18 floats: the hands' rotation offsets (vr_body.h) */
             float c[18];
@@ -2548,6 +2559,11 @@ static void display_save(int res) {
     fprintf(f, "; VR arms (with VR input motion): on = your character's arms reach for the controllers (only how it is drawn"
                " here), off = the game's own arm animation\n");
     fprintf(f, "vr_arms=%s\n", g_vr_arms ? "on" : "off");
+    fprintf(f, "; VR avatar (with the arms on): on = your character is drawn from you, as in VRChat: no attack moves its"
+               " upper body, it turns to where you look, the legs walk (left, right and back with the game's R-strafe legs,"
+               " learned the first time you strafe that way holding R, kept in psp2i_vr_legs.bin); off = the game's own"
+               " animation. vr_avatar_legs: walk, or still (the legs stand)\n");
+    fprintf(f, "vr_avatar=%s\nvr_avatar_legs=%s\n", g_vr_avatar ? "on" : "off", g_vr_avatar_still ? "still" : "walk");
 #ifdef PSP2I_VR
     {   /* written once calibrated (both grips + both triggers in MOTION) */
         float c[18];
@@ -4470,6 +4486,11 @@ int main(int argc, char **argv) {
 #endif
 #ifdef PSP2I_VR
     vr_body_init();                                         /* a no-op unless PSP2I_SKEL is set (dev) */
+    {
+        char legs[sizeof g_display_ini];
+        snprintf(legs, sizeof legs, "%s/psp2i_vr_legs.bin", dir);
+        vr_body_legs_file(legs);                            /* the avatar's learned strafe legs */
+    }
 #endif
     psp_hook_set(FN_SET_PROJECTION, hook_set_projection);   /* a no-op unless first person is on */
 #ifndef PSP2I_PROD

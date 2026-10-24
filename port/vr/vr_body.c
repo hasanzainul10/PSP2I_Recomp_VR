@@ -239,6 +239,11 @@ static int      g_cal_ok[2], g_cal_req, g_cal_changed;
 #ifndef PSP2I_PROD
 static uint64_t g_arms_log;
 #endif
+/* The avatar (below): this frame's pose is its, and how far the gaze is
+ * ahead of its turn (radians). */
+static int      g_av_live;
+static float    g_av_lag;
+static float wrap_pi(float a) { return a - 6.2831853f * floorf((a + 3.1415927f) / 6.2831853f); }
 
 void vr_body_hand_calibrate(void) { g_cal_req = 1; }
 int vr_body_hand_cal_get(float cal[18]) {
@@ -292,18 +297,21 @@ void vr_body_head(int hide) {
 static float    g_head_eye[3], g_head_fwd[3];  /* vr_body_head_eye */
 static uint64_t g_head_vb;
 static void node_get(uint32_t nodes, int b, float *m);
-static void head_rigid_mark(uint32_t model, uint32_t nodes) {
-    float Mb[16], nb[16], W[16];
+/* `anim` the head node as the game animated it (where the game puts the
+ * rigid head), `drawn` as posed (the avatar's: where the eyes go), `beta`
+ * the drawn body's turn. */
+static void head_rigid_mark(uint32_t model, const float *anim, const float *drawn, float beta) {
+    float Mb[16], W[3], E[3];
     for (uint32_t i = 0; i < 16; i++) Mb[i] = psp_read_f32(model + 32u + 4u * i);
-    node_get(nodes, HEAD_NODE, nb);
-    for (int c = 0; c < 4; c++)                                /* W = Mb x node, the translation column only */
-        for (int r = 0; r < 4; r++)
-            W[c * 4 + r] = Mb[r] * nb[c * 4] + Mb[4 + r] * nb[c * 4 + 1] + Mb[8 + r] * nb[c * 4 + 2] + Mb[12 + r] * nb[c * 4 + 3];
-    psp_gpu_set_rigid_drop(1, &W[12], HEAD_RIGID_R);
+    for (int r = 0; r < 3; r++) {                              /* Mb x node, the translation only */
+        W[r] = Mb[r] * anim[12] + Mb[4 + r] * anim[13] + Mb[8 + r] * anim[14] + Mb[12 + r];
+        E[r] = Mb[r] * drawn[12] + Mb[4 + r] * drawn[13] + Mb[8 + r] * drawn[14] + Mb[12 + r];
+    }
+    psp_gpu_set_rigid_drop(1, W, HEAD_RIGID_R);
     /* For the first-person eyes: the head joint and the body's forward
-     * (model +z), in the game camera's view space, this frame. */
-    memcpy(g_head_eye, &W[12], sizeof g_head_eye);
-    for (int r = 0; r < 3; r++) g_head_fwd[r] = Mb[8 + r];
+     * (model +z, turned by beta), in the game camera's view space, this frame. */
+    memcpy(g_head_eye, E, sizeof g_head_eye);
+    for (int r = 0; r < 3; r++) g_head_fwd[r] = Mb[r] * sinf(beta) + Mb[8 + r] * cosf(beta);
     g_head_vb = psp_sched_vblank_count();
 }
 int vr_body_head_eye(float head[3], float fwd[3]) {
@@ -316,6 +324,7 @@ int vr_body_head_eye(float head[3], float fwd[3]) {
 void vr_body_arms(int on) {
     if (on != g_arms_on) fprintf(stderr, "vr: arms %s\n", on ? "on (they follow the controllers)" : "off");
     g_arms_on = on;
+    if (!on) psp_gpu_set_rigid_move(0, NULL, 0.0f, NULL);         /* the avatar's head (needs the arms) */
 }
 
 /* Once a frame: the controllers from your shoulders, in the body's frame:
@@ -331,8 +340,16 @@ static void arms_frame(void) {
     vr_head h;
     vr_hand vh[2];
     if (!vr_head_get(&h) || !vr_hands_get(vh)) return;
-    static const float f[3] = { 0.0f, 0.0f, -1.0f };          /* forward and right at recenter */
-    static const float r[3] = { 1.0f, 0.0f, 0.0f };
+    /* Forward and right: at recenter, or with the avatar the drawn body's
+     * heading (it turns to the gaze: the head's yaw less the body's lag),
+     * so the hands stay where yours are as the body turns. */
+    float yaw = 0.0f;
+    if (g_av_live) {
+        const float *q = h.q, x = q[0], y = q[1], z = q[2], w = q[3];
+        yaw = wrap_pi(atan2f(2 * (x * z + y * w), 1 - 2 * (x * x + y * y)) - g_av_lag);   /* the head's back axis */
+    }
+    const float f[3] = { -sinf(yaw), 0.0f, -cosf(yaw) };
+    const float r[3] = { cosf(yaw), 0.0f, -sinf(yaw) };
     for (int hd = 0; hd < 2; hd++) {
         if (!vh[hd].ok) continue;
         float d[3];
@@ -393,6 +410,369 @@ static void turn_below(uint32_t nodes, uint32_t recs, int n, int top, const floa
     }
 }
 
+/* ---- The avatar: the body drawn from you, not from the game's animation
+ *
+ * With vr_avatar on (and the arms: MOTION), the local player is drawn as a
+ * VRChat avatar: the upper body (spine 9 and all on it: chest, neck, head,
+ * arms) stands in its bind pose (the skeleton's own rest pose, an upright
+ * A-pose: the inverse of each record's inverse bind), so attacks and Photon
+ * Arts don't move it; the arms then reach for the controllers (arms_pose);
+ * the whole body is turned about its root to face where you look (the gaze,
+ * eased); the hips and legs keep the game's animation. The game doesn't
+ * know: its facing (player +0x70), its nodes and its attacks are as they
+ * were (the nodes are put back after each palette).
+ *
+ * The game turns the character to where it walks and plays its forward
+ * walk; held R, it strafes and backs off facing ahead (user). So the legs
+ * of a strafe are learned from the game's own: while R is held and you walk
+ * left, right or back for 2.5-5 s, one gait cycle of the legs (nodes 1-8 in the
+ * root's frame, one sample a game frame) is kept, and saved
+ * (psp2i_vr_legs.bin); after that, walking that way from your gaze draws
+ * those legs, at your speed, whatever the game plays. Forward is the game's
+ * own run (and is learned too, for walking ahead while R strafes). With
+ * vr_avatar_legs=still the legs stand in the bind pose instead. */
+#define AV_LEG_N     8                         /* nodes 1-8: hips, pelvis, both legs */
+#define AV_SPINE     9                         /* the upper body: 9-26 (all on 9) */
+#define AV_UPPER_END 27
+#define AV_REC_N     150                       /* 5 s of one direction at 30 game frames a second, 2.5 s at 60 */
+#define AV_CLIP_MAX  75                        /* the longest gait cycle looked for (half the recording) */
+#define AV_CLIP_MIN  8
+#define AV_MOVE_MIN  0.02f                     /* world units a game frame: moving */
+#define AV_TURN      0.2f                      /* of the way to the gaze a vblank */
+#define AV_FADE      6                         /* game frames to cross-fade the legs */
+#define AV_HYST      0.17f                     /* radians past a 45-degree border before the legs change */
+enum { AV_FWD, AV_LEFT, AV_RIGHT, AV_BACK, AV_DIRS };
+static const char *const AV_DIR_NAME[AV_DIRS] = { "forward", "left", "right", "back" };
+typedef struct { int n; float speed; float m[AV_CLIP_MAX][AV_LEG_N][16]; } av_clip;
+static av_clip  g_av_clip[AV_DIRS];
+static int      g_av_learned[AV_DIRS];         /* this session */
+static float    g_av_rec[AV_REC_N][AV_LEG_N][16], g_av_rec_speed[AV_REC_N];
+static int      g_av_rec_n, g_av_rec_dir = -1;
+static char     g_av_file[600];
+static int      g_av_on, g_av_still;           /* vr_body_avatar */
+static float    g_gaze[3];                     /* vr_body_gaze: view space */
+static uint64_t g_gaze_vb, g_av_vb = ~0ull;
+static float    g_av_yb, g_av_beta;            /* the body's world yaw, its turn in the model */
+static int      g_av_yb_ok;
+static float    g_av_pos[3], g_av_seen[AV_LEG_N][16];
+static int      g_av_pos_ok, g_av_dir = AV_FWD;
+static int      g_av_src = -1, g_av_src_prev = -1, g_av_fade;   /* the legs: -1 the game's, else a clip */
+static float    g_av_phase, g_av_phase_prev, g_av_speed;
+static float    g_av_e13[16];                  /* third person: the head's change, eye space (rigid pieces on it) */
+static int      g_av_e13_ok;
+static uint32_t g_av_bind_skel[4];             /* the bind pose per skeleton (the body comes with three) */
+static float    g_av_bind[4][NODES_MAX][16];
+#ifndef PSP2I_PROD
+static uint64_t g_av_log;
+#endif
+
+static void mul44(const float *a, const float *b, float *o);
+static int  inv_affine(const float *m, float *o);
+
+void vr_body_avatar(int on, int legs_still) {
+    if (on != g_av_on || legs_still != g_av_still)
+        fprintf(stderr, "vr: avatar %s\n", on ? (legs_still ? "on (the legs stand still)" : "on (the legs walk)") : "off");
+    g_av_on = on;
+    g_av_still = legs_still;
+    if (!on) psp_gpu_set_rigid_move(0, NULL, 0.0f, NULL);
+}
+void vr_body_gaze(const float fwd[3]) {
+    memcpy(g_gaze, fwd, sizeof g_gaze);
+    g_gaze_vb = psp_sched_vblank_count();
+}
+
+static void av_save(void) {
+    FILE *f = g_av_file[0] ? fopen(g_av_file, "wb") : NULL;
+    if (!f) { fprintf(stderr, "vr: avatar: cannot write %s\n", g_av_file); return; }
+    const int hdr[2] = { 1, AV_LEG_N };
+    fwrite("PSP2IVRL", 1, 8, f);
+    fwrite(hdr, sizeof hdr, 1, f);
+    for (int d = 0; d < AV_DIRS; d++) {
+        fwrite(&g_av_clip[d].n, sizeof(int), 1, f);
+        fwrite(&g_av_clip[d].speed, sizeof(float), 1, f);
+        fwrite(g_av_clip[d].m, sizeof g_av_clip[d].m[0], (size_t)g_av_clip[d].n, f);
+    }
+    fclose(f);
+}
+void vr_body_legs_file(const char *path) {
+    snprintf(g_av_file, sizeof g_av_file, "%s", path);
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    char magic[8];
+    int hdr[2], ok = fread(magic, 1, 8, f) == 8 && !memcmp(magic, "PSP2IVRL", 8) && fread(hdr, sizeof hdr, 1, f) == 1 &&
+                     hdr[0] == 1 && hdr[1] == AV_LEG_N;
+    for (int d = 0; d < AV_DIRS && ok; d++) {
+        av_clip *c = &g_av_clip[d];
+        ok = fread(&c->n, sizeof(int), 1, f) == 1 && fread(&c->speed, sizeof(float), 1, f) == 1 && c->n >= 0 &&
+             c->n <= AV_CLIP_MAX && fread(c->m, sizeof c->m[0], (size_t)c->n, f) == (size_t)c->n;
+    }
+    fclose(f);
+    if (!ok) { memset(g_av_clip, 0, sizeof g_av_clip); fprintf(stderr, "vr: avatar: %s is not a legs file; ignored\n", path); return; }
+    fprintf(stderr, "vr: avatar: legs from %s (forward %d, left %d, right %d, back %d frames)\n", path, g_av_clip[0].n,
+            g_av_clip[1].n, g_av_clip[2].n, g_av_clip[3].n);
+}
+
+/* Which way a move goes, from an angle (0 ahead, + to the left); with
+ * `cur`, it changes only past the border by AV_HYST. */
+static int av_dir_of(float a, int cur) {
+    const float q = 0.7853982f;
+    if (cur >= 0) {
+        const float c = cur == AV_FWD ? 0.0f : cur == AV_LEFT ? 2.0f * q : cur == AV_RIGHT ? -2.0f * q : 4.0f * q;
+        if (fabsf(wrap_pi(a - c)) < q + AV_HYST) return cur;
+    }
+    return fabsf(a) <= q ? AV_FWD : fabsf(a) >= 3.0f * q ? AV_BACK : a > 0 ? AV_LEFT : AV_RIGHT;
+}
+
+/* The recording of one direction is full: one gait cycle out of it. */
+static void av_cycle(int d) {
+    float t5[AV_REC_N][3], t8[AV_REC_N][3], lo = 1e30f, hi = -1e30f;
+    for (int i = 0; i < AV_REC_N; i++) {
+        memcpy(t5[i], &g_av_rec[i][4][12], sizeof t5[i]);             /* the ankles, 5 and 8 */
+        memcpy(t8[i], &g_av_rec[i][7][12], sizeof t8[i]);
+        const float s = (t5[i][0] - t8[i][0]) + (t5[i][2] - t8[i][2]);
+        if (s < lo) lo = s;
+        if (s > hi) hi = s;
+    }
+    int best = 0;
+    float best_e = 1e30f;
+    for (int L = AV_CLIP_MIN; L <= AV_CLIP_MAX; L++) {
+        float e = 0.0f;
+        for (int i = AV_REC_N - L; i < AV_REC_N; i++)
+            for (int k = 0; k < 3; k++) e += fabsf(t5[i][k] - t5[i - L][k]) + fabsf(t8[i][k] - t8[i - L][k]);
+        e /= (float)L;
+        if (e < best_e) { best_e = e; best = L; }
+    }
+    const float amp = hi - lo;
+    if (!best || amp < 0.5f || best_e > 0.25f * amp) {
+        fprintf(stderr, "vr: avatar: the %s walk wasn't steady (stride %.2f, best cycle %d frames off by %.2f): not kept\n",
+                AV_DIR_NAME[d], (double)amp, best, (double)best_e);
+        return;
+    }
+    av_clip *c = &g_av_clip[d];
+    c->n = best;
+    c->speed = 0.0f;
+    for (int k = 0; k < best; k++) {
+        memcpy(c->m[k], g_av_rec[AV_REC_N - best + k], sizeof c->m[k]);
+        c->speed += g_av_rec_speed[AV_REC_N - best + k] / (float)best;
+    }
+    g_av_learned[d] = 1;
+    fprintf(stderr, "vr: avatar: learned the %s walk (%d frames a cycle, off by %.2f, stride %.2f, %.3f a frame): saved\n",
+            AV_DIR_NAME[d], best, (double)best_e, (double)amp, (double)c->speed);
+    av_save();
+}
+
+/* One sample of the game's legs for the direction being learned: strafes
+ * (left, right, back) with R held, forward without it. */
+static void av_learn(uint32_t nodes, int r_held, int moving, int dir, float speed) {
+    const int d = !moving ? -1 : dir == AV_FWD ? (r_held ? -1 : AV_FWD) : (r_held ? dir : -1);
+    if (d != g_av_rec_dir) { g_av_rec_n = 0; g_av_rec_dir = d; }
+    if (d < 0 || g_av_learned[d]) return;
+    float a0[16], ai[16], nb[16];
+    node_get(nodes, 0, a0);
+    if (!inv_affine(a0, ai)) return;
+    for (int b = 0; b < AV_LEG_N; b++) {
+        node_get(nodes, 1 + b, nb);
+        mul44(ai, nb, g_av_rec[g_av_rec_n][b]);
+    }
+    g_av_rec_speed[g_av_rec_n] = speed;
+    if (++g_av_rec_n == AV_REC_N) { av_cycle(d); g_av_rec_n = 0; }
+}
+
+/* Once a vblank, at the body's first palette (its nodes as animated): the
+ * body's turn to the gaze, the walk's direction from it, the legs' source
+ * and phase, and the learning. */
+static void avatar_frame(uint32_t model, uint32_t nodes, int n) {
+    const uint64_t vb = psp_sched_vblank_count();
+    if (vb == g_av_vb) return;
+    g_av_vb = vb;
+    g_av_live = 0;
+    g_av_e13_ok = 0;
+    const uint32_t pl = gamelog_local_player();
+    float Mb[16], Mi[16];
+    for (uint32_t i = 0; i < 16; i++) Mb[i] = psp_read_f32(model + 32u + 4u * i);
+    const float fx = pl ? psp_read_f32(pl + 0x90u) : 0.0f, fz = pl ? psp_read_f32(pl + 0x98u) : 0.0f;
+    const float fl = sqrtf(fx * fx + fz * fz);
+    if (!g_av_on || !g_arms_on || !pl || n < AV_UPPER_END || vb - g_gaze_vb > 6 || fl < 1e-4f || !inv_affine(Mb, Mi)) {
+        g_av_yb_ok = 0;
+        psp_gpu_set_rigid_move(0, NULL, 0.0f, NULL);
+        return;
+    }
+    /* The gaze in the model, level: its yaw there, and in the world (the
+     * model turned as the game's facing). The body eases to it in the world,
+     * so the game turning the character doesn't swing the drawn body. */
+    float gm[3];
+    for (int r = 0; r < 3; r++) gm[r] = Mi[r] * g_gaze[0] + Mi[4 + r] * g_gaze[1] + Mi[8 + r] * g_gaze[2];
+    const float ym = atan2f(fx, fz);
+    if (gm[0] * gm[0] + gm[2] * gm[2] > 1e-3f * (gm[0] * gm[0] + gm[1] * gm[1] + gm[2] * gm[2])) {   /* not straight down */
+        const float yg = wrap_pi(atan2f(gm[0], gm[2]) + ym);
+        g_av_yb = g_av_yb_ok ? wrap_pi(g_av_yb + AV_TURN * wrap_pi(yg - g_av_yb)) : yg;
+        g_av_yb_ok = 1;
+        g_av_lag = wrap_pi(yg - g_av_yb);
+    }
+    if (!g_av_yb_ok) return;
+    g_av_beta = wrap_pi(g_av_yb - ym);
+    /* A new game frame (the legs changed): the move since the last one. */
+    int fresh = 0;
+    for (int b = 0; b < AV_LEG_N && !fresh; b++) {
+        float m[16];
+        node_get(nodes, 1 + b, m);
+        fresh = memcmp(m, g_av_seen[b], sizeof m) != 0;
+    }
+    if (fresh) {
+        for (int b = 0; b < AV_LEG_N; b++) node_get(nodes, 1 + b, g_av_seen[b]);
+        float p[3], v[3] = { 0, 0, 0 };
+        for (int k = 0; k < 3; k++) p[k] = psp_read_f32(pl + 0x4B0u + 4u * (uint32_t)k);
+        if (g_av_pos_ok) for (int k = 0; k < 3; k++) v[k] = p[k] - g_av_pos[k];
+        memcpy(g_av_pos, p, sizeof p);
+        g_av_pos_ok = 1;
+        const float s = sqrtf(v[0] * v[0] + v[2] * v[2]);
+        const int moving = s > AV_MOVE_MIN && s < 5.0f;               /* not a warp */
+        /* Model axes: +z the facing, +x the character's left (y x z). */
+        const float left = (v[0] * fz - v[2] * fx) / fl, ahead = (v[0] * fx + v[2] * fz) / fl;
+        const float a_game = atan2f(left, ahead);
+        const int game_dir = av_dir_of(a_game, -1);
+        if (moving) g_av_dir = av_dir_of(wrap_pi(a_game - g_av_beta), g_av_dir);
+        av_learn(nodes, psp_read32(pl + 0x214u) != 0, moving, game_dir, s);   /* +0x214: R held (ATT_STATE) */
+        /* The legs: a learned walk when you walk that way from the body and
+         * the game's legs don't (it turned to the walk, or R strafes). */
+        int src = -1;
+        if (moving && !g_av_still) {
+            if (g_av_dir != AV_FWD && g_av_clip[g_av_dir].n) src = g_av_dir;
+            else if (g_av_dir == AV_FWD && game_dir != AV_FWD && g_av_clip[AV_FWD].n) src = AV_FWD;
+        }
+        if (src != g_av_src) {
+            g_av_src_prev = g_av_src;
+            g_av_phase_prev = g_av_phase;
+            g_av_src = src;
+            g_av_phase = 0.0f;
+            g_av_fade = AV_FADE;
+        } else if (g_av_fade > 0) g_av_fade--;
+        g_av_speed = s;
+        for (int w = 0; w < 2; w++) {                                  /* the phases: at your speed */
+            const int c = w ? g_av_src_prev : g_av_src;
+            float *ph = w ? &g_av_phase_prev : &g_av_phase;
+            if (c < 0 || !g_av_clip[c].n) continue;
+            *ph += g_av_clip[c].speed > 1e-4f ? s / g_av_clip[c].speed : 1.0f;
+            *ph -= (float)g_av_clip[c].n * floorf(*ph / (float)g_av_clip[c].n);
+        }
+    }
+    g_av_live = 1;
+#ifndef PSP2I_PROD
+    if (vb - g_av_log >= 300) {
+        g_av_log = vb;
+        fprintf(stderr, "vr: avatar: body turned %+.0f deg from the game's facing (the gaze %+.0f ahead of it); moving %.3f a"
+                        " frame %s of the body; legs %s%s; learned%s%s%s%s\n", (double)(g_av_beta * 57.29578f),
+                (double)(g_av_lag * 57.29578f), (double)g_av_speed, AV_DIR_NAME[g_av_dir],
+                g_av_still ? "standing" : g_av_src < 0 ? "the game's" : AV_DIR_NAME[g_av_src], g_av_src >= 0 ? " (learned)" : "",
+                g_av_clip[0].n ? " forward" : "", g_av_clip[1].n ? " left" : "", g_av_clip[2].n ? " right" : "",
+                g_av_clip[3].n ? " back" : "");
+    }
+#endif
+}
+
+/* The skeleton's bind pose (model space, unscaled: the inverse of each
+ * record's inverse bind; flag 0x8 = none, the identity), cached. */
+static const float (*av_bind(uint32_t skel, uint32_t recs, int n))[16] {
+    int k = 0;
+    while (k < 4 && g_av_bind_skel[k] && g_av_bind_skel[k] != skel) k++;
+    if (k == 4) { k = 3; g_av_bind_skel[3] = 0; }
+    if (g_av_bind_skel[k] != skel) {
+        for (int b = 0; b < n; b++) {
+            static const float I[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+            const uint32_t r = recs + 144u * (uint32_t)b;
+            float ib[16];
+            for (uint32_t i = 0; i < 16; i++) ib[i] = psp_read_f32(r + 48u + 4u * i);
+            if ((psp_read32(r) & 0x8u) || !inv_affine(ib, g_av_bind[k][b])) memcpy(g_av_bind[k][b], I, sizeof I);
+            for (int c = 0; c < 3; c++) {                                 /* rotation only */
+                const float l = len3(&g_av_bind[k][b][c * 4]);
+                if (l > 1e-6f) for (int j = 0; j < 3; j++) g_av_bind[k][b][c * 4 + j] /= l;
+            }
+        }
+        g_av_bind_skel[k] = skel;
+    }
+    return (const float (*)[16])g_av_bind[k];
+}
+
+/* Node b in its bind pose, on its posed parent: the rotation the bind has
+ * against `ref` (its parent, or the root for the spine, so the hips' sway
+ * doesn't tilt the chest), the animated node's scale, and the translation
+ * from its parent by `off` (its offset in the parent's frame). */
+static void av_rest_node(float (*P)[16], const float (*B)[16], const float *A_b, int b, int ref, int p, const float *off) {
+    float Rr[9], Br[9], Bb[9], t[9], R[9];
+    for (int c = 0; c < 3; c++) {
+        const float l = len3(&P[ref][c * 4]);
+        for (int j = 0; j < 3; j++) {
+            Rr[j * 3 + c] = l > 1e-6f ? P[ref][c * 4 + j] / l : 0.0f;
+            Br[j * 3 + c] = B[ref][c * 4 + j];
+            Bb[j * 3 + c] = B[b][c * 4 + j];
+        }
+    }
+    mat3_tmul(Br, Bb, t);                                              /* the bind's rotation against ref */
+    mat3_mul(Rr, t, R);
+    for (int c = 0; c < 3; c++) {
+        const float s = len3(&A_b[c * 4]);
+        for (int j = 0; j < 3; j++) P[b][c * 4 + j] = R[j * 3 + c] * s;
+        P[b][c * 4 + 3] = 0.0f;
+    }
+    for (int j = 0; j < 3; j++) P[b][12 + j] = P[p][j] * off[0] + P[p][4 + j] * off[1] + P[p][8 + j] * off[2] + P[p][12 + j];
+    P[b][15] = 1.0f;
+}
+
+/* A learned walk's legs at a phase (the samples blended), on the root. */
+static void av_clip_at(const av_clip *c, float ph, const float *a0, int b, float *o) {
+    const int i = (int)ph % c->n, j = (i + 1) % c->n;
+    const float f = ph - floorf(ph);
+    float m[16];
+    for (int k = 0; k < 16; k++) m[k] = c->m[i][b][k] + f * (c->m[j][b][k] - c->m[i][b][k]);
+    mul44(a0, m, o);
+}
+
+/* The avatar's pose into the nodes (they are saved: g_arms_saved). */
+static void avatar_pose(uint32_t nodes, uint32_t skel, uint32_t recs, int n) {
+    const float (*A)[16] = (const float (*)[16])g_arms_saved;
+    const float (*B)[16] = av_bind(skel, recs, n);
+    static float P[NODES_MAX][16];
+    memcpy(P, A, sizeof P[0] * (size_t)n);
+    /* The legs: the game's, a learned walk (cross-faded on a change), or
+     * the bind pose (still). */
+    for (int b = 1; b <= AV_LEG_N; b++) {
+        const int p = (int16_t)psp_read16(recs + 144u * (uint32_t)b + 6u);
+        if (p < 0 || p >= b) continue;
+        if (g_av_still) {
+            float off[3], Bi[16];
+            if (!inv_affine(B[p], Bi)) continue;
+            for (int j = 0; j < 3; j++) off[j] = Bi[j] * B[b][12] + Bi[4 + j] * B[b][13] + Bi[8 + j] * B[b][14] + Bi[12 + j];
+            av_rest_node(P, B, A[b], b, p, p, off);
+            continue;
+        }
+        float cur[16], old[16];
+        if (g_av_src >= 0 && g_av_clip[g_av_src].n) av_clip_at(&g_av_clip[g_av_src], g_av_phase, A[0], b - 1, cur);
+        else memcpy(cur, A[b], sizeof cur);
+        if (g_av_fade > 0) {
+            if (g_av_src_prev >= 0 && g_av_clip[g_av_src_prev].n)
+                av_clip_at(&g_av_clip[g_av_src_prev], g_av_phase_prev, A[0], b - 1, old);
+            else memcpy(old, A[b], sizeof old);
+            const float w = (float)g_av_fade / (float)AV_FADE;          /* of the old */
+            for (int k = 0; k < 16; k++) cur[k] += w * (old[k] - cur[k]);
+        }
+        memcpy(P[b], cur, sizeof cur);
+    }
+    /* The upper body in its bind pose, each node at its animated offset from
+     * its parent (the bones keep their lengths). */
+    for (int b = AV_SPINE; b < AV_UPPER_END && b < n; b++) {
+        const int p = (int16_t)psp_read16(recs + 144u * (uint32_t)b + 6u);
+        float Ai[16], off[3];
+        if (p < 0 || p >= b || !inv_affine(A[p], Ai)) continue;
+        for (int j = 0; j < 3; j++) off[j] = Ai[j] * A[b][12] + Ai[4 + j] * A[b][13] + Ai[8 + j] * A[b][14] + Ai[12 + j];
+        av_rest_node(P, B, A[b], b, b == AV_SPINE ? 0 : p, p, off);
+    }
+    for (int b = 0; b < n; b++) node_put(nodes, b, P[b]);
+    /* All of it turned to the gaze, about the root. */
+    const float c = cosf(g_av_beta), s = sinf(g_av_beta);
+    const float Ry[9] = { c, 0, s, 0, 1, 0, -s, 0, c };
+    turn_below(nodes, recs, n, 0, Ry, &A[0][12]);
+}
+
 /* Poses both arms; returns 1 with the nodes saved for arms_restore. */
 static int arms_pose(uint32_t model, uint32_t skel, int arms) {
     const int n = (int)psp_read32(skel + 40u);
@@ -400,6 +780,12 @@ static int arms_pose(uint32_t model, uint32_t skel, int arms) {
     if (n < 23 || n > NODES_MAX || !user_ptr(nodes) || !user_ptr(recs)) return 0;
     for (int b = 0; b < n; b++) node_get(nodes, b, g_arms_saved[b]);
     g_arms_n_saved = n;
+    const int av = arms && g_av_live && n >= AV_UPPER_END;
+    if (av) avatar_pose(nodes, skel, recs, n);
+    /* The body's turn in the model (the targets and the hands' rotation are
+     * in the body's frame). */
+    const float bc = av ? cosf(g_av_beta) : 1.0f, bs = av ? sinf(g_av_beta) : 0.0f;
+    const float Rb[9] = { bc, 0, bs, 0, 1, 0, -bs, 0, bc };
     for (int hd = 0; hd < 2; hd++) {
         if (!arms || !g_arms_ok[hd]) continue;
         const int *J = ARM_NODE[hd];
@@ -414,7 +800,10 @@ static int arms_pose(uint32_t model, uint32_t skel, int arms) {
         const float upm = (a + b) / ARM_HUMAN_M;              /* model units per metre */
         /* model x = the character's left = minus the headset's right */
         const float *o = g_arms_off[hd];
-        const float T0[3] = { S[0] - upm * o[0], S[1] + upm * o[1], S[2] + upm * o[2] };
+        const float ob[3] = { -o[0], o[1], o[2] };
+        float om[3];
+        for (int k = 0; k < 3; k++) om[k] = Rb[k * 3] * ob[0] + Rb[k * 3 + 1] * ob[1] + Rb[k * 3 + 2] * ob[2];
+        const float T0[3] = { S[0] + upm * om[0], S[1] + upm * om[1], S[2] + upm * om[2] };
         float st[3];
         for (int k = 0; k < 3; k++) st[k] = T0[k] - S[k];
         float d = len3(st);
@@ -456,12 +845,14 @@ static int arms_pose(uint32_t model, uint32_t skel, int arms) {
             const float l = len3(&m[c * 4]);
             for (int k = 0; k < 3; k++) H[k * 3 + c] = l > 1e-6f ? m[c * 4 + k] / l : 0.0f;
         }
+        float C[9];
+        mat3_mul(Rb, g_ctrl_rot[hd], C);                       /* the controller in the model */
         if (g_cal_req) {
-            mat3_tmul(g_ctrl_rot[hd], H, g_cal[hd]);          /* C^T H: the hand in the controller's frame */
+            mat3_tmul(C, H, g_cal[hd]);                        /* C^T H: the hand in the controller's frame */
             g_cal_ok[hd] = 1;
         } else if (g_cal_ok[hd]) {
             float Ht[9];
-            mat3_mul(g_ctrl_rot[hd], g_cal[hd], Ht);           /* where the hand should be: C x the offset */
+            mat3_mul(C, g_cal[hd], Ht);                        /* where the hand should be: C x the offset */
             mat3_mult(Ht, H, R);                               /* Ht H^T: from where it is */
             turn_below(nodes, recs, n, J[2], R, &m[12]);
         }
@@ -543,6 +934,7 @@ static const int ATT_NODE[] = { 16, 17, 18, 21, 22, 23, 1, 11, 13 };
 #define ATT_HEAD_NEAR 3.0f                     /* first person: rigid pieces this close to it are the head's */
 
 static float    g_att_d[NODES_MAX][16];        /* per body node: the IK's change, model space */
+static float    g_att_posed[NODES_MAX][16];    /* ... and the node as drawn (the avatar's fixed weapons) */
 static int      g_att_dn;                      /* nodes in it (0 = no pose yet) */
 static int      g_att_moved[NODES_MAX];        /* D isn't the identity */
 static uint32_t g_att_pal[4];                  /* this frame's body palettes (skipped) */
@@ -558,6 +950,7 @@ typedef struct {
     int      off[2];                           /* frames in a row it has drifted off that node */
     int      grip_node;                        /* learned with R held: the hand it is aimed from, -1 = none */
     int      head_told;                        /* dev log: hidden as part of the head, said once */
+    int      grip_r, grip_told, new_told;      /* the grip is from R held (a gun's aim); dev logs said once */
     float    grip[16];                         /* ... and where it sits in that hand */
     float    err[ATT_NN];                      /* recent drift per frame (decaying) */
     float    sum[2][ATT_NN];                   /* all its drift since it was first seen, per state */
@@ -571,6 +964,11 @@ static unsigned g_ad_calls, g_ad_posed, g_ad_flags, g_ad_bodypal, g_ad_mats, g_a
 static float    g_ad_min = 1e30f;
 static uint32_t g_ad_min_mat, g_ad_min_obj, g_ad_cur_obj;
 static uint64_t g_ad_log;
+/* Dev, with the avatar: the weapons fixed in the hand, every 2 s: drawn at
+ * their grip, followed though far from the hand, and new matrices next to
+ * an animated hand that nothing holds yet (a Photon Art's own copy?). */
+static unsigned g_wd_fixed, g_wd_far, g_wd_new;
+static uint64_t g_wd_log;
 #endif
 
 static void mul44(const float *a, const float *b, float *o) {            /* o = a b, VFPU columns */
@@ -598,6 +996,7 @@ static void att_keep_pose(uint32_t nodes, int n) {
     for (int b = 0; b < n; b++) {
         float now[16], inv[16];
         node_get(nodes, b, now);
+        memcpy(g_att_posed[b], now, sizeof now);
         g_att_moved[b] = memcmp(now, g_arms_saved[b], sizeof now) != 0;
         if (!g_att_moved[b] || !inv_affine(g_arms_saved[b], inv)) {
             static const float I[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
@@ -626,13 +1025,17 @@ static int att_follow(uint32_t mat, int st, uint32_t body, const float *Mb, cons
     g_ad_mats++;
     if (near < g_ad_min) { g_ad_min = near; g_ad_min_mat = mat; g_ad_min_obj = g_ad_cur_obj; }
 #endif
-    if (near > ATT_NEAR * ATT_NEAR) return 0;
-#ifndef PSP2I_PROD
-    g_ad_near++;
-#endif
-    const uint64_t vb = psp_sched_vblank_count();
     att_rec *a = NULL, *old = &g_att[0];
     for (int i = 0; i < ATT_MAX && !a; i++) if (g_att[i].key == mat) a = &g_att[i];
+    /* A weapon fixed in the hand (the avatar) stays followed however far the
+     * game's animation throws it from the hand (Photon Arts). */
+    const int far = near > ATT_NEAR * ATT_NEAR;
+    if (far && !(a && g_av_live && a->grip_node >= 0)) return 0;
+#ifndef PSP2I_PROD
+    g_ad_near++;
+    if (far) g_wd_far++;
+#endif
+    const uint64_t vb = psp_sched_vblank_count();
     if (!a) {
         for (int i = 0; i < ATT_MAX; i++) if (g_att[i].seen < old->seen) old = &g_att[i];
         a = old;
@@ -686,10 +1089,15 @@ static int att_follow(uint32_t mat, int st, uint32_t body, const float *Mb, cons
         a->fit_torso = torso_s;
         a->fit_dist = dist;
     }
+    /* With the avatar a weapon is fixed in the hand: once its grip is
+     * known, it is drawn there whatever the game's animation does with it
+     * (spins, throws and swings of attacks and Photon Arts: user, "stop the
+     * animations for weapons that are held in hands too"). */
+    const int fixed = g_av_live && a->grip_node >= 0;
     /* Let go only of what has left the hand for good (put away, dropped):
      * a gun coming up into the hand drifts for a few frames. */
     if (a->node[st] >= 0) a->off[st] = a->err[a->node[st]] > 4.0f * ATT_ERR_OK ? a->off[st] + 1 : 0;
-    if (a->node[st] >= 0 && a->off[st] > 30) {
+    if (a->node[st] >= 0 && a->off[st] > 30 && !fixed) {
         fprintf(stderr, "vr: arms: the matrix at 0x%08X left the hand: let go\n", mat);
         a->node[st] = -1;
         memset(a->sum[st], 0, sizeof a->sum[st]);
@@ -705,15 +1113,23 @@ static int att_follow(uint32_t mat, int st, uint32_t body, const float *Mb, cons
         fprintf(stderr, "vr: arms: the matrix at 0x%08X rides on body node %d (drift %.2f against it, %.2f against the"
                         " torso, %.2f units from it): it follows the hand\n", mat, ATT_NODE[best], (double)a->sum[st][best],
                 (double)torso_s, (double)dist);
-        return 0;                                              /* use_L is the old node's: from the next frame */
+        if (!fixed) return 0;                                  /* use_L is the old node's: from the next frame */
+        have = 0;
     }
     /* First person: a rigid piece at the head that no hand holds (the face
      * and head: they stayed with the body's node 13 and the container's
      * model hidden, which took only the hair and the accessories, user) is
      * drawn shrunk away. ATT_NODE[ATT_HEAD_I] is node 13. */
-    if (g_hide_head && a->node[0] < 0 && a->node[1] < 0 && a->grip_node < 0) {
+    if ((g_hide_head || g_av_e13_ok) && a->node[0] < 0 && a->node[1] < 0 && a->grip_node < 0) {
         mul44(Wi[ATT_HEAD_I], Mw, L);
-        if (L[12] * L[12] + L[13] * L[13] + L[14] * L[14] < ATT_HEAD_NEAR * ATT_HEAD_NEAR) {
+        if (!g_hide_head && L[12] * L[12] + L[13] * L[13] + L[14] * L[14] < ATT_HEAD_NEAR * ATT_HEAD_NEAR) {
+            /* Third person, the avatar: it goes with the drawn head. */
+            float out[16];
+            mul44(g_av_e13, Mw, out);
+            for (uint32_t i = 0; i < 16; i++) { keep[i] = Mw[i]; psp_write_f32(mat + 4u * i, out[i]); }
+            return 1;
+        }
+        if (g_hide_head && L[12] * L[12] + L[13] * L[13] + L[14] * L[14] < ATT_HEAD_NEAR * ATT_HEAD_NEAR) {
 #ifndef PSP2I_PROD
             if (!a->head_told) {
                 a->head_told = 1;
@@ -730,23 +1146,56 @@ static int att_follow(uint32_t mat, int st, uint32_t body, const float *Mb, cons
     }
     /* A gun is in the hand only while R is held; in VR your hand keeps it:
      * without R, what was learned with R stays in the hand at its grip. */
+    /* With the avatar the grip is taken once, the first time it sits still
+     * in the hand (with R again: a gun's aim), and kept. */
     int nb_i;
-    if (a->node[st] >= 0 && have && a->err[a->node[st]] <= 4.0f * ATT_ERR_OK) {
+    if (a->node[st] >= 0 && have && a->err[a->node[st]] <= 4.0f * ATT_ERR_OK &&
+        (!fixed || (st && a->err[a->node[st]] <= ATT_ERR_OK && !a->grip_r))) {
         nb_i = ATT_NODE[a->node[st]];
-        if (st) { memcpy(a->grip, use_L, sizeof use_L); a->grip_node = a->node[st]; }
-    } else if (!st && a->node[0] < 0 && a->grip_node >= 0) {
+        if (st || (g_av_live && a->grip_node < 0 && a->err[a->node[st]] <= ATT_ERR_OK)) {
+            memcpy(a->grip, use_L, sizeof use_L);
+            a->grip_node = a->node[st];
+            if (st) a->grip_r = 1;
+            if (g_av_live && !a->grip_told) {
+                a->grip_told = 1;
+                fprintf(stderr, "vr: arms: the matrix at 0x%08X is fixed in the hand (node %d)\n", mat, ATT_NODE[a->grip_node]);
+            }
+        }
+    } else if (fixed || (!st && a->node[0] < 0 && a->grip_node >= 0)) {
         nb_i = ATT_NODE[a->grip_node];
         memcpy(use_L, a->grip, sizeof use_L);
-    } else return 0;
+    } else {
+#ifndef PSP2I_PROD
+        if (g_av_live && best >= 0 && dist < ATT_HAND_NEAR) {
+            g_wd_new++;
+            if (!a->new_told) {
+                a->new_told = 1;
+                fprintf(stderr, "vr: arms: new matrix 0x%08X (obj 0x%08X) %.2f from node %d, not held yet (drift %.3f, seen %d"
+                                " frames): drawn as the game has it\n", mat, g_ad_cur_obj, (double)dist, ATT_NODE[best],
+                        (double)a->err[best], a->frames);
+            }
+        }
+#endif
+        return 0;
+    }
     if (!g_att_moved[nb_i]) return 0;
     /* M' = Mb x (D x node) x L: the posed node, the same attachment. */
     const uint32_t nodes = psp_read32(body + 100u);
     float nb[16], np[16], t[16], out[16];
     node_get(nodes, nb_i, nb);
-    mul44(g_att_d[nb_i], nb, np);
+    /* A fixed weapon: on the hand as drawn, nothing of this frame's
+     * animation (the weapon may be copied before the body's pose is redone:
+     * D of the last pose x this frame's animated hand let the Photon Art's
+     * hand motion through, user: "it still in hand but seems to try to move
+     * to the animation sequence"). */
+    if (fixed) memcpy(np, g_att_posed[nb_i], sizeof np);
+    else mul44(g_att_d[nb_i], nb, np);
     mul44(Mb, np, t);
     mul44(t, use_L, out);
     for (uint32_t i = 0; i < 16; i++) { keep[i] = Mw[i]; psp_write_f32(mat + 4u * i, out[i]); }
+#ifndef PSP2I_PROD
+    if (fixed) g_wd_fixed++;
+#endif
     return 1;
 }
 
@@ -855,6 +1304,14 @@ static void hook_bone_patch(void (*original)(void)) {
     original();
     for (int k = 0; k < nk; k++)
         for (uint32_t i = 0; i < 16; i++) psp_write_f32(kept_at[k] + 4u * i, kept[k][i]);
+#ifndef PSP2I_PROD
+    if (g_av_live && psp_sched_vblank_count() - g_wd_log >= 120) {
+        g_wd_log = psp_sched_vblank_count();
+        fprintf(stderr, "vr: arms: in 2 s: %u weapon draws at their fixed grip (%u of them far from the game's hand), %u draws"
+                        " of matrices by a hand not held yet\n", g_wd_fixed, g_wd_far, g_wd_new);
+        g_wd_fixed = g_wd_far = g_wd_new = 0;
+    }
+#endif
 }
 
 /* A model next to the body in the player's container (the first 16 slots)
@@ -925,13 +1382,35 @@ static void hook_palette(void (*original)(void)) {
             if (vb != g_att_pal_vb) { memset(g_att_pal, 0, sizeof g_att_pal); g_att_pal_vb = vb; }
             const uint32_t pal = psp_read32(psp_cpu.r[5]);
             for (int k = 0; k < 4; k++) if (!g_att_pal[k] || g_att_pal[k] == pal) { g_att_pal[k] = pal; break; }
-            if (g_arms_on) arms_frame();
+            if (g_arms_on) {
+                avatar_frame(model, psp_read32(model + 100u), (int)psp_read32(skel + 40u));
+                arms_frame();
+            }
             const int arms = g_arms_on && (g_arms_ok[0] || g_arms_ok[1]);
             if ((arms || g_hide_head) && arms_pose(model, skel, arms)) {
                 const uint32_t nodes = psp_read32(model + 100u);
                 if (arms) att_keep_pose(nodes, g_arms_n_saved);    /* before the head: only the arms' changes */
                 else g_att_dn = 0;
-                if (g_hide_head && g_arms_n_saved > HEAD_NODE) head_rigid_mark(model, nodes);   /* before it is zeroed */
+                if (g_hide_head && g_arms_n_saved > HEAD_NODE) {   /* before it is zeroed */
+                    float hd[16];
+                    node_get(nodes, HEAD_NODE, hd);
+                    head_rigid_mark(model, g_arms_saved[HEAD_NODE], hd, arms && g_av_live ? g_av_beta : 0.0f);
+                }
+                if (arms && g_av_live && !g_hide_head && g_arms_n_saved > HEAD_NODE) {
+                    /* Third person: what the game hangs on the animated head
+                     * (the rigid head, hair pieces) goes where the avatar's
+                     * head is: E = Mb x D13 x inv(Mb), eye space. */
+                    float Mb[16], Mi[16], t[16], W[3];
+                    for (uint32_t i = 0; i < 16; i++) Mb[i] = psp_read_f32(model + 32u + 4u * i);
+                    if (inv_affine(Mb, Mi)) {
+                        mul44(Mb, g_att_d[HEAD_NODE], t);
+                        mul44(t, Mi, g_av_e13);
+                        g_av_e13_ok = 1;
+                        const float *a = g_arms_saved[HEAD_NODE];
+                        for (int r = 0; r < 3; r++) W[r] = Mb[r] * a[12] + Mb[4 + r] * a[13] + Mb[8 + r] * a[14] + Mb[12 + r];
+                        psp_gpu_set_rigid_move(1, W, HEAD_RIGID_R, g_av_e13);
+                    }
+                } else psp_gpu_set_rigid_move(0, NULL, 0.0f, NULL);
                 if (g_hide_head && g_arms_n_saved > HEAD_NODE)    /* zero: the GE drops the draws that use them */
                     shrink_below(nodes, psp_read32(skel + 48u), g_arms_n_saved, NECK_NODE, 0.0f);
                 original();
