@@ -21,16 +21,19 @@ enum {
     MI_BACK    = 1 << 6,   /* cancel: closes */
 };
 
-/* Menu items, top to bottom: the main page, then the CONTROLS and TESTS
- * pages (opened from their items; BACK, or Cross, returns to the main page). */
+/* Menu items, top to bottom: the main page, then the CONTROLS, TESTS and VR
+ * pages (opened from their items; BACK, or Cross, returns to the main page).
+ * VR is hidden unless the host was built with it (menu_init hides it). */
 enum { MENU_FRAME_RATE, MENU_FPS_COUNTER, MENU_SEGA_SERVER, MENU_ADHOC_SERVER, MENU_ADHOC_MODE,
        MENU_MODERN_SERVER, MENU_RESOLUTION, MENU_RENDERER, MENU_MASTER_VOL, MENU_MUSIC_VOL, MENU_SFX_VOL, MENU_ATTENUATION,
-       MENU_FONT, MENU_CONTROLS, MENU_TESTS, MENU_CLOSE,
+       MENU_FONT, MENU_CONTROLS, MENU_TESTS, MENU_VR, MENU_CLOSE,
        MENU_RS_ON, MENU_RS_SPEED, MENU_SWAP_OC, MENU_TOUCH_COLOR, MENU_TOUCH_ALPHA, MENU_CONTROLS_BACK,
-       MENU_TEST_TICKS, MENU_TEST_LOGIC, MENU_TESTS_BACK, MENU_ITEMS };
-enum { MENU_PAGE_MAIN, MENU_PAGE_CONTROLS, MENU_PAGE_TESTS };
+       MENU_TEST_TICKS, MENU_TEST_LOGIC, MENU_TESTS_BACK,
+       MENU_VR_ON, MENU_VR_DISTANCE, MENU_VR_WIDTH, MENU_VR_HUD_DIST, MENU_VR_WORLD, MENU_VR_RES, MENU_VR_SHARPEN, MENU_VR_FILTER,
+       MENU_VR_GLOW, MENU_VR_INPUT, MENU_VR_RECENTER, MENU_VR_BACK, MENU_ITEMS };
+enum { MENU_PAGE_MAIN, MENU_PAGE_CONTROLS, MENU_PAGE_TESTS, MENU_PAGE_VR };
 int menu_page_of(int item);                      /* MENU_PAGE_* */
-#define MENU_BIT(i) (1u << (i))
+#define MENU_BIT(i) (1ull << (i))                 /* 64 bits: there are more than 32 items */
 
 /* Touch controls (the SDL host): colour presets and opacity in tenths. */
 enum { TOUCH_DEFAULT, TOUCH_WHITE, TOUCH_BLACK, TOUCH_YELLOW, TOUCH_CYAN, TOUCH_PINK, TOUCH_COLORS };
@@ -65,6 +68,34 @@ int  menu_ren_parse(const char *s);                  /* "d3d11" / "opengl" / "gl
 /* Right-stick camera sensitivity: 1.00x .. 2.00x in 0.25 steps. */
 #define MENU_RS_STEPS 5
 
+/* VR theater screen, in decimetres: distance 1.0 .. 5.0 m, width 1.0 .. 10.0 m,
+ * in 0.5 m steps. */
+#define VR_DIST_MIN_DM   10
+#define VR_DIST_MAX_DM   50
+#define VR_WIDTH_MIN_DM  10
+#define VR_WIDTH_MAX_DM 100
+#define VR_STEP_DM        5
+/* With head tracking: the HUD panel's distance, 1.0 .. 5.0 m (0.5 m steps),
+ * and the world's size as a percentage of life size (100% = the player's
+ * measured scale, ~3.4 game units per metre; bigger = a bigger world around
+ * you), 20 .. 300% in 10% steps, for the view in use (first or third person). */
+#define VR_HUD_MIN_DM    10
+#define VR_HUD_MAX_DM    50
+#define VR_WORLD_MIN_PCT 20
+#define VR_WORLD_MAX_PCT 300
+#define VR_WORLD_STEP     10
+/* VR image quality: sharpening of the headset's pictures in tenths (0 off ..
+ * 10), and texture filtering: VR_FILTER_* (off, then 2x .. 16x anisotropic). */
+#define VR_SHARPEN_STEPS 10
+/* VR resolution: the render scale (render_scale=, 1..6: GPU pixels per PSP
+ * pixel across; the eye pictures are 480 times it wide), from the next start. */
+#define VR_RES_MIN 1
+#define VR_RES_MAX 6
+enum { VR_FILTER_OFF, VR_FILTER_2X, VR_FILTER_4X, VR_FILTER_8X, VR_FILTER_16X, VR_FILTERS };
+int  menu_vr_filter_aniso(int f);                    /* VR_FILTER_* -> 0, 2, 4, 8, 16 */
+int  menu_vr_filter_of(int aniso);                   /* 0..16 -> the nearest VR_FILTER_* */
+enum { VR_RESTART_SHARPEN = 1, VR_RESTART_FILTER = 2 };
+
 /* What menu_update() changed, for the caller to act on. */
 enum {
     MFX_OPENED      = 1 << 0,
@@ -84,6 +115,9 @@ enum {
     MFX_TOUCH       = 1 << 14,  /* touch_color or touch_alpha changed */
     MFX_RS_ON       = 1 << 15,  /* rs_on changed: the right stick turns the camera, or nothing */
     MFX_TESTS       = 1 << 16,  /* test_ticks or test_logic changed (framerate_set_tests) */
+    MFX_VR          = 1 << 17,  /* vr_on, vr_dist_dm, vr_width_dm, vr_hud_dm, vr_world_pct, vr_res, vr_sharpen,
+                                   vr_filter, vr_glow or vr_motion changed: apply and save */
+    MFX_VR_RECENTER = 1 << 18,  /* VR > RECENTER: the screen in front of the head again */
 };
 
 typedef struct {
@@ -112,7 +146,22 @@ typedef struct {
     int      swap_oc;      /* Circle and Cross exchanged (the help line follows) */
     int      touch_color;  /* TOUCH_*: the touch controls' colour */
     int      touch_alpha;  /* their opacity in tenths, TOUCH_ALPHA_MIN..10 */
-    uint32_t hidden;       /* MENU_BIT(item)s this host leaves out (not drawn, skipped);
+    int      vr_on;        /* VR: the headset shows the game (the theater screen) */
+    int      vr_dist_dm;   /* the screen's distance, VR_DIST_MIN_DM..VR_DIST_MAX_DM */
+    int      vr_width_dm;  /* the screen's width, VR_WIDTH_MIN_DM..VR_WIDTH_MAX_DM */
+    int      vr_hud_dm;    /* the HUD panel's distance, VR_HUD_MIN_DM..VR_HUD_MAX_DM */
+    int      vr_world_pct; /* the world's size, VR_WORLD_MIN_PCT..VR_WORLD_MAX_PCT; set by the caller for its view */
+    int      vr_first;     /* the view vr_world_pct is for: first person (shown); set by the caller */
+    int      vr_res;       /* the render scale chosen, VR_RES_MIN..VR_RES_MAX */
+    int      vr_res_now;   /* the render scale running (set by the caller): RESTART shows when they differ */
+    int      vr_sharpen;   /* 0..VR_SHARPEN_STEPS, tenths */
+    int      vr_filter;    /* VR_FILTER_* */
+    int      vr_glow;      /* the game's glow (bloom) in the headset */
+    int      vr_motion;    /* INPUT MODE: 0 PAD (a gamepad, or the controllers as one), 1 MOTION (the controllers'
+                              hands shown; motion controls build on it) */
+    int      vr_quality_restart; /* VR_RESTART_*: the item shows RESTART (set by the caller: needs a new start) */
+    char     vr_status[24];/* "RUNNING", "NO HEADSET", ...; set by the caller */
+    uint64_t hidden;       /* MENU_BIT(item)s this host leaves out (not drawn, skipped);
                               menu_init hides the touch items */
     uint32_t prev;         /* MI_* held last update, for press detection */
     int      hold;         /* updates Up/Down has been held, for auto-repeat */

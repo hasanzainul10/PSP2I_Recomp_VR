@@ -38,6 +38,10 @@
 #include <psprecomp/mem.h>
 #include <psprecomp/render.h>
 
+#ifdef PSP2I_TEXREPLACE
+#include "texreplace.h"
+#endif
+
 #define VRAM_SIZE 0x200000u
 #define MAX_RT    32
 #define MAX_DEPTH 8
@@ -77,6 +81,9 @@ typedef struct {
     uint64_t key, hash, check_frame, last_use;
     uint32_t w, h;
     GLuint tex;
+    uint32_t rep_id;                 /* texture pack PNG drawn instead (texreplace.h), 0 = none */
+    int rep_slot;                    /* where rep_id was last found in g_rep */
+    uint32_t rep_wait;               /* a replacement still decoding (texreplace_pending): the original until then */
 } tex_entry;
 
 static rt_entry    g_rt[MAX_RT];
@@ -502,9 +509,70 @@ static tex_entry *tex_find(uint64_t key) {
     return NULL;
 }
 
-static tex_entry *tex_get(const psp_gpu_state *st) {
+#ifdef PSP2I_TEXREPLACE
+/* ---- texture packs (texreplace.c) -----------------------------------------------------------
+ *
+ * One GL texture per pack PNG, shared by every game texture that maps to it,
+ * evicted least recently used beyond a budget; d3d11.c's rep_view without the
+ * mip chain (the samplers here filter level 0 only). UVs need no change:
+ * the shader samples in normalized coordinates (texel / original size). */
+#define MAX_REP   256
+#define REP_BYTES (1024ull << 20)
+typedef struct { uint32_t id; uint64_t bytes, last_use; GLuint tex; } rep_entry;
+static rep_entry g_rep[MAX_REP];
+static uint64_t g_rep_bytes, n_rep_uploads;
+
+static void rep_free(rep_entry *r) {
+    if (r->tex) glDeleteTextures(1, &r->tex);
+    g_rep_bytes -= r->bytes;
+    memset(r, 0, sizeof *r);
+}
+
+/* e's replacement, uploading the PNG if it isn't on the GPU; 0 if it can't
+ * be (the caller draws the original). */
+static GLuint rep_tex(tex_entry *e) {
+    rep_entry *r = &g_rep[e->rep_slot];
+    if (r->id != e->rep_id) {
+        r = NULL;
+        for (int i = 0; i < MAX_REP && !r; i++) if (g_rep[i].id == e->rep_id) r = &g_rep[i];
+    }
+    if (!r) {
+        int w, h;
+        const uint32_t *px = texreplace_pixels(e->rep_id, &w, &h);
+        if (!px) return 0;
+        const uint64_t bytes = (uint64_t)w * h * 4;
+        for (;;) {
+            rep_entry *slot = NULL, *old = NULL;
+            for (int i = 0; i < MAX_REP; i++) {
+                if (!g_rep[i].id) { if (!slot) slot = &g_rep[i]; }
+                else if (!old || g_rep[i].last_use < old->last_use) old = &g_rep[i];
+            }
+            if (slot && g_rep_bytes + bytes <= REP_BYTES) { r = slot; break; }
+            if (!old) { r = slot; break; }
+            rep_free(old);
+        }
+        if (!r) return 0;
+        r->tex = new_texture((uint32_t)w, (uint32_t)h);
+        if (!r->tex) return 0;
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        r->id = e->rep_id; r->bytes = bytes;
+        g_rep_bytes += bytes;
+        n_rep_uploads++;
+    }
+    e->rep_slot = (int)(r - g_rep);
+    r->last_use = ++g_use;
+    return r->tex;
+}
+#endif
+
+/* allow_rep 0: decode the original even if a pack replaces it. */
+static tex_entry *tex_get(const psp_gpu_state *st, int allow_rep) {
     tex_entry *e = tex_find(st->tex_key);
     uint64_t f = frame_no();
+#ifdef PSP2I_TEXREPLACE
+    /* Its replacement has finished decoding: look the texture up again. */
+    if (e && e->rep_wait && !texreplace_pending(e->rep_wait)) { e->rep_wait = 0; e->hash = 0; e->check_frame = 0; }
+#endif
     if (e && e->check_frame == f) { e->last_use = ++g_use; return e; }
     uint64_t h = psp_gpu_texture_hash();
     if (e && e->hash == h) { e->check_frame = f; e->last_use = ++g_use; return e; }
@@ -520,6 +588,16 @@ static tex_entry *tex_get(const psp_gpu_state *st) {
         e->key = st->tex_key; e->w = st->tex_w; e->h = st->tex_h; e->used = 1;
         if (evicted) tex_index_rebuild(); else tex_index_add((int)(e - g_tex));
     }
+#ifdef PSP2I_TEXREPLACE
+    /* A texture pack's PNG instead, when one replaces this texture: the
+     * original isn't decoded (texture_view samples the PNG). */
+    e->rep_id = allow_rep ? texreplace_find() : 0;
+    if (e->rep_id && rep_tex(e)) { e->hash = h; e->check_frame = f; e->last_use = ++g_use; e->rep_wait = 0; return e; }
+    e->rep_wait = e->rep_id && texreplace_pending(e->rep_id) ? e->rep_id : 0;
+    e->rep_id = 0;
+#else
+    (void)allow_rep;
+#endif
     uint32_t *px = (uint32_t *)malloc((size_t)st->tex_w * st->tex_h * 4);
     if (!px) return NULL;
     psp_gpu_decode_texture(px);
@@ -658,9 +736,18 @@ static GLuint texture_view(const psp_gpu_state *st, rt_entry *target, float scal
             if (t->dirty && overlaps(toff, tend, row_addr(t, t->dy0), row_addr(t, t->dy1))) { g_rb_reason = 3; rt_readback(t); }
         }
     }
-    tex_entry *e = tex_get(st);
+    tex_entry *e = tex_get(st, 1);
     scale[0] = 1.0f / (float)st->tex_w;
     scale[1] = 1.0f / (float)st->tex_h;
+#ifdef PSP2I_TEXREPLACE
+    if (e && e->rep_id) {
+        const GLuint t = rep_tex(e);
+        if (t) return t;
+        /* Its PNG can't be read back (or uploaded): decode the original. */
+        e->rep_id = 0; e->hash = 0; e->check_frame = 0;
+        e = tex_get(st, 0);
+    }
+#endif
     return e ? e->tex : 0;
 }
 
@@ -1209,6 +1296,11 @@ void gl_ge_report(FILE *out) {
             (unsigned long long)n_draws, (unsigned long long)n_tris, (unsigned long long)n_uploads,
             (unsigned long long)n_readbacks, (unsigned long long)n_tex_decodes,
             (unsigned long long)n_rt_tex, (unsigned long long)n_approx);
+#ifdef PSP2I_TEXREPLACE
+    if (texreplace_on())
+        fprintf(out, "  gl texture packs    %llu PNG uploads, %.0f MB on the GPU\n",
+                (unsigned long long)n_rep_uploads, (double)g_rep_bytes / (1024.0 * 1024.0));
+#endif
     fprintf(out, "  gl readbacks by cause: relayout %llu, evict %llu, grow %llu, texture %llu, overlap %llu, sync %llu, cpu access %llu\n",
             (unsigned long long)n_rb_reason[0], (unsigned long long)n_rb_reason[1], (unsigned long long)n_rb_reason[2],
             (unsigned long long)n_rb_reason[3], (unsigned long long)n_rb_reason[4], (unsigned long long)n_rb_reason[5],

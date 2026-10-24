@@ -36,3 +36,21 @@
 0x08D3F470   # game: hang loop (j self) after fatal(): logged, thread parked like a PSP (was a stack overflow)
 0x08D4C604   # game: hang loop (j self) after "Large PatternIndex Error.": logged, thread parked
 0x08B8D840   # game: break + hang loop after a failed check: logged, thread parked
+0x08D7D63C   # builds the view-space frustum (cull) planes from the projection: built wider with VR head tracking (host/main.c)
+0x08D7C934   # frustum test of a bounding shape (16 out, 2 in, else crossing): "in" with VR head tracking, vr_cull_all (host/main.c)
+0x08D7CAEC   # frustum test of a box (centre, axes, half sizes): as above
+0x08D7CD88   # frustum test of another shape: as above
+0x08D7CE6C   # frustum test of another shape: as above
+0x08D7CF90   # frustum test of another shape: as above
+0x08D7D270   # a scene node's visibility (flags[i] bit 0x1 = hidden, from its description's 0x10 / 0x20 and the frustum test): counted per reason (dev, host/main.c)
+0x08D7DA78   # SetProjection: VR first person widens a field-like perspective projection after it (host/main.c)
+0x08AFD474   # ApplyCamera(camera): VR first person puts the field camera's view at the player's head (host/main.c)
+0x089D06E8   # on the path that starts the menus' cursor counter 0x08EE2F70 (write watch 2026-10-23): calls counted per second (dev, host/main.c)
+0x089F0BBC   # ... its callee: calls 0x089F0E80, then a virtual (counted, dev)
+0x089DDF1C   # ... the virtual: calls its object's +328 (counted with the object, dev)
+0x089DC598   # ... uses the global 0x08ED8FE8 (counted, dev)
+0x089D161C   # ... (counted, dev)
+0x089F7A48   # the scene dispatcher's child walk (a0 = parent task; children +20, next +12, vtable +0, update = vtable +8, flags +4): the live tasks logged as they come and go (dev, host/main.c)
+0x08A846DC   # an animated model's skinning palette from its node matrices (*(model+100), model space) and model+32: the local player's skeleton read there (dev PSP2I_SKEL, port/vr/vr_body.c)
+0x08D8D4E8   # a model's matrices (+64[part], eye space) into its display list's bone / world commands, just before drawing: the weapon moved with the IK'd hand (port/vr/vr_body.c)
+0x08D74E54   # every model's skinning palette (palette, skeleton, nodes, M), from all its callers: first person builds the head's attached models shrunk (port/vr/vr_body.c)

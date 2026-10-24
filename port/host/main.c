@@ -42,7 +42,11 @@
  *   --replay-input FILE      play back a PSP2I_INPUT_RECORD=FILE recording (same
  *               input on the same game frame; its fps unless --fps)
  *   --overlay-shot VBLANK  (repeatable) save the presented image, overlay
- *               included, as <capture-dir>/overlay_<vblank>.ppm
+ *               included, as <capture-dir>/overlay_<vblank>.ppm (and with
+ *               stereo on, each eye's picture as overlay_<vblank>_L/_R.ppm)
+ *   --ge-dump VBLANK  what F12 does, at that vblank (frame and draws in dumps/)
+ *   --stereo    (VR builds) draw the game once per eye without a headset, to
+ *               check the stereo pictures with --overlay-shot
  *   --audio / --no-audio  sound through SDL3.dll (audio_sdl.c): on by default
  *               with a window, off headless; PSP2I_AUDIO_DUMP=file.wav records
  *   --sdl / --no-sdl  controllers through SDL3.dll (input_sdl.c): on by default
@@ -52,6 +56,10 @@
  *               the exe, else 1920x1080); the settings menu changes and saves
  *               it, Alt+Enter toggles fullscreen. PSP2I_PRESENT=gdi skips the
  *               GPU presenter (present.c) and scales with GDI.
+ *   --texture-packs DIR[;DIR...]  PPSSPP texture packs for this run, instead of
+ *               psp2i_display.ini texture_packs= (texreplace.h); "" = none
+ *   --render-scale N  internal resolution for this run, 1..6 (Direct3D 11),
+ *               instead of psp2i_display.ini render_scale=
  *   --oracle    (trace builds) diff the function at ADDR against an interpreter
  *               the first time it runs; see host/oracle.c
  */
@@ -60,6 +68,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include <psprecomp/cpu.h>
 #include <psprecomp/mem.h>
@@ -90,6 +99,17 @@
 #include "prod.h"
 #include "textedit.h"
 #include "present.h"
+#ifdef PSP2I_VR
+#include "vr.h"
+#include "vr_body.h"
+#endif
+#include "vr_probe.h"
+#if defined(PSP2I_VR) && !defined(PSP2I_PROD)
+static void vrshot_request(void);        /* F11: a VR capture (below) */
+#endif
+#ifdef PSP2I_TEXREPLACE
+#include "texreplace.h"
+#endif
 
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
@@ -152,6 +172,19 @@ void ring_arm(void);
 int  d3d11_init(void);
 void d3d11_report(FILE *out);
 int  d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w, int h);
+void d3d11_set_scale(int s);
+void d3d11_set_scale_y(int s);
+void d3d11_set_quality(int aniso, float sharpen);
+int  d3d11_tex_mips(void);
+int  d3d11_sharpen_ready(void);
+const uint32_t *d3d11_present_hires(int *w, int *h);
+const uint32_t *d3d11_present_eye(int eye, int *w, int *h);
+void d3d11_eye_share(int on);
+void d3d11_eye_readback(int on);
+void d3d11_set_mono_left(int on);
+void *d3d11_present_eye_shared(int *w, int *h, uint32_t *tag);
+uint32_t d3d11_present_eye_tag(void);
+const uint32_t *d3d11_hud_picture(int *w, int *h);
 #endif
 #include "gl_ge.h"
 
@@ -274,6 +307,16 @@ static uint32_t g_rgba[SCREEN_W * SCREEN_H];   /* 0xAARRGGBB for GDI: the frame 
 static uint32_t g_frame[SCREEN_W * SCREEN_H];  /* the game's frame alone (grab_frame, d3d11_present) */
 static int      g_have_frame;
 
+/* Internal resolution (psp2i_display.ini render_scale=, --render-scale; D3D11
+ * only, from the next start): the game drawn at S x 480x272. g_frame and
+ * g_rgba stay 480x272 (captures, F12, the overlay, GDI); g_hi_frame is the
+ * renderer's S-times picture and g_hi_rgba that picture with the overlay,
+ * for the window (present.c) and the headset. */
+static int       g_hi_s = 1;                /* the scale in use: 1 = off */
+static int       g_hi_sy = 1;               /* ... down, for the VR eye pictures (g_hi_s.. 12) */
+static uint32_t *g_hi_frame, *g_hi_rgba;
+static int       g_hi_valid;                /* g_hi_frame holds the frame g_frame holds */
+
 /* Convert the current framebuffer. Returns 0 if the game has not set one. */
 static int grab_frame(void) {
     uint32_t addr, stride, fmt;
@@ -343,10 +386,24 @@ static void draw_overlay(void) {
     textedit_draw(&g_sega_edit, &img);
 }
 
-/* What the window shows: the latest game frame with the overlay on top. */
+/* What the window shows: the latest game frame with the overlay on top.
+ * With a render scale, the S-times picture too: the overlay is drawn at
+ * 480x272 as always, and each pixel it changed covers its S x S block. */
 static void compose(void) {
     memcpy(g_rgba, g_frame, sizeof g_rgba);
     draw_overlay();
+    if (g_hi_s <= 1 || !g_hi_rgba) return;
+    const int S = g_hi_s, W = SCREEN_W * S;
+    for (int y = 0; y < SCREEN_H; y++)
+        for (int x = 0; x < SCREEN_W; x++) {
+            const int i = y * SCREEN_W + x;
+            const int flat = !g_hi_valid || g_rgba[i] != g_frame[i];
+            for (int k = 0; k < S; k++) {
+                uint32_t *dst = g_hi_rgba + (size_t)(y * S + k) * W + (size_t)x * S;
+                if (flat) for (int j = 0; j < S; j++) dst[j] = g_rgba[i];
+                else memcpy(dst, g_hi_frame + (size_t)(y * S + k) * W + (size_t)x * S, (size_t)S * 4);
+            }
+        }
 }
 
 #ifdef _WIN32
@@ -401,6 +458,10 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == VK_F9 && first && g_menu_vk != VK_F9) { functrace_toggle(); return 0; }   /* function-activity recorder */
         if (wp == VK_F7 && first && g_menu_vk != VK_F7) { rateaudit_start(); return 0; }    /* frame-rate audit */
         if (wp == VK_F6 && first && g_menu_vk != VK_F6) { rateaudit_start_press(); return 0; }   /* press audit */
+        if (wp == VK_F8 && first && g_menu_vk != VK_F8) { vr_probe_request(); return 0; }    /* VR probe report (vr_probe.h) */
+#ifdef PSP2I_VR
+        if (wp == VK_F11 && first && g_menu_vk != VK_F11) { vrshot_request(); return 0; }   /* VR capture: eyes + report */
+#endif
 #endif
         if (text_ui_open() && wp != g_menu_vk) {
             uint32_t k = 0;
@@ -567,6 +628,7 @@ static int window_show(void) {
         gl_platform_swap();
         return 0;
     }
+    if (g_hi_s > 1 && g_hi_rgba && present_active()) return present_frame(g_hi_rgba, SCREEN_W * g_hi_s, SCREEN_H * g_hi_s);
     return present_active() ? present_frame(g_rgba, SCREEN_W, SCREEN_H) : -1;
 }
 
@@ -796,6 +858,1419 @@ static int      g_sdl_on;
 static uint32_t g_pad_bits;
 static uint8_t  g_pad_ax = 128, g_pad_ay = 128;
 
+/* Game units per metre: a first estimate (the orbit camera sits ~55-60 units
+ * behind the player, about 5.5 m at this scale); vr_world_scale= adjusts it. */
+#define VR_WORLD_SCALE_DEFAULT 10.0f
+
+/* VR (vr/vr.h): the theater screen and the motion controllers as a pad.
+ * Saved in psp2i_display.ini (vr=, vr_distance=, vr_width=); --vr / --no-vr
+ * for one run. The controllers add to the SDL pad: buttons OR together, and
+ * the VR sticks win unless only the SDL one is pushed. */
+static int      g_vr_on;                    /* the saved choice (menu VR) */
+static int      g_vr_dist_dm = 25, g_vr_width_dm = 30;
+/* Phase 2, stereo (vr_stereo=, vr_world_scale=): with Direct3D 11 the game is
+ * drawn again for each eye at the GE (psp_gpu_set_stereo, d3d11.c's eye
+ * copies) and the screen becomes a stereo window. The world scale is game
+ * units per metre: it sets the IPD and the convergence distance (the
+ * screen's distance) in game units. */
+static int      g_vr_stereo = 1;
+static float    g_vr_world_scale = VR_WORLD_SCALE_DEFAULT;
+/* Phase 3, head tracking (vr_head=, vr_level=): with stereo, each eye is
+ * drawn from the head (the game camera plus the head's pose since recenter)
+ * and the headset shows the pictures as a projection layer at the game's
+ * FOV, instead of the window. vr_level takes the game camera's pitch and
+ * roll out, so the horizon stays level with the real floor. */
+static int      g_vr_head = 1, g_vr_level = 1;
+/* vr_fov_scale=, vr_fov_scale_y=: with head tracking the eyes see that many
+ * times the game's view across and up (its FOV tangents). The picture keeps
+ * the PSP's shape, so a taller scale makes its pixels taller: the game's
+ * 480:272 at 1.6 across would be only ~67 degrees tall.
+ * vr_cull_scale=: the game's frustum cull (0x08D7D63C) is built that much
+ * wider, so what the wider view and the head turns show is drawn. */
+#define VR_FOV_SCALE_DEFAULT  1.6f
+#define VR_FOV_SCALE_Y_DEFAULT 2.6f
+#define VR_CULL_SCALE_DEFAULT 8.0f
+static float    g_vr_fov = VR_FOV_SCALE_DEFAULT, g_vr_fov_y = VR_FOV_SCALE_Y_DEFAULT, g_vr_cull = VR_CULL_SCALE_DEFAULT;
+/* vr_fov_auto=on: the fov scales follow the headset's own eye view
+ * (vr_view_tan) plus 5%, so the eye pictures always fill it. At 1.6 / 2.6
+ * (99 x 94 degrees) the PS VR2's wider view showed the pictures' edge, moving
+ * with the head: "a transparent rectangle overhead", dark or light where an
+ * area tints the screen (user, 2026-10-23). The picture's rows are set at the
+ * start from the saved scales, so a change is fully sharp from the next start. */
+static int      g_vr_fov_auto = 1;
+/* The HUD panel (as PSUEx-VR does it): the HUD pass's HUD and menus, drawn
+ * as the game drew them into their own picture (d3d11.c draw_hud), on a flat
+ * panel vr_hud_distance= metres ahead, a little below eye level, as wide as
+ * vr_hud_size= of the game's view there, turning only to follow the heading
+ * once the head has looked more than vr_hud_follow= degrees away (vr.h). */
+#define VR_HUD_SIZE_DEFAULT     0.7f
+/* Which HUD-pass sheets go on the panel, by their clip w (PSP2i draws every
+ * HUD-pass sheet at a fixed depth per layer: GE dumps and VR captures,
+ * ADDRESS_MAP.md "The HUD pass"): menus 3-71 (start menu, shops, mission
+ * banners, the top-left panel), the field HUD 84-85.99 (HP panel, palette,
+ * prompts), the minimap's frame 86.85-87.05 and its 3D map (2300 and more),
+ * and the menu background layer 92 (the white sheet behind dialogs such as
+ * "Abandon mission?": VR capture 2026-10-22). Everything else stays in the
+ * world: the place and enemy labels (86, 88), the lock-on reticle (90).
+ * Unknown layers stay in the world. Any sheet covering more than a fifth of
+ * the screen goes on the panel too: NPC portraits share the labels' layer
+ * (86: the shop's portrait, GE dump 2026-10-22), and labels are small. */
+/* The menu layer's share of the screen this game frame (HUD-pass sheets at
+ * clip w < 80, summed): big while a shop's or a dialog's windows are up, for
+ * vr_menu_dpad (the menus' cursor counter runs only one cycle as a shop
+ * opens, headset run 2026-10-23). Added up here, taken per game frame in
+ * poll_controllers. */
+static float g_menu_layer_acc;
+static int psp2i_hud_panel(float w, float frac) {
+    if (w < 80.0f && frac > 0.0f) g_menu_layer_acc += frac;
+    const int layer = w < 80.0f || (w >= 84.0f && w < 85.995f) || (w >= 86.85f && w <= 87.05f) || (w >= 91.5f && w <= 92.5f) ||
+                      w > 1000.0f;
+#ifndef PSP2I_PROD
+    /* Dev: the big sheets that go on the panel only by their size (user: "the
+     * flat appears while moving"; a full-screen effect there would put a flat
+     * copy of the game in front of them). Each layer and size once. */
+    if (!layer && frac > 0.2f) {
+        static int seen[64], n;
+        const int key = (int)lroundf(w * 10.0f) * 16 + (int)(frac * 10.0f);
+        int k = 0;
+        while (k < n && seen[k] != key) k++;
+        if (k == n && n < 64) {
+            seen[n++] = key;
+            fprintf(stderr, "vr: a big HUD-pass sheet: w %.2f, %.0f%% of the screen (vblank %llu): %s\n", (double)w,
+                    (double)(frac * 100.0f), (unsigned long long)psp_sched_vblank_count(),
+                    w < 89.0f ? "on the panel" : "in the world");
+        }
+    }
+#endif
+    /* By size only at the labels' depth (the portraits, w 86): big sheets
+     * deeper than that are things in the world the game draws in its HUD
+     * pass (w 90-220, 20-209% of the screen, depth changing as they move:
+     * VR log 2026-10-23), which on the panel put a flat sheet in front of
+     * the user while moving. */
+    return (frac > 0.2f && w < 89.0f) || layer;
+}
+/* Screen-space effects (hit sparks, techniques: small orthographic draws in
+ * the scene pass) are placed this far along the camera's ray: about where
+ * the player and what they hit are (the orbit camera is 55-60 units back). */
+#define PSP2I_FX_DIST           55.0f
+/* First person: the effects that far beyond the player instead (game units,
+ * ~1.8 m): at the player's own distance they were at the eyes and cut away
+ * (user: "some techniques become invisible" since first person). */
+#define PSP2I_FP_FX_AHEAD       6.0f
+/* vr_menu_screen=on: PSP2i's menu scenes (the continue page, mission select,
+ * loading screens: small 3D dioramas with their own camera) are shown as
+ * the game draws them on the flat screen, not from the head. They are told
+ * from the field by the camera the frame is drawn with (VR captures,
+ * 2026-10-22): the field's projection has x scale 1.3684 (tan 0.7308) and is
+ * centred, and its view is turned; mission select has x scale 0.9816, the
+ * continue page an off-centre projection (PROJ[8] -0.4) and an unturned view
+ * (identity rotation), like the loading screens. */
+#define PSP2I_FIELD_PROJ_X      1.3684f
+#define PSP2I_PROJ_MATRIX_G     0x08FA97A0u
+static int      g_vr_menu_screen = 1;
+static int      g_menu_scene = -1;          /* the last frame was a menu scene (logged on change) */
+/* The menu scene is a loading transition (an unturned view with the field's
+ * centred projection, between areas): the headset keeps the last 3D picture
+ * up to 5 s through it instead of 1 s (user: "the flat screen blips still
+ * occur"). Real menus are off-centre or much wider. */
+static int      g_menu_loading;
+/* P4 first person (vr_view=first, vr_fp_eye=, vr_fp_scale=): with head
+ * tracking the eyes sit in the local player's head instead of at the game
+ * camera, rendering only (the camera, and what other players see, stay the
+ * game's). The head is placed from the player's position (player +0x4B0, the
+ * feet), vr_fp_eye game units up along world up. Measured 2026-10-22 (the
+ * GE probe, standing in town): the model's top is 5.8 units above the
+ * position, the hips 3.05, so a ~1.7 m character makes about 3.4 units per
+ * metre; vr_fp_scale is that, for the head's movement and the IPD in first
+ * person (vr_world_scale stays third person's). The view's heading is the
+ * game camera's (it follows behind the player; the right stick turns it). */
+#define VR_FP_EYE_DEFAULT   5.3f
+#define VR_FP_SCALE_DEFAULT 3.4f
+/* vr_fp_forward=: the eyes that many game units ahead of the head along the
+ * gaze, so the player's own head is always behind them (user, first run: "I
+ * am inside the head"). 1.2 is ~35 cm: past a head's radius (~0.4) even
+ * when the run animation leans the head forward (the user asked for more
+ * than 0.6 for running). */
+#define VR_FP_FORWARD_DEFAULT 1.2f
+/* vr_fp_near=: in first person the eyes' 3D scene is clipped this many game
+ * units in front of them (psp_gpu_stereo.near_w): the run animation still
+ * threw the head ahead of the eyes at 1.2 (user: "running, still see back of
+ * head"), and a clip plane hides it whatever the animation does. 1.0 is
+ * ~30 cm. */
+#define VR_FP_NEAR_DEFAULT 1.0f
+/* vr_fp_hide_head=on: the own head is drawn shrunk to a point (vr_body.c), so
+ * it can't be in the way: the eyes sit only VR_FP_HIDDEN_FWD ahead (where
+ * the face is; user: with the head in the way "it feels weird, the camera
+ * is on top of the head") and the clip is as short. vr_fp_forward /
+ * vr_fp_near apply with it off. */
+#define VR_FP_HIDDEN_FWD  0.25f
+#define VR_FP_HIDDEN_NEAR 0.25f
+static int      g_vr_fp_hide_head = 1;
+/* vr_fp_eye_up= / vr_fp_eye_fwd=: with the head hidden, the eyes this many
+ * game units above the head joint (node 13) and ahead of it along the body. */
+static float    g_vr_fp_eye_up = 0.6f, g_vr_fp_eye_fwd = 0.4f;
+static int      g_vr_first;
+static float    g_vr_fp_eye = VR_FP_EYE_DEFAULT, g_vr_fp_scale = VR_FP_SCALE_DEFAULT, g_vr_fp_fwd = VR_FP_FORWARD_DEFAULT;
+static float    g_vr_fp_near = VR_FP_NEAR_DEFAULT;
+static float g_fp_head_off[3];               /* the head's centre across from the feet, world axes (head_frame's probe) */
+static float g_fp_eye_off[3];                /* with the head hidden: the eyes from the feet, world axes (eased) */
+static int   g_fp_eye_ok;
+static int   g_fp_head_ok;
+static int   g_fp_cam;                       /* the last field camera was applied at the head */
+static int   g_fp_other_cam;                 /* the camera applied last is another (the minimap's): left alone */
+static float g_fp_cam_hr[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };   /* ... turned as the head was then (level frame) */
+/* First person's own heading (the angle of the view's level backward axis,
+ * atan2(x, z) in the world), so the view doesn't swing when the game camera
+ * trails round behind the player: it turns with the game camera only while
+ * the right stick turns it, and takes the game's again after a cut or reset
+ * (a jump of over FP_YAW_CUT radians), at recenter and when first person
+ * starts. g_fp_game_yaw is the game camera's own (eye - target). The left
+ * stick is turned by (this heading + the head's yaw - the game's), so it
+ * walks where the head looks (ctrl_commit). */
+#define FP_YAW_CUT 0.5f
+static float g_fp_yaw, g_fp_game_yaw;
+static int   g_fp_yaw_ok;
+static int   g_fp_stick_on, g_fp_stick_in[2], g_fp_stick_out[2];   /* the last turned stick (the dev walk log) */
+/* vr_fp_nudge=: in first person, an attack (Square, Triangle) pressed while
+ * the character faces more than FP_NUDGE_MIN away from where the head looks
+ * is held back while the stick turns it to the head first (fp_nudge). */
+static int   g_vr_fp_nudge = 1;
+/* P5 motion controls (vr_input=pad|motion, engine menu VR > INPUT MODE): with
+ * MOTION the headset shows the controllers' hands (vr.h vr_hands_get), and
+ * each 3D frame places them in the game world (head_frame: through the same
+ * level frame and scale as the eyes), for the arms, swings and aim to come
+ * (VR_PLAN P5). The controllers' buttons stay the PSP pad either way. */
+static int   g_vr_motion;
+/* vr_arms=: with MOTION, the character's arms reach for the controllers
+ * (vr_body.c: 2-bone IK where the skinning palette is built, drawn only). */
+static int   g_vr_arms = 1;
+/* vr_avatar= / vr_avatar_legs=walk|still: with the arms, your character is
+ * drawn as a VRChat avatar (vr_body.h vr_body_avatar: the upper body still,
+ * the body turned to your gaze, the legs walking; drawn only). */
+static int   g_vr_avatar = 1, g_vr_avatar_still;
+typedef struct {
+    int   ok;
+    float p[3];          /* the grip, world */
+    float axes[9];       /* its axes in the world, column-major (x, y, z) */
+    float aim_p[3], aim_d[3];   /* the pointer ray, world */
+} game_hand;
+static game_hand g_hand_w[2];
+/* vr_menu_dpad=on (VR only): in the game's menus the left stick is the
+ * D-pad, as PSUEx-VR switches it (PSP2i's menus take only the D-pad). The
+ * game's own "a menu is open" isn't mapped yet; this follows the menus'
+ * cursor pulse counter 0x08EE2F70 (ADDRESS_MAP: 0..0x3F a game frame at a
+ * time while a field or shop menu runs, pausing at 0 up to ~22 vblanks,
+ * still at 0 in the field). It finishes its cycle after a menu closes (1-2
+ * s), so Start, which closes the start menu, ends it at once until the
+ * counter starts again. */
+#define PSP2I_MENU_CURSOR_COUNTER 0x08EE2F70u
+#define MENU_DPAD_LAYER   0.30f                 /* the menu layer's share of the screen that counts as a menu */
+#define MENU_DPAD_HOLD_VB 60                    /* vblanks after the counter's last change: its pauses inside a menu
+                                                   last up to ~50 (headset run 2026-10-23: 30 flickered) */
+static int g_vr_menu_dpad = 0;                  /* off by default: the signals below misfire (headset run 2026-10-23: "randomly works") */
+static int g_menu_dpad_on;                      /* the stick is the D-pad now (logged on change) */
+/* M3 prototype, melee by swinging (vr_swing_speed= m/s, MOTION only): a swing
+ * or a trigger pull of either hand presses Square, with that hand's grip held
+ * Triangle (the palette's second action, the Photon Art slot), for SWING_PRESS
+ * game frames (the rest of MOTION's PSUEx-VR mapping is the VR thread's).
+ * It goes through the pad like a button, so the first-person attack nudge
+ * turns the character to the view first. */
+#define SWING_SPEED_INI_DEFAULT 1.8f            /* = vr.h VR_SWING_SPEED_DEFAULT */
+#define SWING_PRESS 3
+static float    g_vr_swing = SWING_SPEED_INI_DEFAULT;
+static uint32_t g_swing_btn;                    /* the attack being pressed, 0 = none */
+static uint64_t g_swing_flip;                   /* ... since this flip */
+/* The left hand's swings are the sub weapon's: R held brings it up (user:
+ * holding R lifts the gun to the hand, as PSUEx-VR's R1 makes the left
+ * weapon the active one), so a left swing holds R, waits for the game's R
+ * stance (player +0x214, as fp_nudge reads it; at most SUB_LEAD_MAX flips),
+ * then presses Square / Triangle with R still held, and keeps R a moment
+ * after (SUB_TAIL) so a combo's next swing doesn't wait again. */
+#define SUB_LEAD_MAX 8
+#define SUB_TAIL     20
+static int      g_sub_phase;                    /* 0 none, 1 R held and waiting, 2 pressing (then the tail) */
+static uint32_t g_sub_btn;
+static uint64_t g_sub_flip;                     /* phase 1: since this flip */
+/* ... and its projection that much wider across / up (1 = the game's): the
+ * eyes' view plus VR_FP_VIEW_MARGIN, so the game culls nothing the eyes see,
+ * even as they turn before the next frame (user: "when I look up the bottom
+ * is missing, when I look down the top: make the radius bigger"). */
+#define VR_FP_VIEW_MARGIN 1.25f
+static float g_fp_kx = 1.0f, g_fp_ky = 1.0f;
+static float g_fp_p0, g_fp_p5;               /* the field camera's own projection x / y scales (before widening) */
+/* The eyes' view scales for the frame being drawn (psp_gpu_stereo.fov_scale):
+ * against the GE's projection, which is the widened one in first person. */
+static float g_eye_fs_x = VR_FOV_SCALE_DEFAULT, g_eye_fs_y = VR_FOV_SCALE_Y_DEFAULT, g_eye_kyx = 1.0f;
+static float g_ge_kx = 1.0f;                 /* the GE's projection's widening measured this frame (1 = none) */
+/* VR image quality (vr_aniso=, vr_sharpen=; d3d11_set_quality, from the
+ * next start): anisotropic filtering with mipmaps for the game's textures,
+ * and a contrast-adaptive sharpening pass on the eye pictures. Only with VR
+ * on: the window's game is drawn as before otherwise. */
+#define VR_ANISO_DEFAULT   16
+#define VR_SHARPEN_DEFAULT 0.5f
+static int      g_vr_aniso = VR_ANISO_DEFAULT;
+static float    g_vr_sharpen = VR_SHARPEN_DEFAULT;
+#define VR_HUD_DIST_INI_DEFAULT   2.5f          /* = vr.h VR_HUD_DISTANCE_DEFAULT (vr.h is VR builds only) */
+#define VR_HUD_FOLLOW_INI_DEFAULT 35.0f         /* = vr.h VR_HUD_FOLLOW_DEFAULT */
+static float    g_vr_hud_dist = VR_HUD_DIST_INI_DEFAULT, g_vr_hud_size = VR_HUD_SIZE_DEFAULT;
+static float    g_vr_hud_follow = VR_HUD_FOLLOW_INI_DEFAULT;
+static int      g_head_on;                  /* the eyes follow the head now */
+static int      g_fake_head;                /* PSP2I_VR_FAKE_HEAD=yaw,pitch (dev): a fixed head turn without a headset */
+static float    g_fake_yaw, g_fake_pitch;   /* degrees */
+static int      g_stereo_arg;               /* --stereo: the eyes without a headset (dev) */
+static int      g_stereo_on;                /* the eyes are drawn now */
+static const uint32_t *g_eye_px[2];         /* the latest eye pictures (d3d11.c), or NULL */
+static int      g_eye_w, g_eye_h;
+static int      g_eye_new;                  /* g_eye_px changed this vblank */
+static int      g_present_p;                /* this vblank's gpu_present: 1 a new copy, 0 from VRAM, 2 kept (dev counts) */
+/* The headset takes the eyes on the GPU (d3d11_eye_share) unless sharing
+ * failed; the overlay then goes as its own layer (vr_submit_overlay). */
+static int      g_overlay_up;               /* the last compose() drew something */
+static uint32_t g_ovl_px[SCREEN_W * SCREEN_H], g_ovl_sent[SCREEN_W * SCREEN_H];
+static int      g_ovl_sent_valid;
+static void    *g_eye_shared;               /* this vblank's shared eye texture, or NULL */
+static int      g_eye_shared_w, g_eye_shared_h;
+static uint32_t g_eye_shared_tag, g_eye_px_tag;   /* the head pose (vr_head.id) the eyes were drawn with, 0 = none */
+static uint64_t g_eye_shared_vb;            /* the last vblank one was sent */
+static uint32_t *g_eye_rgba[2];             /* ... with the overlay, for the headset */
+static int      g_vr_live;                  /* vr_start ran */
+static uint32_t g_vr_host;                  /* VR_HOST_* held */
+static uint8_t  g_vr_rx = 128, g_vr_ry = 128;
+static char     g_exe_dir[512];
+
+static int stick_off_centre(uint8_t x, uint8_t y) { return x < 96 || x > 160 || y < 96 || y > 160; }
+
+#ifdef PSP2I_VR
+static void vr_apply(void) {
+    /* The swapchain matches the render scale, so the headset gets every pixel. */
+    /* The HUD panel: vr_hud_size of the game's view width (fovy 45 at 480:272) at its distance. */
+    const vr_config cfg = { g_vr_dist_dm / 10.0f, g_vr_width_dm / 10.0f, g_hi_s > 1 ? g_hi_s : VR_SCALE_DEFAULT,
+                            g_vr_stereo && g_renderer == REN_D3D11, g_vr_hud_dist, VR_HUD_DROP_DEFAULT,
+                            2.0f * g_vr_hud_dist * 0.7311f * g_vr_hud_size, g_vr_hud_follow,
+                            g_hi_s > 1 ? g_hi_sy : 0, g_vr_motion, g_vr_swing };
+    if (g_vr_on && !g_vr_live && !g_headless) {
+        vr_set_swap_circle_cross(g_swap_oc);
+        g_vr_live = vr_start(g_exe_dir, &cfg) == 0;
+    } else if (!g_vr_on && g_vr_live) {
+        /* No more eyes to the headset from this frame on: the next present
+         * came before the stereo update turned sharing off, and crashed in
+         * share_eyes once the runtime was gone (VR off in the menu, crash
+         * 2026-10-23). */
+        if (g_renderer == REN_D3D11) d3d11_eye_share(0);
+        vr_stop();
+        g_vr_live = 0;
+        g_vr_host = 0;
+        g_vr_rx = g_vr_ry = 128;
+    } else if (g_vr_live) {
+        vr_configure(&cfg);
+    }
+}
+
+/* Column-major 3x3 (m[c * 3 + r]) of the rotation q (x, y, z, w). */
+static void quat_mat3(const float *q, float *m) {
+    const float x = q[0], y = q[1], z = q[2], w = q[3];
+    m[0] = 1 - 2 * (y * y + z * z); m[1] = 2 * (x * y + z * w);     m[2] = 2 * (x * z - y * w);
+    m[3] = 2 * (x * y - z * w);     m[4] = 1 - 2 * (x * x + z * z); m[5] = 2 * (y * z + x * w);
+    m[6] = 2 * (x * z + y * w);     m[7] = 2 * (y * z - x * w);     m[8] = 1 - 2 * (x * x + y * y);
+}
+
+static void mat3_mul(const float *a, const float *b, float *out) {   /* out = a * b */
+    for (int c = 0; c < 3; c++)
+        for (int r = 0; r < 3; r++) out[c * 3 + r] = a[r] * b[c * 3] + a[3 + r] * b[c * 3 + 1] + a[6 + r] * b[c * 3 + 2];
+}
+
+/* vr_level: the game camera with only its heading, as axes in the game
+ * camera's own view space (columns x, y, z). World up seen from the camera
+ * is the view matrix's second column (0x08FA98A0, the view the frame is
+ * drawn with: ADDRESS_MAP.md). Identity when that is not a usable view. */
+#define PSP2I_VIEW_MATRIX 0x08FA98A0u
+static void level_axes(float *m) {
+    static const float ID[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    memcpy(m, ID, sizeof ID);
+    float u[3] = { psp_read_f32(PSP2I_VIEW_MATRIX + 16), psp_read_f32(PSP2I_VIEW_MATRIX + 20),
+                   psp_read_f32(PSP2I_VIEW_MATRIX + 24) };
+    const float ul = sqrtf(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+    if (!(ul > 0.5f && ul < 2.0f)) return;
+    for (int k = 0; k < 3; k++) u[k] /= ul;
+    /* Forward (-z) with the up part taken out: the heading. */
+    float f[3] = { u[2] * u[0], u[2] * u[1], -1.0f + u[2] * u[2] };
+    const float fl = sqrtf(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+    if (fl < 1e-3f) return;                                     /* looking straight up or down */
+    const float z[3] = { -f[0] / fl, -f[1] / fl, -f[2] / fl };
+    const float x[3] = { u[1] * z[2] - u[2] * z[1], u[2] * z[0] - u[0] * z[2], u[0] * z[1] - u[1] * z[0] };
+    for (int k = 0; k < 3; k++) { m[k] = x[k]; m[3 + k] = u[k]; m[6 + k] = z[k]; }
+}
+
+/* The view (inverse of the camera [q | p]) into m, column-major 4x4. */
+static void view_of(const float *q, const float *p, float *m) {
+    for (int c = 0; c < 3; c++)
+        for (int r = 0; r < 3; r++) m[c * 4 + r] = q[r * 3 + c];
+    for (int r = 0; r < 3; r++) m[12 + r] = -(q[r * 3] * p[0] + q[r * 3 + 1] * p[1] + q[r * 3 + 2] * p[2]);
+    m[3] = m[7] = m[11] = 0.0f;
+    m[15] = 1.0f;
+}
+
+/* P5: the hands in the game world for this frame. A hand relative to the
+ * recentred head goes where the eyes' head would be at that offset: base
+ * (the head's origin in the game camera's view space) + k * lev * p, then
+ * out of the view space through the view matrix the frame is drawn with
+ * (its rotation transposed). Dev builds log them every ~2 s against the
+ * player's feet, the check that the scale and frame are right (a hand held
+ * at the hip in first person: ~3 units up from the feet, at 3.4 a metre). */
+static void hands_frame(const float *base, const float *lev, float k) {
+    vr_hand vh[2];
+    if (!g_vr_motion || !g_vr_live || !vr_hands_get(vh)) {
+        g_hand_w[0].ok = g_hand_w[1].ok = 0;
+        return;
+    }
+    float v[16];
+    for (int i = 0; i < 16; i++) v[i] = psp_read_f32(PSP2I_VIEW_MATRIX + 4u * (uint32_t)i);
+    for (int hd = 0; hd < 2; hd++) {
+        game_hand *o = &g_hand_w[hd];
+        o->ok = vh[hd].ok;
+        if (!o->ok) continue;
+        float pv[2][3], hr[9], ar[9], gq[9], aq[9];
+        for (int r = 0; r < 3; r++) {
+            pv[0][r] = base[r] + k * (lev[r] * vh[hd].p[0] + lev[3 + r] * vh[hd].p[1] + lev[6 + r] * vh[hd].p[2]);
+            pv[1][r] = base[r] + k * (lev[r] * vh[hd].aim_p[0] + lev[3 + r] * vh[hd].aim_p[1] + lev[6 + r] * vh[hd].aim_p[2]);
+        }
+        quat_mat3(vh[hd].q, hr);
+        quat_mat3(vh[hd].aim_q, ar);
+        mat3_mul(lev, hr, gq);                                   /* axes in the camera's view space */
+        mat3_mul(lev, ar, aq);
+        for (int c = 0; c < 3; c++) {                            /* view -> world: R^T (x - t) */
+            o->p[c] = v[c * 4] * (pv[0][0] - v[12]) + v[c * 4 + 1] * (pv[0][1] - v[13]) + v[c * 4 + 2] * (pv[0][2] - v[14]);
+            o->aim_p[c] = v[c * 4] * (pv[1][0] - v[12]) + v[c * 4 + 1] * (pv[1][1] - v[13]) + v[c * 4 + 2] * (pv[1][2] - v[14]);
+            o->aim_d[c] = -(v[c * 4] * aq[6] + v[c * 4 + 1] * aq[7] + v[c * 4 + 2] * aq[8]);   /* the ray is -z */
+            for (int a = 0; a < 3; a++)
+                o->axes[a * 3 + c] = v[c * 4] * gq[a * 3] + v[c * 4 + 1] * gq[a * 3 + 1] + v[c * 4 + 2] * gq[a * 3 + 2];
+        }
+    }
+#ifndef PSP2I_PROD
+    static uint64_t last;
+    const uint64_t vb = psp_sched_vblank_count();
+    if (vb - last >= 120) {
+        last = vb;
+        const uint32_t pl = gamelog_local_player();
+        float f[3] = { 0, 0, 0 };
+        if (pl) for (int i = 0; i < 3; i++) f[i] = psp_read_f32(pl + 0x4B0u + 4u * (uint32_t)i);
+        for (int hd = 0; hd < 2; hd++) {
+            const game_hand *o = &g_hand_w[hd];
+            if (!o->ok) { fprintf(stderr, "vr: hand %s: not tracked\n", hd ? "right" : "left"); continue; }
+            const float dx = o->p[0] - f[0], dz = o->p[2] - f[2];
+            fprintf(stderr, "vr: hand %s: world %.1f %.1f %.1f; from the feet %.2f across, %.2f up (%s person, %.1f units/m);"
+                            " aim %.2f %.2f %.2f\n", hd ? "right" : "left", (double)o->p[0], (double)o->p[1], (double)o->p[2],
+                    (double)sqrtf(dx * dx + dz * dz), (double)(o->p[1] - f[1]), g_vr_first ? "first" : "third", (double)k,
+                    (double)o->aim_d[0], (double)o->aim_d[1], (double)o->aim_d[2]);
+        }
+    }
+#endif
+}
+
+/* psp_gpu_stereo.on_frame: at the first 3D draw of each game frame, each
+ * eye's view from the newest head pose. The game camera stays where the game
+ * put it (nothing in the game changes); each eye is a camera on top of it at
+ * the head's orientation and position since recenter, in game units (the
+ * world scale), so every draw of the frame is seen from the head. */
+static void head_frame(psp_gpu_stereo *s) {
+    vr_head h;
+    memset(&h, 0, sizeof h);
+    h.q[3] = 1.0f;
+    h.eye[0][0] = -0.5f * VR_IPD_DEFAULT; h.eye[1][0] = 0.5f * VR_IPD_DEFAULT;
+    const int live = g_vr_live && vr_head_get(&h);
+#ifndef PSP2I_PROD
+    if (!live && g_fake_head) {                                 /* yaw about y, then pitch about x */
+        const float y = g_fake_yaw * 0.00872665f, x = g_fake_pitch * 0.00872665f;   /* half angles, radians */
+        h.q[0] = cosf(y) * sinf(x); h.q[1] = sinf(y) * cosf(x); h.q[2] = -sinf(y) * sinf(x); h.q[3] = cosf(y) * cosf(x);
+    }
+#endif
+    float lev[9], hr[9], q[9];
+    if (g_vr_first && g_fp_cam) {
+        /* The game camera already looks as the head did when it was applied
+         * (hook_apply_camera): the level frame in its view is that turn
+         * undone, so only the head's movement since then is added. */
+        for (int c = 0; c < 3; c++)
+            for (int r = 0; r < 3; r++) lev[c * 3 + r] = g_fp_cam_hr[r * 3 + c];
+    }
+    else if (g_vr_level) level_axes(lev);
+    else { static const float ID[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 }; memcpy(lev, ID, sizeof ID); }
+    quat_mat3(h.q, hr);
+    mat3_mul(lev, hr, q);                                       /* the head's axes in the game camera's view space */
+    /* First person: the head's origin is the player's head, seen from the
+     * game camera: the feet (player +0x4B0 through the view matrix), plus
+     * vr_fp_eye along world up, plus where the model's head really is
+     * across (psp_gpu_stereo_probe, measured each frame: the run animation
+     * throws it forward, user: "still see head"), plus vr_fp_forward along
+     * the gaze. The measured height is not used, so the eyes don't bob with
+     * the run. Else the head's origin is the game camera itself. */
+    static float prev_v[16];
+    float base[3] = { 0, 0, 0 };
+    float fx_dist = PSP2I_FX_DIST;
+    int first = 0;
+    if (g_vr_first) {
+        const uint32_t pl = gamelog_local_player();
+        float v[16], w[3], c[3];
+        for (int i = 0; i < 16; i++) v[i] = psp_read_f32(PSP2I_VIEW_MATRIX + 4u * (uint32_t)i);
+        if (pl) for (int i = 0; i < 3; i++) w[i] = psp_read_f32(pl + 0x4B0u + 4u * (uint32_t)i);
+        for (int r = 0; r < 3 && pl; r++) c[r] = v[r] * w[0] + v[4 + r] * w[1] + v[8 + r] * w[2] + v[12 + r];
+        const float ul = sqrtf(v[4] * v[4] + v[5] * v[5] + v[6] * v[6]);
+        /* A sane position: in front of the camera, within the orbit's reach. */
+        if (pl && ul > 0.5f && ul < 2.0f && (c[2] < 0.0f || g_fp_cam) && c[0] * c[0] + c[1] * c[1] + c[2] * c[2] < 200.0f * 200.0f) {
+            /* The last frame's head, from its own camera into world axes
+             * (the view's rotation transposed), level. */
+            float pr[6];
+            if (psp_gpu_stereo_probe_result(pr) && pr[2] > 20.0f && (pr[3] != 0 || pr[4] != 0 || pr[5] != 0)) {
+                float hw[3];
+                for (int cc = 0; cc < 3; cc++)
+                    hw[cc] = prev_v[cc * 4] * pr[3] + prev_v[cc * 4 + 1] * pr[4] + prev_v[cc * 4 + 2] * pr[5];
+                hw[1] = 0.0f;                                   /* +Y is up: only across */
+                if (hw[0] * hw[0] + hw[2] * hw[2] < 3.0f * 3.0f) {
+                    /* A fifth of the way each frame (~0.2 s to follow at 30 fps):
+                     * half was shaky with the run's sway (user, for comfort). */
+                    for (int cc = 0; cc < 3; cc += 2) g_fp_head_off[cc] = g_fp_head_ok ? g_fp_head_off[cc] + 0.2f * (hw[cc] - g_fp_head_off[cc]) : hw[cc];
+                    g_fp_head_ok = 1;
+                }
+            }
+            /* This frame's: within 3 units of the feet's vertical, the head
+             * from 1 unit below the eye height up (ceilings above 8 left out). */
+            const float un[3] = { v[4] / ul, v[5] / ul, v[6] / ul };
+            psp_gpu_stereo_probe(c, un, 3.0f, 8.0f, g_vr_fp_eye - 1.0f, 1);
+            memcpy(prev_v, v, sizeof prev_v);
+            float hv[3];                                        /* the head's offset, in this view */
+            for (int r = 0; r < 3; r++) hv[r] = g_fp_head_ok ? v[r] * g_fp_head_off[0] + v[8 + r] * g_fp_head_off[2] : 0.0f;
+            for (int r = 0; r < 3; r++)
+                base[r] = c[r] + g_vr_fp_eye * un[r] + hv[r] - (g_vr_fp_hide_head ? VR_FP_HIDDEN_FWD : g_vr_fp_fwd) * q[6 + r];   /* ahead: -z */
+            /* With the head hidden: the eyes where the character's are, from
+             * its head joint (vr_body: node 13 as animated) vr_fp_eye_up
+             * above it and vr_fp_eye_fwd ahead along the body, not a fixed
+             * height over the feet (user: "make the first person where the
+             * eye should be, now that the head is gone"). Kept as an offset
+             * from the feet in world axes, eased like the head offset above,
+             * so the run's bob and sway don't shake the view. */
+            float hj[3], hf[3];
+            if (g_vr_fp_hide_head && vr_body_head_eye(hj, hf)) {
+                const float fu = hf[0] * un[0] + hf[1] * un[1] + hf[2] * un[2];
+                float fh[3];
+                for (int r = 0; r < 3; r++) fh[r] = hf[r] - fu * un[r];   /* forward, level */
+                const float fl = sqrtf(fh[0] * fh[0] + fh[1] * fh[1] + fh[2] * fh[2]);
+                if (fl > 1e-3f) {
+                    float e[3], ew[3];
+                    for (int r = 0; r < 3; r++) e[r] = hj[r] + g_vr_fp_eye_up * un[r] + g_vr_fp_eye_fwd * fh[r] / fl - c[r];
+                    for (int cc = 0; cc < 3; cc++)            /* view -> world axes: the rotation transposed */
+                        ew[cc] = (v[cc * 4] * e[0] + v[cc * 4 + 1] * e[1] + v[cc * 4 + 2] * e[2]) / (ul * ul);
+                    for (int cc = 0; cc < 3; cc++) g_fp_eye_off[cc] = g_fp_eye_ok ? g_fp_eye_off[cc] + 0.2f * (ew[cc] - g_fp_eye_off[cc]) : ew[cc];
+                    g_fp_eye_ok = 1;
+                    for (int r = 0; r < 3; r++)
+                        base[r] = c[r] + v[r] * g_fp_eye_off[0] + v[4 + r] * g_fp_eye_off[1] + v[8 + r] * g_fp_eye_off[2];
+#ifndef PSP2I_PROD
+                    static unsigned n_eye;
+                    if (++n_eye % 120 == 0)
+                        fprintf(stderr, "vr: fp eyes: %.2f up and %.2f ahead of the head joint; the head joint %.2f below the"
+                                        " game camera\n", (double)g_vr_fp_eye_up, (double)g_vr_fp_eye_fwd,
+                                (double)sqrtf(hj[0] * hj[0] + hj[1] * hj[1] + hj[2] * hj[2]));
+#endif
+                }
+            } else g_fp_eye_ok = 0;
+            fx_dist = sqrtf(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]) + PSP2I_FP_FX_AHEAD;
+            first = 1;
+        }
+    }
+    if (!first) g_fp_head_ok = 0;
+    static int was_first = -1;
+    if (g_vr_first && first != was_first)
+        fprintf(stderr, "vr: first person %s\n", first ? "on (the eyes in the player's head)" : "waiting for the player");
+    was_first = g_vr_first ? first : -1;
+    const float k = first ? g_vr_fp_scale : g_vr_world_scale;
+    {   /* the eyes' view against the GE's projection: measured, as the GE
+         * may draw with the game's own projection though the cull saw the
+         * widened one (2026-10-23: it does; assuming it was widened took
+         * every first-person frame for a menu scene) */
+        float kx = 1.0f, ky = 1.0f;
+        if (first && g_fp_cam && g_fp_p0 > 0 && g_fp_p5 > 0 && fabsf(s->proj[0]) > 1e-3f && fabsf(s->proj[5]) > 1e-3f) {
+            /* Only the projection hook_set_projection wrote counts as widened:
+             * mission select's own (x 0.98) was taken for a widened field
+             * projection and shown in 3D (2026-10-23). */
+            const float wx = g_fp_p0 / g_fp_kx, wy = g_fp_p5 / g_fp_ky;
+            if (fabsf(fabsf(s->proj[0]) - wx) < 0.05f * wx && fabsf(fabsf(s->proj[5]) - wy) < 0.05f * wy) {
+                kx = g_fp_kx;
+                ky = g_fp_ky;
+            }
+        }
+        g_ge_kx = kx;
+        const float fx = g_vr_fov > 1.0f ? g_vr_fov : 1.0f, fy = g_vr_fov_y > 1.0f ? g_vr_fov_y : 1.0f;
+        g_eye_fs_x = fx / kx;
+        g_eye_fs_y = fy / ky;
+        g_eye_kyx = ky / kx;
+        s->fov_scale = g_eye_fs_x;
+        s->fov_scale_y = g_eye_fs_y;
+    }
+    s->near_w = first ? (g_vr_fp_hide_head ? VR_FP_HIDDEN_NEAR : g_vr_fp_near) : 0.0f;   /* the player's own head, clipped away */
+    vr_body_head(first && g_vr_fp_hide_head);
+    s->fx_dist = fx_dist;
+    for (int e = 0; e < 2; e++) {
+        float p[3];
+        for (int r = 0; r < 3; r++)
+            p[r] = base[r] + k * (lev[r] * h.p[0] + lev[3 + r] * h.p[1] + lev[6 + r] * h.p[2] +
+                                  q[r] * h.eye[e][0] + q[3 + r] * h.eye[e][1] + q[6 + r] * h.eye[e][2]);
+        view_of(q, p, s->eye_view[e]);
+    }
+    hands_frame(base, lev, k);
+    vr_body_arms(g_vr_arms && g_vr_motion && live);
+    vr_body_avatar(g_vr_avatar, g_vr_avatar_still);
+    if (live) {                                                 /* the gaze: the head's -z in the game camera's view */
+        const float gz[3] = { -q[6], -q[7], -q[8] };
+        vr_body_gaze(gz);
+    }
+    s->tag = live ? h.id : 0;
+    /* Menu scenes: as the game draws them, on the flat screen (tag 0). */
+    int menu = 0;
+    if (g_vr_menu_screen) {
+        float v[16], pr[16];
+        for (int i = 0; i < 16; i++) {
+            v[i] = psp_read_f32(PSP2I_VIEW_MATRIX + 4u * (uint32_t)i);
+            pr[i] = s->proj[i];                                 /* what the GE draws with (RAM may hold another camera's) */
+        }
+        const int unturned = fabsf(v[0] - 1) < 1e-4f && fabsf(v[5] - 1) < 1e-4f && fabsf(v[10] - 1) < 1e-4f &&
+                             fabsf(v[1]) < 1e-4f && fabsf(v[2]) < 1e-4f && fabsf(v[4]) < 1e-4f &&
+                             fabsf(v[6]) < 1e-4f && fabsf(v[8]) < 1e-4f && fabsf(v[9]) < 1e-4f;
+        const int off_centre = fabsf(pr[8]) > 1e-3f || fabsf(pr[9]) > 1e-3f;
+        /* Another FOV only counts when it's far from the field's: mission
+         * select is 0.98 (wider), close-up cutscenes 5.67. A boss fight's
+         * camera was 1.30-1.34 and the whole fight went flat (user) when
+         * this allowed 3%. */
+        const float px = pr[0] * g_ge_kx;                     /* the game's own x scale (GE widening undone) */
+        /* First person widens the field's projection by g_fp_kx, but
+         * g_ge_kx is that only while this frame's PROJ matches the one
+         * hook_set_projection wrote: when it didn't, walking frames read 0.42
+         * and went flat for seconds, the HUD drawn into the eyes (user: "the
+         * HUD sometimes becomes eye-tied, when moving"; psprecomp's flat-frame
+         * report, 2026-10-24). So in first person the widening is undone
+         * either way, and only a FOV off both counts. */
+        const float px_fp = g_vr_first ? pr[0] * g_fp_kx : px;
+        const int other_fov = (px < 1.15f || px > 2.5f) && (px_fp < 1.15f || px_fp > 2.5f);
+        menu = unturned || off_centre || other_fov;
+        g_menu_loading = menu && unturned && !off_centre && !other_fov;
+        if (menu != g_menu_scene)
+            fprintf(stderr, "vr: %s (view %s, projection x %.4f%s)\n",
+                    menu ? "a menu scene: on the flat screen" : "a 3D scene: from the head",
+                    unturned ? "unturned" : "turned", (double)pr[0], off_centre ? ", off-centre" : "");
+        g_menu_scene = menu;
+    }
+    s->flat_frame = menu;
+    if (menu) s->tag = 0;
+#ifndef PSP2I_PROD
+    /* First person (dev): every ~4 s, where the measured head is across from
+     * the feet (world axes, game units). */
+    static unsigned n_fp;
+    if (first && ++n_fp % 120 == 0)
+        fprintf(stderr, "vr: fp head: %s, %.2f / %.2f across from the feet (world x / z)\n",
+                g_fp_head_ok ? "measured" : "not measured", (double)g_fp_head_off[0], (double)g_fp_head_off[2]);
+#endif
+}
+
+#ifndef PSP2I_PROD
+/* Dev: the menu finder (2026-10-23, for the left stick as the D-pad in the
+ * game's menus). The user labels the game's state (both grips + Triangle in
+ * MOTION, or gamepad L3 held + R3): each press flips "a menu is open" / "the
+ * field". Every MENUF_EVERY game frames (from a second after a flip) user RAM
+ * is sampled. Each 32-bit word keeps its first field value and counts the
+ * field samples that differ from it and the menu samples that do: its score
+ * is the share of menu samples that differ minus the share of field samples
+ * that differ (1 = the game's "a menu is open", 0 = unrelated). A strict
+ * rule (never the field value in a menu) lost every candidate to a second
+ * kind of menu that leaves the first one's flags alone (run 2026-10-23).
+ * Each flip, and the exit report, log the MENUF_SHOW best-scoring words
+ * with their counts: the game's own menu state, without guessing where. */
+#define MENUF_BASE  0x08800000u
+#define MENUF_END   0x0A000000u
+#define MENUF_WORDS ((MENUF_END - MENUF_BASE) / 4u)
+#define MENUF_EVERY 10
+#define MENUF_SHOW  40
+static uint32_t *g_mf_field, *g_mf_menu;     /* the first field value; the last menu value */
+static uint16_t *g_mf_fbad, *g_mf_mhit;      /* field samples != the field value; menu samples != it */
+static int      g_mf_menu_now, g_mf_on;
+static unsigned g_mf_flips, g_mf_n[2];
+static uint64_t g_mf_from_flip, g_mf_last_flip;
+
+static void mf_report(const char *why) {
+    if (!g_mf_fbad || !g_mf_n[0] || !g_mf_n[1]) {
+        if (g_mf_on) fprintf(stderr, "vr: menu finder (%s): %u field / %u menu samples: nothing to compare yet\n", why, g_mf_n[0], g_mf_n[1]);
+        return;
+    }
+    /* The best MENUF_SHOW by score, kept sorted (insertion into a short list). */
+    uint32_t best[MENUF_SHOW];
+    float bs[MENUF_SHOW];
+    int nb = 0;
+    const float fn = (float)g_mf_n[0], mn = (float)g_mf_n[1];
+    unsigned perfect = 0;
+    for (uint32_t i = 0; i < MENUF_WORDS; i++) {
+        if (!g_mf_mhit[i]) continue;
+        const float sc = (float)g_mf_mhit[i] / mn - (float)g_mf_fbad[i] / fn;
+        if (sc > 0.999f) perfect++;
+        if (nb == MENUF_SHOW && sc <= bs[nb - 1]) continue;
+        int k = nb < MENUF_SHOW ? nb++ : nb - 1;
+        while (k > 0 && bs[k - 1] < sc) { bs[k] = bs[k - 1]; best[k] = best[k - 1]; k--; }
+        bs[k] = sc; best[k] = i;
+    }
+    fprintf(stderr, "vr: menu finder (%s): %u field / %u menu samples over %u label flips; %u words score 1; the best:\n", why,
+            g_mf_n[0], g_mf_n[1], g_mf_flips, perfect);
+    for (int k = 0; k < nb; k++) {
+        const uint32_t i = best[k];
+        fprintf(stderr, "vr:   0x%08X score %.2f (menu %u/%u differ, field %u/%u): field 0x%08X, menu 0x%08X\n", MENUF_BASE + 4u * i,
+                (double)bs[k], g_mf_mhit[i], g_mf_n[1], g_mf_fbad[i], g_mf_n[0], g_mf_field[i], g_mf_menu[i]);
+    }
+}
+
+static void mf_mark(void) {
+    if (!g_mf_on) {
+        g_mf_field = (uint32_t *)malloc((size_t)MENUF_WORDS * 4);
+        g_mf_menu = (uint32_t *)malloc((size_t)MENUF_WORDS * 4);
+        g_mf_fbad = (uint16_t *)calloc(MENUF_WORDS, 2);
+        g_mf_mhit = (uint16_t *)calloc(MENUF_WORDS, 2);
+        if (!g_mf_field || !g_mf_menu || !g_mf_fbad || !g_mf_mhit) { fprintf(stderr, "vr: menu finder: no memory\n"); return; }
+        g_mf_on = 1;
+        g_mf_menu_now = 1;                        /* the first press: a menu is open now */
+        /* The menus' cursor counter (0x08EE2F70: 0..0x3F a game frame at a
+         * time while a menu runs, run 2026-10-23): its first 32 writes get a
+         * stack in game_log.txt, which leads to the code that runs menus. */
+        psp_mem_watch_write(0x08EE2F70u);
+        fprintf(stderr, "vr: menu finder: write watch armed on 0x08EE2F70 (stacks in game_log.txt)\n");
+    } else {
+        g_mf_menu_now = !g_mf_menu_now;
+        g_mf_flips++;
+    }
+    g_mf_from_flip = psp_display_flips() + 30;    /* a second for the menu to open or close */
+    fprintf(stderr, "vr: menu finder: now labelled %s (vblank %llu)\n", g_mf_menu_now ? "A MENU IS OPEN" : "the field",
+            (unsigned long long)psp_sched_vblank_count());
+    vr_haptic(-1, 0.3f, 0.08f);
+    mf_report("flip");
+}
+
+/* Menu samples taken before the first field sample have no field value to
+ * compare with: their values are kept (the last one) and counted against
+ * the field value once it is known, as one sample. */
+static void mf_sample(void) {
+    {   /* The best candidates so far (run 2026-10-23: 0x08EE2F70, 0 in the
+         * field, 0x15..0x3B in most menus): each change with its vblank and
+         * the label, to see which menus set them. */
+        static const uint32_t WATCH[] = { 0x08EE2F70u, 0x09866FF8u };
+        static uint32_t last[2];
+        static int have;
+        static unsigned lines;
+        for (int k = 0; k < 2; k++) {
+            const uint32_t v = psp_read32(WATCH[k]);
+            if (have && v != last[k] && lines++ < 3000)
+                fprintf(stderr, "vr: menu word 0x%08X: 0x%08X -> 0x%08X (vblank %llu, labelled %s)\n", WATCH[k], last[k], v,
+                        (unsigned long long)psp_sched_vblank_count(), !g_mf_on ? "-" : g_mf_menu_now ? "menu" : "field");
+            last[k] = v;
+        }
+        have = 1;
+        /* Each menu's own start gets a stack: once the counter has been 0 for
+         * 90 vblanks (a menu closed, not a wrap inside one) the write watch is
+         * armed again. The first 32 writes all came from the title menu, whose
+         * path the in-game menus don't take (run 2026-10-23: its functions ran
+         * 0 times in the start menu). */
+        static uint64_t zero_since;
+        static int armed;
+        const uint64_t vbn = psp_sched_vblank_count();
+        if (last[0] == 0) {                       /* from the start: no label needed */
+            if (!zero_since) zero_since = vbn;
+            if (!armed && vbn - zero_since >= 90) { psp_mem_watch_write(0x08EE2F70u); armed = 1; }
+        } else if (last[0] != 0) {
+            zero_since = 0;
+            armed = 0;
+        }
+    }
+    const uint64_t fl = psp_display_flips();
+    if (!g_mf_on || fl < g_mf_from_flip || fl - g_mf_last_flip < MENUF_EVERY) return;
+    g_mf_last_flip = fl;
+    const uint32_t *m = (const uint32_t *)psp_mem_ptr(MENUF_BASE, MENUF_END - MENUF_BASE);
+    if (!m) return;
+    const int menu = g_mf_menu_now;
+    if (menu) {
+        if (!g_mf_n[0]) { memcpy(g_mf_menu, m, (size_t)MENUF_WORDS * 4); g_mf_n[1] = 1; return; }
+        for (uint32_t i = 0; i < MENUF_WORDS; i++)
+            if (m[i] != g_mf_field[i]) { if (g_mf_mhit[i] < 65535) g_mf_mhit[i]++; g_mf_menu[i] = m[i]; }
+        if (g_mf_n[1] < 65535) g_mf_n[1]++;
+    } else {
+        if (!g_mf_n[0]) {                         /* the field value, and the early menu sample against it */
+            memcpy(g_mf_field, m, (size_t)MENUF_WORDS * 4);
+            if (g_mf_n[1]) for (uint32_t i = 0; i < MENUF_WORDS; i++) g_mf_mhit[i] = g_mf_menu[i] != g_mf_field[i];
+            g_mf_n[0] = 1;
+            return;
+        }
+        for (uint32_t i = 0; i < MENUF_WORDS; i++)
+            if (m[i] != g_mf_field[i] && g_mf_fbad[i] < 65535) g_mf_fbad[i]++;
+        if (g_mf_n[0] < 65535) g_mf_n[0]++;
+    }
+}
+#endif
+
+#ifndef PSP2I_PROD
+/* Dev: the functions on the path that starts the menus' cursor counter
+ * (0x08EE2F70's first write, its stack: ... 0x089D161C < 0x089DC598 <
+ * 0x089DDF1C < 0x089F0C20 < 0x089F0BBC < 0x089D06E8 < the scene dispatcher
+ * 0x089F7A64), counted per second against the menu finder's label: the one
+ * that runs exactly while a menu is open is the game's own "a menu is open". */
+#define MENU_PATH_N 5
+static const uint32_t MENU_PATH[MENU_PATH_N] = { 0x089D06E8u, 0x089F0BBCu, 0x089DDF1Cu, 0x089DC598u, 0x089D161Cu };
+static unsigned g_mp_n[MENU_PATH_N];
+static uint32_t g_mp_obj[MENU_PATH_N];        /* the last $a0 */
+static void mp_count(int k) { g_mp_n[k]++; g_mp_obj[k] = psp_cpu.r[4]; }
+#define MENU_PATH_HOOK(k) static void hook_menu_path##k(void (*original)(void)) { mp_count(k); original(); }
+MENU_PATH_HOOK(0) MENU_PATH_HOOK(1) MENU_PATH_HOOK(2) MENU_PATH_HOOK(3) MENU_PATH_HOOK(4)
+static void hook_task_walk(void (*original)(void));   /* below: the live tasks */
+static void menu_path_init(void) {
+    psp_hook_set(MENU_PATH[0], hook_menu_path0); psp_hook_set(MENU_PATH[1], hook_menu_path1);
+    psp_hook_set(MENU_PATH[2], hook_menu_path2); psp_hook_set(MENU_PATH[3], hook_menu_path3);
+    psp_hook_set(MENU_PATH[4], hook_menu_path4);
+    psp_hook_set(0x089F7A48u, hook_task_walk);
+}
+/* Dev: the game's live tasks (the scene dispatcher 0x089F7A64 runs each
+ * task's update, vtable +8; 0x089F7A48 walks a parent's children: first
+ * +20, next +12, flags +4). Each second the set of task vtables seen is
+ * compared with the last second's, and the ones that came or went are
+ * logged with their update function: a menu opening shows as its tasks
+ * appearing, with no labels needed. */
+#define TASKS_MAX 256
+static uint32_t g_task_vt[TASKS_MAX], g_task_upd[TASKS_MAX], g_task_prev[TASKS_MAX];
+static int      g_task_n, g_task_prev_n;
+static void hook_task_walk(void (*original)(void)) {
+    uint32_t c = psp_read32(psp_cpu.r[4] + 20u);
+    for (int guard = 0; c && guard < 64; guard++, c = psp_read32(c + 12u)) {
+        const uint32_t vt = psp_read32(c);
+        int k = 0;
+        while (k < g_task_n && g_task_vt[k] != vt) k++;
+        if (k == g_task_n && g_task_n < TASKS_MAX) { g_task_vt[g_task_n] = vt; g_task_upd[g_task_n] = psp_read32(vt + 8u); g_task_n++; }
+    }
+    original();
+}
+static void tasks_log(uint64_t vb) {
+    static uint64_t since;
+    static unsigned lines;
+    if (vb - since < 60) return;
+    since = vb;
+    if (!g_task_n) return;                         /* no walks this second (loading): keep the last set */
+    if (g_task_prev_n) {
+        for (int k = 0; k < g_task_n; k++) {
+            int j = 0;
+            while (j < g_task_prev_n && g_task_prev[j] != g_task_vt[k]) j++;
+            if (j == g_task_prev_n && lines++ < 2000)
+                fprintf(stderr, "vr: task + vtable %08X update %08X (vblank %llu)\n", g_task_vt[k], g_task_upd[k], (unsigned long long)vb);
+        }
+        for (int j = 0; j < g_task_prev_n; j++) {
+            int k = 0;
+            while (k < g_task_n && g_task_vt[k] != g_task_prev[j]) k++;
+            if (k == g_task_n && lines++ < 2000)
+                fprintf(stderr, "vr: task - vtable %08X (vblank %llu)\n", g_task_prev[j], (unsigned long long)vb);
+        }
+    }
+    memcpy(g_task_prev, g_task_vt, sizeof g_task_prev);
+    g_task_prev_n = g_task_n;
+    g_task_n = 0;
+}
+
+/* Each second (60 vblanks), when anything was called or the label is on. */
+static void menu_path_log(uint64_t vb, int labelled, int menu) {
+    static uint64_t since;
+    if (vb - since < 60) return;
+    since = vb;
+    unsigned any = 0;
+    for (int k = 0; k < MENU_PATH_N; k++) any |= g_mp_n[k];
+    if (any || labelled) {
+        fprintf(stderr, "vr: menu path per s (%s, vblank %llu):", !labelled ? "-" : menu ? "menu" : "field", (unsigned long long)vb);
+        for (int k = 0; k < MENU_PATH_N; k++) fprintf(stderr, " %08X %u [a0 %08X]", MENU_PATH[k], g_mp_n[k], g_mp_obj[k]);
+        fprintf(stderr, "\n");
+    }
+    memset(g_mp_n, 0, sizeof g_mp_n);
+}
+#endif
+
+#ifndef PSP2I_PROD
+/* VR captures (dev): F11, or every PSP2I_VR_SHOT_EVERY=N seconds. For one
+ * frame the eyes also come back through the CPU (still shared on the GPU
+ * with the headset: through the CPU only, that frame showed flat), and
+ * <capture dir>/vrshot_<vblank>_L.ppm / _R.ppm get the pictures the headset
+ * gets; vrshot_<vblank>.txt the head pose, the HUD frame, the settings and
+ * psprecomp's trace of that frame (psp_gpu_stereo_trace: each draw that isn't
+ * a moved 3D scene draw, with what the eyes do with it). */
+static volatile LONG g_vrshot_req;
+static uint64_t g_vrshot_every;             /* vblanks; 0 = only F11 */
+static uint64_t g_vrshot_vb, g_vrshot_last; /* the capture in progress (0 = none), the last one */
+static FILE    *g_vrshot_txt;
+static int      g_vrshot_noshare;           /* the eyes also read back to the CPU until saved */
+static char     g_vrshot_eyes[160];         /* the report's last line, once the eyes are saved */
+static void vrshot_request(void) { InterlockedExchange(&g_vrshot_req, 1); }
+
+static void vrshot_ppm(const char *path, const uint32_t *px, int w, int h) {
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    fprintf(f, "P6\n%d %d\n255\n", w, h);
+    for (int k = 0; k < w * h; k++) {
+        const uint8_t rgb[3] = { (uint8_t)(px[k] >> 16), (uint8_t)(px[k] >> 8), (uint8_t)px[k] };
+        fwrite(rgb, 1, 3, f);
+    }
+    fclose(f);
+}
+#endif
+
+/* The game builds its cull planes (view space, from the projection) in
+ * 0x08D7D63C, called by SetProjection and the viewport setter
+ * (ADDRESS_MAP.md). With head tracking it runs with the projection's x and y
+ * scales divided by vr_cull_scale, then the projection is put back: the
+ * planes are wider and nothing else changes. Orthographic projections are
+ * left alone. */
+#define FN_FRUSTUM_PLANES 0x08D7D63Cu
+#define PSP2I_PROJ_MATRIX 0x08FA97A0u
+#define PSP2I_PROJ_ORTHO  0x08FA9830u   /* 1 = the current projection is orthographic */
+static uint64_t n_cull_wide;
+/* VR head tracking (vr_cull_all=on): the game's frustum tests of its
+ * objects' bounding shapes (0x08D7CAEC and its neighbours, ADDRESS_MAP.md
+ * "The frustum cull": 16 = outside, 2 = inside) all answer "inside", so
+ * everything the game has loaded is drawn. The cull is the game camera's,
+ * and in first person that camera is ~16 m behind the player: looking back
+ * showed an empty world (user), which widening the side planes can't fix
+ * (nothing behind a camera is in any view through it). Only what this
+ * game draws changes; the GPU clips what is behind the eyes. */
+static int      g_vr_cull_all = 1;
+/* vr_two_sided=on (head tracking): the 3D scene drawn without back-face
+ * culling (psp_gpu_stereo.two_sided): "angles not viewable in the original
+ * game are not rendered" (user): one-sided walls and roofs seen from behind. */
+static int      g_vr_two_sided = 1;
+/* vr_glow=off (head tracking; VR > GLOW; the default): the game's glow pass
+ * is left out of the eyes (psp_gpu_stereo.no_glow): the parts that glow are
+ * drawn into their own buffer, blurred on the game's 480x272 screen and
+ * added over the scene, which in the eyes sat off what glows (user,
+ * 2026-10-23: "the glow move around"; off by the user's choice until that
+ * is fixed). */
+static int      g_vr_glow = 0;
+static uint64_t n_cull_all;
+static void hook_cull_test(void (*original)(void)) {
+    if (!g_head_on || !g_vr_cull_all) { original(); return; }
+    psp_cpu.r[2] = 2;                                           /* inside */
+    if (n_cull_all++ == 0) fprintf(stderr, "vr: every object drawn (the game's frustum tests answer inside)\n");
+}
+
+
+/* First person: the game's field camera is applied with its view at the
+ * player's head (ApplyCamera 0x08AFD474: its view matrix, cam+0x10, goes to
+ * the global 0x08FA98A0, then the projection and the cull planes). The game
+ * draws and culls from where the eyes are: the town's shop tops were missing
+ * in first person while the camera stood ~16 m back and above ("unless I move
+ * closer, or in third person lower": the game picks what to draw by the
+ * camera's place). The heading is the game camera's, level; the camera
+ * object's eye, target and movement vectors are left alone (the orbit reads
+ * its eye back each frame, and moving follows the camera's heading). The
+ * field camera is the one with the field's projection (x scale 1.15..2.5). */
+static uint64_t n_fp_cam;
+#define FN_APPLY_CAMERA 0x08AFD474u
+#ifndef PSP2I_PROD
+/* Dev: each ApplyCamera of a frame and the global projection when the
+ * scene walk starts (hook_node_vis), logged every ~5 s: is the widened
+ * projection the one the game culls with? */
+static char     g_apply_log[512];
+static int      g_apply_log_n, g_apply_log_print, g_node_seen;
+static uint64_t g_apply_log_flip;
+#endif
+
+#ifndef PSP2I_PROD
+/* Dev: PSP2I_PL_TRACE=FILE writes, once per game frame with the field
+ * camera, the pad as sent, the headings and 4 KB of the local player object
+ * plus 512 bytes of the camera object, for offline searches (the player's
+ * facing, attack and lock-on state: compare frames, don't guess). */
+static uint32_t g_sent_bits;
+static uint8_t  g_sent_ax = 128, g_sent_ay = 128;
+#define PL_TRACE_PL  0x1000u
+#define PL_TRACE_CAM 0x200u
+static void pl_trace(uint32_t cam, uint32_t pl) {
+    static FILE *f;
+    static int tried;
+    static uint64_t last_flip, bytes;
+    if (!tried) {
+        tried = 1;
+        const char *p = getenv("PSP2I_PL_TRACE");
+        if (p && *p && (f = fopen(p, "wb")) != NULL) fprintf(stderr, "vr: player trace to %s\n", p);
+    }
+    const uint64_t fl = psp_display_flips();
+    if (!f || !pl || fl == last_flip || bytes > (200u << 20)) return;
+    last_flip = fl;
+    struct {
+        uint32_t magic, flip, pl, cam, bits;
+        uint8_t ax, ay, in_ax, in_ay;
+        uint32_t first, fp_cam;
+        float fp_yaw, game_yaw, head_yaw;
+    } r;
+    memset(&r, 0, sizeof r);
+    r.magic = 0x52544C50u; r.flip = (uint32_t)fl; r.pl = pl; r.cam = cam; r.bits = g_sent_bits;
+    r.ax = g_sent_ax; r.ay = g_sent_ay; r.in_ax = g_pad_ax; r.in_ay = g_pad_ay;
+    r.first = (uint32_t)g_vr_first; r.fp_cam = (uint32_t)g_fp_cam;
+    r.fp_yaw = g_fp_yaw; r.game_yaw = g_fp_game_yaw;
+#ifdef PSP2I_VR
+    vr_head hd;
+    if (g_vr_live && vr_head_get(&hd)) { float hr[9]; quat_mat3(hd.q, hr); r.head_yaw = atan2f(hr[6], hr[8]); }
+#endif
+    const void *pp = psp_mem_ptr(pl, PL_TRACE_PL), *cp = psp_mem_ptr(cam, PL_TRACE_CAM);
+    if (!pp || !cp) return;
+    fwrite(&r, sizeof r, 1, f);
+    fwrite(pp, PL_TRACE_PL, 1, f);
+    fwrite(cp, PL_TRACE_CAM, 1, f);
+    bytes += sizeof r + PL_TRACE_PL + PL_TRACE_CAM;
+    if (fl % 300 == 0) fflush(f);
+}
+#endif
+
+static void hook_apply_camera(void (*original)(void)) {
+    const uint32_t cam = psp_cpu.r[4], pl = gamelog_local_player();
+    const float px = cam ? psp_read_f32(cam + 0x90u) : 0.0f;
+#ifndef PSP2I_PROD
+    {
+        const uint64_t fl = psp_display_flips();
+        if (fl != g_apply_log_flip) {
+            if (g_apply_log_print && g_apply_log_n) fprintf(stderr, "vr: applies:%s\n", g_apply_log);
+            g_apply_log_print = psp_sched_vblank_count() % 300 < 4;
+            g_apply_log_flip = fl; g_apply_log_n = 0; g_apply_log[0] = '\0'; g_node_seen = 0;
+        }
+        size_t L = strlen(g_apply_log);
+        if (L < sizeof g_apply_log - 64)
+            snprintf(g_apply_log + L, sizeof g_apply_log - L, " [cam %08X x %.3f]", cam, (double)px);
+        g_apply_log_n++;
+    }
+#endif
+    const int field = px > 1.15f && px < 2.5f;      /* other cameras (3 applies a frame) leave g_fp_cam alone */
+    if (!g_head_on || !g_vr_first) g_fp_cam = g_fp_yaw_ok = 0;
+    if (!field) { original(); return; }
+    /* The field camera is the frame's first with the field's projection.
+     * The minimap's own camera has the same x scale (1.368) and comes after
+     * the scene walk, three times a frame ([cam 09557DA0] scene walk [cam
+     * 094AFD40] x3 [cam 09557DA0], f1_nudge1.log): put at the head and
+     * widened too, its map was drawn from eye level, lying flat (user,
+     * 2026-10-23: "the minimap still behave like we are seeing it in first
+     * person"). Other cameras are applied as the game set them, and the
+     * projection they set (hook_set_projection) is not widened. */
+    static uint64_t main_flip = (uint64_t)-1;
+    static uint32_t main_cam;
+    if (psp_display_flips() != main_flip) { main_flip = psp_display_flips(); main_cam = cam; }
+    g_fp_other_cam = cam != main_cam;
+    if (g_fp_other_cam) { original(); return; }
+#ifndef PSP2I_PROD
+    pl_trace(cam, pl);
+#endif
+    g_fp_cam = 0;
+    if (g_head_on && g_vr_first && pl) {
+        /* The game camera's backward axis, level, from its eye and target
+         * (+0xFC, +0x108: the game's own, never written here). */
+        float bz[3];
+        for (int i = 0; i < 3; i++) bz[i] = psp_read_f32(cam + 0xFCu + 4u * (uint32_t)i) - psp_read_f32(cam + 0x108u + 4u * (uint32_t)i);
+        if (bz[0] * bz[0] + bz[2] * bz[2] > 1e-6f) {
+            const float gy = atan2f(bz[0], bz[2]);
+            float dg = gy - g_fp_game_yaw;
+            dg -= 6.2831853f * floorf((dg + 3.1415927f) / 6.2831853f);
+            if (!g_fp_yaw_ok || fabsf(dg) > FP_YAW_CUT) g_fp_yaw = gy;   /* a start, cut or camera reset */
+            else if (camera_x() != 0.0f) g_fp_yaw += dg;                  /* the right stick turning */
+            g_fp_game_yaw = gy;
+            g_fp_yaw_ok = 1;
+        }
+        /* The view's backward axis in the world, level: first person's heading. */
+        float z[3] = { sinf(g_fp_yaw), 0.0f, cosf(g_fp_yaw) };
+        if (g_fp_yaw_ok) {
+            const float lx[3] = { z[2], 0.0f, -z[0] }, ly[3] = { 0.0f, 1.0f, 0.0f }, lz[3] = { z[0], 0.0f, z[2] };   /* x = up cross z */
+            /* Turned as the head is (yaw, pitch, roll on the level heading),
+             * so what the eyes look at is in front of the game camera: in
+             * first person the game left out pieces behind a level camera
+             * (the town's centre roof hub overhead: 27 draws of one texture
+             * in third person, none in first; GE dumps 2026-10-23). */
+            float hr[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+#ifdef PSP2I_VR
+            vr_head hd;
+            memset(&hd, 0, sizeof hd);
+            if (g_vr_live && vr_head_get(&hd)) quat_mat3(hd.q, hr);
+#endif
+            memcpy(g_fp_cam_hr, hr, sizeof hr);
+            float x[3], y[3];
+            for (int i = 0; i < 3; i++) {                   /* the head's axes in the world: L * hr */
+                x[i] = lx[i] * hr[0] + ly[i] * hr[1] + lz[i] * hr[2];
+                y[i] = lx[i] * hr[3] + ly[i] * hr[4] + lz[i] * hr[5];
+                z[i] = lx[i] * hr[6] + ly[i] * hr[7] + lz[i] * hr[8];
+            }
+            float h[3];
+            for (int i = 0; i < 3; i++) h[i] = psp_read_f32(pl + 0x4B0u + 4u * (uint32_t)i);
+            h[1] += g_vr_fp_eye;
+            if (g_fp_head_ok) { h[0] += g_fp_head_off[0]; h[2] += g_fp_head_off[2]; }
+            const float *rows[3] = { x, y, z };
+            for (int r = 0; r < 3; r++) {
+                for (int c = 0; c < 3; c++) psp_write_f32(cam + 0x10u + 4u * (uint32_t)(c * 4 + r), rows[r][c]);
+                psp_write_f32(cam + 0x10u + 4u * (uint32_t)(12 + r), -(rows[r][0] * h[0] + rows[r][1] * h[1] + rows[r][2] * h[2]));
+            }
+            g_fp_cam = 1;
+            if (n_fp_cam++ == 0) fprintf(stderr, "vr: first person: the game camera at the player's head\n");
+#ifndef PSP2I_PROD
+            {   /* Every 2 s while walking: the headings (degrees, backward axis) and
+                 * where the player went, to check the walk follows the head:
+                 * moved = view + head when the stick is pushed straight ahead. */
+                static float lp[3];
+                static uint64_t n_walk;
+                const float mx = h[0] - lp[0], mz = h[2] - lp[2];
+                if (g_fp_stick_on && mx * mx + mz * mz > 1e-4f && n_walk++ % 60 == 0)
+                    fprintf(stderr, "vr: fp walk: game %.0f view %.0f head %+.0f moved %.0f; stick %d,%d -> %d,%d\n",
+                            (double)(g_fp_game_yaw * 57.29578f), (double)(g_fp_yaw * 57.29578f),
+                            (double)(atan2f(hr[6], hr[8]) * 57.29578f), (double)(atan2f(-mx, -mz) * 57.29578f),
+                            g_fp_stick_in[0] - 128, g_fp_stick_in[1] - 128, g_fp_stick_out[0] - 128, g_fp_stick_out[1] - 128);
+                memcpy(lp, h, sizeof lp);
+            }
+#endif
+        }
+    }
+    original();
+}
+
+/* SetProjection (0x08D7DA78): in first person with the camera at the head, a
+ * field-like perspective projection (x scale 1.15..2.5) is made wider after
+ * it is set, by the eyes' view times VR_FP_VIEW_MARGIN, so everything the
+ * game culls with sees past the edges of the eyes' view. Widening it after
+ * ApplyCamera didn't hold (the scene walk still saw x 1.368: the projection
+ * is set again before the walk), so it is done wherever it is set. The cull
+ * planes (built inside, from the narrow one) are wider by vr_cull_scale. */
+#define FN_SET_PROJECTION 0x08D7DA78u
+static uint64_t n_proj_wide;
+static void hook_set_projection(void (*original)(void)) {
+    original();
+    if (!g_head_on || !g_vr_first || !g_fp_cam || g_fp_other_cam || psp_read32(PSP2I_PROJ_ORTHO) == 1) return;
+    const float p0 = psp_read_f32(PSP2I_PROJ_MATRIX), p5 = psp_read_f32(PSP2I_PROJ_MATRIX + 20);
+    if (!(fabsf(p0) > 1.15f && fabsf(p0) < 2.5f)) return;
+    const float fx = g_vr_fov > 1.0f ? g_vr_fov : 1.0f, fy = g_vr_fov_y > 1.0f ? g_vr_fov_y : 1.0f;
+    g_fp_kx = fx * VR_FP_VIEW_MARGIN;
+    g_fp_ky = fy * VR_FP_VIEW_MARGIN;
+    g_fp_p0 = fabsf(p0); g_fp_p5 = fabsf(p5);
+    psp_write_f32(PSP2I_PROJ_MATRIX, p0 / g_fp_kx);
+    psp_write_f32(PSP2I_PROJ_MATRIX + 20, p5 / g_fp_ky);
+    if (n_proj_wide++ == 0) fprintf(stderr, "vr: first person: the game's projection %.1fx / %.1fx wider\n", (double)g_fp_kx, (double)g_fp_ky);
+}
+
+#ifndef PSP2I_PROD
+/* Dev, what the game leaves out of the frame: 0x08D7D270(flags[], desc[],
+ * i, ...) decides scene node i's visibility; flags[i] bit 0x1 = hidden.
+ * Counted per reason and logged every ~5 s with the view in use, to compare
+ * first and third person at the same place: already hidden or skipped
+ * (flags 0x401 before), the description's 0x10, its 0x20, else the frustum
+ * (or another) test. Desc entries are 144 bytes. */
+#define FN_NODE_VIS 0x08D7D270u
+static uint64_t n_node[6];                  /* visited, visible, pre-hidden, desc 0x10, desc 0x20, other */
+static void hook_node_vis(void (*original)(void)) {
+    if (!g_node_seen && g_apply_log_print) {
+        g_node_seen = 1;
+        size_t L = strlen(g_apply_log);
+        if (L < sizeof g_apply_log - 64)
+            snprintf(g_apply_log + L, sizeof g_apply_log - L, " {scene walk: global proj x %.3f y %.3f, wide %d}",
+                     (double)psp_read_f32(PSP2I_PROJ_MATRIX), (double)psp_read_f32(PSP2I_PROJ_MATRIX + 20), g_fp_cam);
+    }
+    const uint32_t fa = psp_cpu.r[4] + psp_cpu.r[6] * 4u, da = psp_cpu.r[5] + psp_cpu.r[6] * 144u;
+    const uint32_t before = psp_read32(fa), desc = psp_read32(da);
+    original();
+    const uint32_t after = psp_read32(fa);
+    n_node[0]++;
+    if (before & 0x401) n_node[2]++;
+    else if (!(after & 1)) n_node[1]++;
+    else if (desc & 0x10) n_node[3]++;
+    else if (desc & 0x20) n_node[4]++;
+    else n_node[5]++;
+    static uint64_t last_vb;
+    const uint64_t vb = psp_sched_vblank_count();
+    if (vb - last_vb >= 300) {
+        last_vb = vb;
+        fprintf(stderr, "vr: nodes (%s person): %llu visited, %llu visible; hidden: %llu already, %llu desc 0x10, %llu desc 0x20,"
+                        " %llu by a test\n", g_vr_first ? "first" : "third",
+                (unsigned long long)n_node[0], (unsigned long long)n_node[1], (unsigned long long)n_node[2],
+                (unsigned long long)n_node[3], (unsigned long long)n_node[4], (unsigned long long)n_node[5]);
+        memset(n_node, 0, sizeof n_node);
+    }
+}
+#endif
+
+static void hook_frustum_planes(void (*original)(void)) {
+    const float k = g_head_on ? g_vr_cull : 1.0f;
+    if (k <= 1.0f || psp_read32(PSP2I_PROJ_ORTHO) == 1) { original(); return; }
+    const float p0 = psp_read_f32(PSP2I_PROJ_MATRIX), p5 = psp_read_f32(PSP2I_PROJ_MATRIX + 20);
+    psp_write_f32(PSP2I_PROJ_MATRIX, p0 / k);
+    psp_write_f32(PSP2I_PROJ_MATRIX + 20, p5 / k);
+    original();
+    psp_write_f32(PSP2I_PROJ_MATRIX, p0);
+    psp_write_f32(PSP2I_PROJ_MATRIX + 20, p5);
+    if (n_cull_wide++ == 0) fprintf(stderr, "vr: cull planes %.1fx wider than the game's\n", (double)k);
+}
+
+/* Once per vblank: the eyes are drawn while the headset shows the game (or
+ * --stereo), with Direct3D 11 only (the backend with eye copies). */
+static void display_save(int res);            /* below */
+static int  g_res_saved;
+/* vr_fov_auto: the scales from the headset's eye view (the field's FOV:
+ * PSP2I_FIELD_PROJ_X across, 480:272), saved when they change. */
+static void fov_auto_update(void) {
+    float tx, ty;
+    if (!g_vr_fov_auto || !g_vr_live || !vr_view_tan(&tx, &ty)) return;
+    const float gx = 1.0f / PSP2I_FIELD_PROJ_X, gy = gx * (float)SCREEN_H / (float)SCREEN_W;
+    float fx = tx * 1.05f / gx, fy = ty * 1.05f / gy;
+    fx = fx < 1.0f ? 1.0f : fx > 3.0f ? 3.0f : fx;
+    fy = fy < 1.0f ? 1.0f : fy > 4.0f ? 4.0f : fy;
+    if (fabsf(fx - g_vr_fov) < 0.05f && fabsf(fy - g_vr_fov_y) < 0.05f) return;
+    g_vr_fov = fx; g_vr_fov_y = fy;
+    fprintf(stderr, "vr: fov scales %.2f / %.2f (the headset's view; the eye pictures' rows follow at the next start)\n",
+            (double)fx, (double)fy);
+    if (!g_headless) display_save(g_res_saved);
+}
+
+static void stereo_update(void) {
+    fov_auto_update();
+    /* Through short drops out of RUNNING too: the session left VISIBLE /
+     * FOCUSED for moments while the user still saw the game in 3D, and each
+     * drop turned the 3D off. Off after 3 s without RUNNING. */
+    static uint64_t running_vb;
+    const uint64_t vb = psp_sched_vblank_count();
+    if (g_vr_live && vr_status() == VR_RUNNING) running_vb = vb ? vb : 1;
+    const int recent = running_vb && vb - running_vb < 180;
+    const int on = g_renderer == REN_D3D11 &&
+                   (g_stereo_arg || (g_vr_live && g_vr_stereo && recent));
+    const int head = on && ((g_vr_live && g_vr_head) || g_fake_head);
+    psp_gpu_stereo st;
+    memset(&st, 0, sizeof st);
+    if (on) {
+        st.on = 1;
+        st.half_ipd = 0.5f * vr_ipd() * g_vr_world_scale;
+        st.converge = g_vr_dist_dm / 10.0f * g_vr_world_scale;   /* the screen's distance: no disparity there */
+        st.flat_after_clear = 1;                                  /* PSP2i draws its HUD in 3D after a second clear */
+        st.mono_is_left = 1;                                      /* two pictures, not three: the window shows the left eye */
+        st.eye_views = head;                                      /* head tracking: head_frame sets each eye per frame */
+        st.two_sided = head && g_vr_two_sided;
+        st.no_glow = head && !g_vr_glow;
+        st.on_frame = head ? head_frame : NULL;
+        st.fov_scale = head ? g_vr_fov : 1.0f;
+        st.fov_scale_y = head ? g_vr_fov_y : 1.0f;
+        st.hud_panel = psp2i_hud_panel;                           /* HUD and menus to the panel (d3d11.c draw_hud) */
+        st.fx_dist = PSP2I_FX_DIST;
+    }
+    if (on != g_stereo_on) fprintf(stderr, "vr: stereo %s\n", on ? "on (each eye drawn at the GE)" : "off");
+    if (head != g_head_on)
+        fprintf(stderr, "vr: head tracking %s (view %.1fx / %.1fx the game's across / up, cull %.1fx)\n",
+                head ? (g_vr_level ? "on, horizon levelled" : "on") : "off", (double)g_vr_fov, (double)g_vr_fov_y,
+                (double)g_vr_cull);
+    g_head_on = head;
+    psp_gpu_set_stereo(&st);
+    d3d11_set_mono_left(st.mono_is_left);
+    d3d11_eye_share(on && g_vr_live && !vr_share_failed());
+    g_stereo_on = on;
+}
+
+#ifndef PSP2I_PROD
+/* The capture folder with its parents (a missing parent lost every capture:
+ * "cannot write", 2026-10-23). */
+static void capture_dir_make(void) {
+    char p[sizeof g_capture_dir];
+    snprintf(p, sizeof p, "%s", g_capture_dir);
+    for (char *c = p + 1; *c; c++)
+        if (*c == '/' || *c == '\\') { const char k = *c; *c = '\0'; CreateDirectoryA(p, NULL); *c = k; }
+    CreateDirectoryA(p, NULL);
+}
+
+/* Each vblank, after the eye pictures are fetched: start a capture, save its
+ * pictures, close its report when psprecomp's trace is done. */
+static void vrshot_vblank(uint64_t vb) {
+    d3d11_eye_readback(g_vrshot_noshare);
+    if (g_vrshot_every && g_stereo_on && vb - g_vrshot_last >= g_vrshot_every) vrshot_request();
+    if (!g_vrshot_vb && InterlockedExchange(&g_vrshot_req, 0)) {
+        if (!g_stereo_on) { fprintf(stderr, "vr: capture: no stereo now\n"); return; }
+        char path[700];
+        capture_dir_make();
+        snprintf(path, sizeof path, "%s/vrshot_%06llu.txt", g_capture_dir, (unsigned long long)vb);
+        g_vrshot_txt = fopen(path, "w");
+        if (!g_vrshot_txt) { fprintf(stderr, "vr: capture: cannot write %s\n", path); return; }
+        g_vrshot_vb = g_vrshot_last = vb;
+        g_vrshot_noshare = 1;
+        vr_head h;
+        memset(&h, 0, sizeof h);
+        const int live = g_vr_live && vr_head_get(&h);
+        FILE *f = g_vrshot_txt;
+        fprintf(f, "vrshot vblank %llu, flip %llu\n", (unsigned long long)vb, (unsigned long long)psp_display_flips());
+        fprintf(f, "head %s: id %u q %.4f %.4f %.4f %.4f p %.3f %.3f %.3f m; eyes %.4f,%.4f,%.4f / %.4f,%.4f,%.4f\n",
+                live ? "tracked" : "none", h.id, (double)h.q[0], (double)h.q[1], (double)h.q[2], (double)h.q[3],
+                (double)h.p[0], (double)h.p[1], (double)h.p[2], (double)h.eye[0][0], (double)h.eye[0][1],
+                (double)h.eye[0][2], (double)h.eye[1][0], (double)h.eye[1][1], (double)h.eye[1][2]);
+        fprintf(f, "settings: head %d level %d fov %.2f/%.2f cull %.1f hud %.1f m size %.2f world scale %.1f; game tan_x %.4f\n",
+                g_head_on, g_vr_level, (double)g_vr_fov, (double)g_vr_fov_y, (double)g_vr_cull, (double)g_vr_hud_dist,
+                (double)g_vr_hud_size, (double)g_vr_world_scale, (double)psp_gpu_stereo_tan_half_fov());
+        fprintf(f, "game view 0x08FA98A0:");
+        for (int k = 0; k < 16; k++) fprintf(f, " %.3f", (double)psp_read_f32(PSP2I_VIEW_MATRIX + 4u * (uint32_t)k));
+        fprintf(f, "\n");
+        psp_gpu_stereo_trace(f);
+        fprintf(stderr, "vr: capture %llu started\n", (unsigned long long)vb);
+        return;
+    }
+    if (!g_vrshot_vb) return;
+    if (g_vrshot_noshare && g_eye_new && g_eye_px[0] && g_eye_px[1]) {
+        char path[700];
+        for (int e = 0; e < 2; e++) {
+            snprintf(path, sizeof path, "%s/vrshot_%06llu_%c.ppm", g_capture_dir, (unsigned long long)g_vrshot_vb, e ? 'R' : 'L');
+            vrshot_ppm(path, g_eye_px[e], g_eye_w, g_eye_h);
+        }
+        int hw = 0, hh = 0;
+        const uint32_t *hud = g_renderer == REN_D3D11 ? d3d11_hud_picture(&hw, &hh) : NULL;   /* the HUD panel's picture */
+        if (hud) {
+            snprintf(path, sizeof path, "%s/vrshot_%06llu_H.ppm", g_capture_dir, (unsigned long long)g_vrshot_vb);
+            vrshot_ppm(path, hud, hw, hh);
+        }
+        snprintf(g_vrshot_eyes, sizeof g_vrshot_eyes, "eyes: tag %u, %dx%d, saved at vblank %llu\n", g_eye_px_tag,
+                 g_eye_w, g_eye_h, (unsigned long long)vb);
+        g_vrshot_noshare = 0;
+    }
+    if (vb - g_vrshot_vb > 300) {                               /* 5 s: give up on what is missing */
+        if (g_vrshot_noshare) fprintf(stderr, "vr: capture: no eye pictures came back\n");
+        g_vrshot_noshare = 0;
+        if (psp_gpu_stereo_tracing()) psp_gpu_stereo_trace(NULL);
+    }
+    if (!g_vrshot_noshare && !psp_gpu_stereo_tracing()) {
+        if (g_vrshot_txt) {
+            fputs(g_vrshot_eyes[0] ? g_vrshot_eyes : "eyes: none came back\n", g_vrshot_txt);
+            fclose(g_vrshot_txt);
+        }
+        g_vrshot_eyes[0] = '\0';
+        g_vrshot_txt = NULL;
+        fprintf(stderr, "vr: capture %llu -> %s/vrshot_%06llu*\n", (unsigned long long)g_vrshot_vb, g_capture_dir,
+                (unsigned long long)g_vrshot_vb);
+        g_vrshot_vb = 0;
+    }
+}
+#endif
+
+/* The eye pictures' half-FOV tangents: the game's, times vr_fov_scale(_y)
+ * for pictures drawn from the head (tag != 0); vertical 0 = from the shape. */
+static float eye_tan(uint32_t tag) {
+    return psp_gpu_stereo_tan_half_fov() * (tag ? g_eye_fs_x : 1.0f);
+}
+static float eye_tan_y(uint32_t tag) {   /* the GE's y scale over x is 480:272 times ky/kx (first person's widening) */
+    return tag ? psp_gpu_stereo_tan_half_fov() * (float)SCREEN_H / (float)SCREEN_W * g_eye_kyx * g_eye_fs_y : 0.0f;
+}
+
+/* The eye pictures with the overlay (menus, FPS) on top, as compose() does
+ * for the S-times picture: each overlay pixel covers its block. */
+static void compose_eyes(void) {
+    const int S = g_eye_w / SCREEN_W, SY = g_eye_h / SCREEN_H, W = g_eye_w;
+    for (int e = 0; e < 2; e++) {
+        if (!g_eye_rgba[e]) g_eye_rgba[e] = (uint32_t *)malloc((size_t)SCREEN_W * 6 * SCREEN_H * 12 * 4);
+        if (!g_eye_rgba[e]) return;
+        for (int y = 0; y < SCREEN_H; y++)
+            for (int x = 0; x < SCREEN_W; x++) {
+                const int i = y * SCREEN_W + x;
+                const int flat = g_rgba[i] != g_frame[i];
+                for (int k = 0; k < SY; k++) {
+                    uint32_t *dst = g_eye_rgba[e] + (size_t)(y * SY + k) * W + (size_t)x * S;
+                    if (flat) for (int j = 0; j < S; j++) dst[j] = g_rgba[i];
+                    else memcpy(dst, g_eye_px[e] + (size_t)(y * SY + k) * W + (size_t)x * S, (size_t)S * 4);
+                }
+            }
+    }
+}
+#endif
+
+#ifdef PSP2I_VR
+/* First person: the attack nudge (VR_PLAN F1). After walking left, right or
+ * back the character faces where it walked, and an attack goes that way, not
+ * where the head looks. From a player trace (2026-10-23, ADDRESS_MAP): the
+ * facing is player +0x70's rotation (its forward row x, z at +0x90, +0x98);
+ * the stick turns it 20 degrees a game frame, from 1-3 frames after the push,
+ * and letting the stick go mid-turn snaps it to the stick's heading a frame
+ * later; a stick pushed during an attack's start doesn't turn it. So the
+ * attack is held back: the stick points ahead (the walk turn below aims it at
+ * the head) until it turns that way, is let go for FP_NUDGE_GAP frames, then
+ * the attack is pressed. Not while R is held or its lock-on (player +0x214)
+ * is set: the lock-on picks the target. Only what this player presses. */
+#define FP_NUDGE_BUTTONS 0x9000u    /* Square, Triangle */
+#define FP_NUDGE_MIN     0.5236f    /* 30 degrees between the facing and the view */
+#define FP_NUDGE_HOLD    6          /* game frames of stick at most */
+#define FP_NUDGE_GAP     2          /* game frames of centred stick: the snap */
+#define FP_NUDGE_PRESS   2          /* game frames the attack is pressed at least */
+#define FP_NUDGE_COMBO   30         /* game frames after an attack: no nudge (combos, Just Attacks keep their timing) */
+enum { NUDGE_OFF, NUDGE_TURN, NUDGE_GAP, NUDGE_PRESS };
+static int      g_nudge;
+static uint32_t g_nudge_btn, g_nudge_prev;
+static uint64_t g_nudge_flip, g_nudge_flip0, g_nudge_turned, g_attack_flip;
+static float    g_nudge_err0;
+
+static float wrap_pi(float a) { return a - 6.2831853f * floorf((a + 3.1415927f) / 6.2831853f); }
+
+/* The local player's facing, atan2(x, z) of its forward axis. */
+static int fp_face(uint32_t pl, float *a) {
+    const float x = psp_read_f32(pl + 0x90u), z = psp_read_f32(pl + 0x98u);
+    if (!(x * x + z * z > 0.25f)) return 0;      /* not a rotation (or NaN) */
+    *a = atan2f(x, z);
+    return 1;
+}
+
+static void fp_nudge(uint32_t *bits, uint8_t *ax, uint8_t *ay) {
+    const uint32_t raw = *bits, down = raw & ~g_nudge_prev & FP_NUDGE_BUTTONS;
+    g_nudge_prev = raw;
+    const uint32_t pl = gamelog_local_player();
+    vr_head hd;
+    if (!g_vr_fp_nudge || !g_head_on || !g_vr_first || !g_fp_cam || !g_fp_yaw_ok || g_rep_on || g_menu.open || !pl ||
+        !g_vr_live || !vr_head_get(&hd)) {
+        if (g_nudge && g_nudge < NUDGE_PRESS) *bits |= g_nudge_btn;   /* the held-back attack still goes */
+        g_nudge = NUDGE_OFF;
+        return;
+    }
+    float hr[9], face;
+    quat_mat3(hd.q, hr);
+    const float look = g_fp_yaw + atan2f(hr[6], hr[8]) + 3.1415927f;   /* g_fp_yaw is the backward axis */
+    const int have = fp_face(pl, &face);
+    const float err = have ? wrap_pi(look - face) : 0.0f;
+    const uint64_t fl = psp_display_flips(), last = g_attack_flip;
+    if (down) g_attack_flip = fl;
+    switch (g_nudge) {
+    case NUDGE_OFF:
+        if (!down || !have || fabsf(err) <= FP_NUDGE_MIN || (last && fl - last < FP_NUDGE_COMBO)) return;
+        if ((raw & 0x0200u) || psp_read32(pl + 0x214u) != 0) {
+#ifndef PSP2I_PROD
+            fprintf(stderr, "vr: fp nudge: none, locked on (facing %+.0f from the view)\n", (double)(err * 57.29578f));
+#endif
+            return;
+        }
+        g_nudge = NUDGE_TURN;
+        g_nudge_btn = down;
+        g_nudge_flip = g_nudge_flip0 = fl;
+        g_nudge_err0 = err;
+        /* fall through */
+    case NUDGE_TURN:
+        *bits &= ~g_nudge_btn;
+        /* At least 2 frames of this stick (the game takes the heading 1-3
+         * frames after the push) and the facing nearer the view: a facing
+         * still turning from the player's own stick doesn't count, its snap
+         * would go the old way (headset run 2026-10-23: walking back). */
+        if ((fl - g_nudge_flip0 >= 2 && have && fabsf(err) < fabsf(g_nudge_err0) - 0.26f) || fabsf(err) <= FP_NUDGE_MIN ||
+            fl - g_nudge_flip0 >= FP_NUDGE_HOLD) {
+            g_nudge = NUDGE_GAP;              /* turning the head's way: the game has the heading */
+            g_nudge_flip = fl;
+            g_nudge_turned = fl - g_nudge_flip0;
+            *ax = *ay = 128;
+        } else {
+            *ax = 128; *ay = 1;               /* straight ahead, turned to the head below */
+        }
+        return;
+    case NUDGE_GAP:
+        *bits &= ~g_nudge_btn;
+        *ax = *ay = 128;
+        if (fl - g_nudge_flip < FP_NUDGE_GAP) return;
+        g_nudge = NUDGE_PRESS;
+        g_nudge_flip = fl;
+#ifndef PSP2I_PROD
+        fprintf(stderr, "vr: fp nudge: facing %+.0f from the view, stick %llu frames, then %+.0f; attack 0x%04X sent\n",
+                (double)(g_nudge_err0 * 57.29578f), (unsigned long long)g_nudge_turned,
+                (double)(err * 57.29578f), g_nudge_btn);
+#endif
+        /* fall through */
+    case NUDGE_PRESS:
+        *bits |= g_nudge_btn;                 /* pressed even if already let go */
+        if (fl - g_nudge_flip >= FP_NUDGE_PRESS) g_nudge = NUDGE_OFF;
+        return;
+    }
+}
+#endif
+
 static void ctrl_commit(void) {
     uint32_t bits = g_script_bits | g_pad_bits;
 #ifdef _WIN32
@@ -815,7 +2290,34 @@ static void ctrl_commit(void) {
     }
     bits = menu_filter_game(&g_menu, bits & ~PRESS_MENU);
     if (g_menu.open) ax = ay = 128;
+#ifdef PSP2I_VR
+    /* First person: the stick walks where the head looks. The game moves
+     * relative to its camera (g_fp_game_yaw); the head looks along first
+     * person's heading plus its own yaw, so the stick is turned by the
+     * difference. Only the stick changes (what this player presses). */
+    g_fp_stick_on = 0;
+    vr_head hd;
+    fp_nudge(&bits, &ax, &ay);
+    if (g_head_on && g_vr_first && g_fp_cam && g_fp_yaw_ok && !g_rep_on && (ax != 128 || ay != 128) &&
+        g_vr_live && vr_head_get(&hd)) {
+        float hr[9];
+        quat_mat3(hd.q, hr);
+        const float d = g_fp_yaw + atan2f(hr[6], hr[8]) - g_fp_game_yaw, cd = cosf(d), sd = sinf(d);
+        const float sx = (float)ax - 128.0f, sf = 128.0f - (float)ay;      /* right, ahead */
+        float rx = sx * cd - sf * sd, rf = sx * sd + sf * cd;
+        const float big = fmaxf(fabsf(rx), fabsf(rf));
+        if (big > 127.0f) { rx *= 127.0f / big; rf *= 127.0f / big; }    /* the same direction, inside the pad's square */
+        g_fp_stick_in[0] = ax; g_fp_stick_in[1] = ay;
+        ax = (uint8_t)lroundf(128.0f + rx);
+        ay = (uint8_t)lroundf(128.0f - rf);
+        g_fp_stick_out[0] = ax; g_fp_stick_out[1] = ay;
+        g_fp_stick_on = 1;
+    }
+#endif
     if (!g_rep_on) rec_pad(bits, ax, ay);
+#ifndef PSP2I_PROD
+    g_sent_bits = bits; g_sent_ax = ax; g_sent_ay = ay;
+#endif
     psp_ctrl_set(bits, ax, ay);
 }
 
@@ -832,10 +2334,13 @@ static int  g_last_windowed = RES_DEFAULT;  /* where Alt+Enter returns from full
 
 static int g_res_saved = RES_DEFAULT;       /* what psp2i_display.ini holds */
 static int g_ren_saved = REN_D3D11;
+static int g_render_scale = 1;              /* render_scale=: internal resolution 1..6 (D3D11; 5, 6 for VR) */
+static int g_render_scale_arg;              /* --render-scale for one run; 0 = the saved one */
 static int g_vol_saved[VOL_N] = { VOL_STEPS, VOL_STEPS, VOL_STEPS };
 static int g_att_saved = ATT_DEFAULT;
 static int g_openh264 = 1;                  /* fetch Cisco's OpenH264 for movies (h264_openh264.c) */
 static char g_font_key[260] = "system";     /* the game's text font (font_win.h): system, psp, or a file in fonts/ */
+static char g_texpacks[1024];               /* texture pack folders, ';'-separated (texreplace.h); empty = off */
 
 /* "80" -> 8 tenths (0..100, rounded to 10%). */
 static int vol_parse(const char *s) {
@@ -846,11 +2351,12 @@ static int vol_parse(const char *s) {
 static int display_load(void) {
     FILE *f = g_display_ini[0] ? fopen(g_display_ini, "r") : NULL;
     if (!f) return -1;
-    char line[128];
+    char line[1100];                        /* texture_packs= can be long */
     int res = -1;
     while (fgets(line, sizeof line, f)) {
         if (!strncmp(line, "resolution=", 11)) res = menu_res_parse(line + 11);
         else if (!strncmp(line, "renderer=", 9)) { const int r = menu_ren_parse(line + 9); if (r >= 0) g_ren_saved = r; }
+        else if (!strncmp(line, "render_scale=", 13)) { const int r = atoi(line + 13); g_render_scale = r < 1 ? 1 : r > 6 ? 6 : r; }
         else if (!strncmp(line, "master_volume=", 14)) g_vol_saved[VOL_MASTER] = vol_parse(line + 14);
         else if (!strncmp(line, "music_volume=", 13))  g_vol_saved[VOL_MUSIC] = vol_parse(line + 13);
         else if (!strncmp(line, "sfx_volume=", 11))    g_vol_saved[VOL_SFX] = vol_parse(line + 11);
@@ -861,6 +2367,111 @@ static int display_load(void) {
         else if (!strncmp(line, "right_stick=", 12))   g_rs_on = strncmp(line + 12, "off", 3) != 0;
         else if (!strncmp(line, "test_tick_pacing=", 17)) g_test_ticks = !strncmp(line + 17, "on", 2);
         else if (!strncmp(line, "test_30hz_logic=", 16))  g_test_logic = !strncmp(line + 16, "on", 2);
+        else if (!strncmp(line, "vr=", 3))             g_vr_on = !strncmp(line + 3, "on", 2);
+        else if (!strncmp(line, "vr_stereo=", 10))     g_vr_stereo = strncmp(line + 10, "off", 3) != 0;
+        else if (!strncmp(line, "vr_head=", 8))        g_vr_head = strncmp(line + 8, "off", 3) != 0;
+        else if (!strncmp(line, "vr_level=", 9))       g_vr_level = strncmp(line + 9, "off", 3) != 0;
+        else if (!strncmp(line, "vr_fov_auto=", 12)) g_vr_fov_auto = strncmp(line + 12, "off", 3) != 0;
+        else if (!strncmp(line, "vr_fov_scale=", 13)) {
+            const float k = (float)atof(line + 13);
+            if (k >= 1.0f && k <= 3.0f) g_vr_fov = k;
+        }
+        else if (!strncmp(line, "vr_hud_distance=", 16)) {
+            const float d = (float)atof(line + 16);
+            if (d >= 0.5f && d <= 20.0f) g_vr_hud_dist = d;
+        }
+        else if (!strncmp(line, "vr_menu_screen=", 15)) g_vr_menu_screen = strncmp(line + 15, "off", 3) != 0;
+        else if (!strncmp(line, "vr_hud_follow=", 14)) {
+            const float d = (float)atof(line + 14);
+            if (d >= 0.0f && d <= 90.0f) g_vr_hud_follow = d;
+        }
+        else if (!strncmp(line, "vr_hud_size=", 12)) {
+            const float k = (float)atof(line + 12);
+            if (k >= 0.2f && k <= 1.0f) g_vr_hud_size = k;
+        }
+        else if (!strncmp(line, "vr_fov_scale_y=", 15)) {
+            const float k = (float)atof(line + 15);
+            if (k >= 1.0f && k <= 4.0f) g_vr_fov_y = k;
+        }
+        else if (!strncmp(line, "vr_cull_scale=", 14)) {
+            const float k = (float)atof(line + 14);
+            if (k >= 1.0f && k <= 50.0f) g_vr_cull = k;
+        }
+        else if (!strncmp(line, "vr_world_scale=", 15)) {
+            const float k = (float)atof(line + 15);
+            if (k >= 1.0f && k <= 100.0f) g_vr_world_scale = k;
+        }
+        else if (!strncmp(line, "vr_view=", 8))        g_vr_first = !strncmp(line + 8, "first", 5);
+        else if (!strncmp(line, "vr_fp_eye=", 10)) {
+            const float k = (float)atof(line + 10);
+            if (k >= 1.0f && k <= 20.0f) g_vr_fp_eye = k;
+        }
+        else if (!strncmp(line, "vr_cull_all=", 12)) g_vr_cull_all = strncmp(line + 12, "off", 3) != 0;
+        else if (!strncmp(line, "vr_two_sided=", 13)) g_vr_two_sided = strncmp(line + 13, "off", 3) != 0;
+        else if (!strncmp(line, "vr_glow=", 8)) g_vr_glow = strncmp(line + 8, "off", 3) != 0;
+        else if (!strncmp(line, "vr_aniso=", 9)) {
+            const int k = atoi(line + 9);
+            if (k >= 0 && k <= 16) g_vr_aniso = k;
+        }
+        else if (!strncmp(line, "vr_sharpen=", 11)) {
+            const float k = (float)atof(line + 11);
+            if (k >= 0.0f && k <= 1.0f) g_vr_sharpen = k;
+        }
+        else if (!strncmp(line, "vr_fp_near=", 11)) {
+            const float k = (float)atof(line + 11);
+            if (k >= 0.0f && k <= 5.0f) g_vr_fp_near = k;
+        }
+        else if (!strncmp(line, "vr_fp_forward=", 14)) {
+            const float k = (float)atof(line + 14);
+            if (k >= 0.0f && k <= 3.0f) g_vr_fp_fwd = k;
+        }
+        else if (!strncmp(line, "vr_fp_nudge=", 12)) g_vr_fp_nudge = strncmp(line + 12, "off", 3) != 0;
+        else if (!strncmp(line, "vr_fp_hide_head=", 16)) g_vr_fp_hide_head = strncmp(line + 16, "off", 3) != 0;
+        else if (!strncmp(line, "vr_fp_eye_up=", 13)) {
+            const float k = (float)atof(line + 13);
+            if (k >= -2.0f && k <= 3.0f) g_vr_fp_eye_up = k;
+        }
+        else if (!strncmp(line, "vr_fp_eye_fwd=", 14)) {
+            const float k = (float)atof(line + 14);
+            if (k >= -1.0f && k <= 3.0f) g_vr_fp_eye_fwd = k;
+        }
+        else if (!strncmp(line, "vr_input=", 9))     g_vr_motion = !strncmp(line + 9, "motion", 6);
+        else if (!strncmp(line, "vr_arms=", 8))      g_vr_arms = strncmp(line + 8, "off", 3) != 0;
+        else if (!strncmp(line, "vr_avatar=", 10))   g_vr_avatar = strncmp(line + 10, "off", 3) != 0;
+        else if (!strncmp(line, "vr_avatar_legs=", 15)) g_vr_avatar_still = !strncmp(line + 15, "still", 5);
+#ifdef PSP2I_VR
+        else if (!strncmp(line, "vr_hand_cal=", 12)) {  /* 18 floats: the hands' rotation offsets (vr_body.h) */
+            float c[18];
+            const char *q = line + 12;
+            int k = 0;
+            for (char *e; k < 18; k++, q = e) {
+                c[k] = strtof(q, &e);
+                if (e == q) break;
+            }
+            if (k == 18) vr_body_hand_cal_set(c);
+        }
+#endif
+        else if (!strncmp(line, "vr_menu_dpad=", 13)) g_vr_menu_dpad = strncmp(line + 13, "off", 3) != 0;
+        else if (!strncmp(line, "vr_swing_speed=", 15)) {
+            const float k = (float)atof(line + 15);
+            if (k >= 1.0f && k <= 5.0f) g_vr_swing = k;
+        }
+        else if (!strncmp(line, "vr_fp_scale=", 12)) {
+            const float k = (float)atof(line + 12);
+            if (k >= 0.5f && k <= 20.0f) g_vr_fp_scale = k;
+        }
+        else if (!strncmp(line, "vr_distance=", 12) || !strncmp(line, "vr_width=", 9)) {
+            const int dist = line[3] == 'd';
+            int dm = (int)(atof(line + (dist ? 12 : 9)) * 10.0 + 0.5);
+            dm = (dm + VR_STEP_DM / 2) / VR_STEP_DM * VR_STEP_DM;   /* to the menu's 0.5 m steps */
+            const int lo = dist ? VR_DIST_MIN_DM : VR_WIDTH_MIN_DM, hi = dist ? VR_DIST_MAX_DM : VR_WIDTH_MAX_DM;
+            dm = dm < lo ? lo : dm > hi ? hi : dm;
+            if (dist) g_vr_dist_dm = dm; else g_vr_width_dm = dm;
+        }
+        else if (!strncmp(line, "texture_packs=", 14)) {
+            snprintf(g_texpacks, sizeof g_texpacks, "%s", line + 14);
+            g_texpacks[strcspn(g_texpacks, "\r\n")] = '\0';
+        }
         else if (!strncmp(line, "font=", 5)) {
             snprintf(g_font_key, sizeof g_font_key, "%s", line + 5);
             g_font_key[strcspn(g_font_key, "\r\n")] = '\0';
@@ -879,6 +2490,9 @@ static void display_save(int res) {
     fprintf(f, "resolution=%s\n", menu_res_name(res));
     fprintf(f, "; renderer: d3d11 or opengl (used from the next start)\n");
     fprintf(f, "renderer=%s\n", menu_ren_key(g_ren_saved));
+    fprintf(f, "; internal resolution, Direct3D 11 only: 1 = the PSP's 480x272, 2..6 = that many times sharper (used from the next start;"
+               " 5 and 6 cost a lot, for VR: engine menu VR > RESOLUTION)\n");
+    fprintf(f, "render_scale=%d\n", g_render_scale);
     fprintf(f, "; volumes 0..100 (%%); attenuation while other programs play sound: off, -6db, -12db, -20db\n");
     fprintf(f, "master_volume=%d\nmusic_volume=%d\nsfx_volume=%d\n",
             g_vol_saved[VOL_MASTER] * 10, g_vol_saved[VOL_MUSIC] * 10, g_vol_saved[VOL_SFX] * 10);
@@ -894,6 +2508,87 @@ static void display_save(int res) {
     fprintf(f, "right_stick=%s\nrs_speed=%.2f\n", g_rs_on ? "on" : "off", (double)menu_rs_speed(&g_menu));
     fprintf(f, "; menu TESTS at 60 / 120 fps (off by default): the game's tick counters paced as at 30; frame-counted logic at 30 Hz\n");
     fprintf(f, "test_tick_pacing=%s\ntest_30hz_logic=%s\n", g_test_ticks ? "on" : "off", g_test_logic ? "on" : "off");
+    fprintf(f, "; VR (OpenXR): on = the game on a screen in the headset; its distance and width in metres\n");
+    fprintf(f, "vr=%s\nvr_distance=%d.%d\nvr_width=%d.%d\n", g_vr_on ? "on" : "off",
+            g_vr_dist_dm / 10, g_vr_dist_dm % 10, g_vr_width_dm / 10, g_vr_width_dm % 10);
+    fprintf(f, "; VR stereo (Direct3D 11): on = a 3D window into the game (as wide as its view), off = the flat screen;"
+               " world scale = game units per metre (sets the depth)\n");
+    fprintf(f, "vr_stereo=%s\nvr_world_scale=%.1f\n", g_vr_stereo ? "on" : "off", (double)g_vr_world_scale);
+    fprintf(f, "; VR head tracking (with stereo): on = you see the game from your head (at the game's field of view), off = the 3D window;"
+               " level: on = the horizon stays level (the game camera's tilt taken out)\n");
+    fprintf(f, "vr_head=%s\nvr_level=%s\n", g_vr_head ? "on" : "off", g_vr_level ? "on" : "off");
+    fprintf(f, "; with head tracking: fov scale = the view as that many times the game's across (1.0..3.0) and up (_y, 1.0..4.0;"
+               " wider = less sharp); cull scale = the game's object culling that much wider (1 = the game's)\n");
+    fprintf(f, "; with head tracking: fov auto = on: the fov scales follow the headset's own view (no edge of the picture in"
+               " sight), off = the fov scales below as set\n");
+    fprintf(f, "vr_fov_auto=%s\n", g_vr_fov_auto ? "on" : "off");
+    fprintf(f, "vr_fov_scale=%.1f\nvr_fov_scale_y=%.1f\nvr_cull_scale=%.1f\n", (double)g_vr_fov, (double)g_vr_fov_y,
+            (double)g_vr_cull);
+    fprintf(f, "; with head tracking: cull all = on: every object the game has loaded is drawn (nothing missing behind you"
+               " or far away; costs some speed), off = the game's own culling (widened by cull scale)\n");
+    fprintf(f, "vr_cull_all=%s\n", g_vr_cull_all ? "on" : "off");
+    fprintf(f, "; with head tracking: two sided = on: both sides of the 3D scene's faces drawn (walls and roofs the PSP camera"
+               " never saw from behind stay solid), off = the game's back-face culling\n");
+    fprintf(f, "vr_two_sided=%s\n", g_vr_two_sided ? "on" : "off");
+    fprintf(f, "; with head tracking: glow = on: the game's glow (bloom) in the headset, off = left out (VR > GLOW)\n");
+    fprintf(f, "vr_glow=%s\n", g_vr_glow ? "on" : "off");
+    fprintf(f, "; with head tracking: the HUD and menus on a panel this many metres away, this size of the game's view (0.2..1.0);"
+               " follow = how many degrees you can look away before it glides back in front of you (0 = it stays where recenter put it)\n");
+    fprintf(f, "vr_hud_distance=%.1f\nvr_hud_size=%.2f\nvr_hud_follow=%.0f\n", (double)g_vr_hud_dist, (double)g_vr_hud_size,
+            (double)g_vr_hud_follow);
+    fprintf(f, "; with head tracking: view first = you are in your character's head (gamepad: L3 twice quickly toggles), third = behind it;"
+               " fp eye = the eye height in game units (the character is ~5.8 tall); fp forward = the eyes this far ahead of the"
+               " head along your gaze (so your own head stays behind you); fp near = nothing drawn closer than this to your eyes"
+               " (hides your own head when running); fp scale = game units per metre in first person\n");
+    fprintf(f, "vr_view=%s\nvr_fp_eye=%.1f\nvr_fp_forward=%.1f\nvr_fp_near=%.1f\nvr_fp_scale=%.1f\n", g_vr_first ? "first" : "third",
+            (double)g_vr_fp_eye, (double)g_vr_fp_fwd, (double)g_vr_fp_near, (double)g_vr_fp_scale);
+    fprintf(f, "; first person: fp nudge = on: an attack (Square, Triangle) first turns your character to where you look"
+               " (not while R locks on), off = the attack goes the way the character faces\n");
+    fprintf(f, "vr_fp_nudge=%s\n", g_vr_fp_nudge ? "on" : "off");
+    fprintf(f, "; first person: hide head = on: your character's head is drawn shrunk away and the eyes sit where its face"
+               " is (fp forward / fp near apply only with it off)\n");
+    fprintf(f, "vr_fp_hide_head=%s\n", g_vr_fp_hide_head ? "on" : "off");
+    fprintf(f, "; first person with the head hidden: the eyes this many game units above the character's head joint and ahead"
+               " of it (the character is about 16 of these tall)\n");
+    fprintf(f, "vr_fp_eye_up=%.2f\nvr_fp_eye_fwd=%.2f\n", (double)g_vr_fp_eye_up, (double)g_vr_fp_eye_fwd);
+    fprintf(f, "; VR input: pad = a gamepad (or the VR controllers as one), motion = the VR controllers as in PSUEx-VR: hands"
+               " shown, swing or trigger attacks, grip + swing / trigger the Photon Art, left grip R (lock-on), right grip L,"
+               " left stick click manual aim, right stick click START, both grips + Cross / Circle / Square recenter / first or"
+               " third person / engine menu, both grips + left stick click the left stick as the D-pad\n");
+    fprintf(f, "vr_input=%s\n", g_vr_motion ? "motion" : "pad");
+    fprintf(f, "; VR arms (with VR input motion): on = your character's arms reach for the controllers (only how it is drawn"
+               " here), off = the game's own arm animation\n");
+    fprintf(f, "vr_arms=%s\n", g_vr_arms ? "on" : "off");
+    fprintf(f, "; VR avatar (with the arms on): on = your character is drawn from you, as in VRChat: no attack moves its"
+               " upper body, it turns to where you look, the legs walk (left, right and back with the game's R-strafe legs,"
+               " learned the first time you strafe that way holding R, kept in psp2i_vr_legs.bin); off = the game's own"
+               " animation. vr_avatar_legs: walk, or still (the legs stand)\n");
+    fprintf(f, "vr_avatar=%s\nvr_avatar_legs=%s\n", g_vr_avatar ? "on" : "off", g_vr_avatar_still ? "still" : "walk");
+#ifdef PSP2I_VR
+    {   /* written once calibrated (both grips + both triggers in MOTION) */
+        float c[18];
+        if (vr_body_hand_cal_get(c)) {
+            fprintf(f, "; VR hands: their rotation against the controllers, from the hand calibration (both grips + both"
+                       " triggers, holding the controllers as your character holds its hands); delete the line to undo it\n");
+            fprintf(f, "vr_hand_cal=");
+            for (int k = 0; k < 18; k++) fprintf(f, "%s%.5f", k ? " " : "", (double)c[k]);
+            fputc('\n', f);
+        }
+    }
+#endif
+    fprintf(f, "; with motion: swing a controller faster than swing speed (m/s, 1.0..5.0) to attack (Square); with that hand's"
+               " grip held, Triangle (the Photon Art slot)\n");
+    fprintf(f, "vr_swing_speed=%.1f\n", (double)g_vr_swing);
+    fprintf(f, "; VR: menu dpad = on: in the game's menus the left stick moves the cursor as the D-pad (for a moment after a"
+               " menu closes too; Start ends it at once), off = the stick stays the stick\n");
+    fprintf(f, "vr_menu_dpad=%s\n", g_vr_menu_dpad ? "on" : "off");
+    fprintf(f, "; VR image quality (from the next start, VR only): aniso = texture filtering 0 (off) or 2..16;"
+               " sharpen = sharpening of the headset's pictures 0.0 (off) .. 1.0\n");
+    fprintf(f, "vr_aniso=%d\nvr_sharpen=%.2f\n", g_vr_aniso, (double)g_vr_sharpen);
+    fprintf(f, "; menu screen: on = the game's menu scenes (continue, mission select, loading) on a flat screen instead of in 3D around you\n");
+    fprintf(f, "vr_menu_screen=%s\n", g_vr_menu_screen ? "on" : "off");
+    fprintf(f, "; PPSSPP texture packs: folders holding a textures.ini, ';'-separated, later ones win (relative to the exe); empty = off\n");
+    fprintf(f, "texture_packs=%s\n", g_texpacks);
     fclose(f);
 }
 
@@ -935,7 +2630,32 @@ static void menu_step(void) {
     uint8_t ax = g_pad_ax, ay = g_pad_ay;
     if (g_script_stick >= 0) { ax = g_stick[g_script_stick].x; ay = g_stick[g_script_stick].y; }
     uint32_t held = menu_inputs(psp, ax, ay) | g_host_held;
-    if (input_sdl_host_buttons() & (INPUT_HOST_GUIDE | INPUT_HOST_RSTICK)) held |= MI_TOGGLE;
+    {   /* R3 or Guide opens the engine menu; not R3 while L3 is held in VR
+         * (L3 held + R3: the menu finder's label, dev builds) */
+        const uint32_t hb = input_sdl_host_buttons();
+        const int l3_chord = g_vr_live && (hb & INPUT_HOST_LSTICK);
+        if ((hb & INPUT_HOST_GUIDE) || ((hb & INPUT_HOST_RSTICK) && !l3_chord)) held |= MI_TOGGLE;
+    }
+#ifdef PSP2I_VR
+    if (g_vr_host & VR_HOST_MENU) held |= MI_TOGGLE;
+    snprintf(g_menu.vr_status, sizeof g_menu.vr_status, "%s", g_vr_live ? vr_status_name(vr_status()) : "");
+    /* WORLD SIZE: the scale of the view in use, as a percentage of life
+     * size (VR_FP_SCALE_DEFAULT game units per metre = 100%). */
+    g_menu.vr_first = g_vr_first;
+    g_menu.vr_world_pct = (int)lroundf(VR_FP_SCALE_DEFAULT * 100.0f / (g_vr_first ? g_vr_fp_scale : g_vr_world_scale));
+    g_menu.vr_hud_dm = (int)lroundf(g_vr_hud_dist * 10.0f);
+    g_menu.vr_res = g_render_scale;                     /* RESOLUTION: the saved render scale */
+    g_menu.vr_res_now = g_hi_s;
+    g_menu.vr_sharpen = (int)lroundf(g_vr_sharpen * VR_SHARPEN_STEPS);
+    g_menu.vr_filter = menu_vr_filter_of(g_vr_aniso);
+    g_menu.vr_motion = g_vr_motion;
+    g_menu.vr_glow = g_vr_glow;
+    /* RESTART: sharpening needs a start in VR (its shader), mipmaps a start
+     * with filtering on (they're made when textures are first loaded). */
+    g_menu.vr_quality_restart = 0;
+    if (g_renderer == REN_D3D11 && g_vr_sharpen > 0 && !d3d11_sharpen_ready()) g_menu.vr_quality_restart |= VR_RESTART_SHARPEN;
+    if (g_renderer == REN_D3D11 && (g_vr_aniso > 0) != d3d11_tex_mips()) g_menu.vr_quality_restart |= VR_RESTART_FILTER;
+#endif
 
     snprintf(g_menu.sega, sizeof g_menu.sega, "%s", online_sega_redirect());
     snprintf(g_menu.adhoc, sizeof g_menu.adhoc, "%s", online_adhoc_server());
@@ -1011,9 +2731,40 @@ static void menu_step(void) {
     if (fx & MFX_SWAP_OC) {
         g_swap_oc = g_menu.swap_oc;
         input_sdl_set_swap_circle_cross(g_swap_oc);
+#ifdef PSP2I_VR
+        vr_set_swap_circle_cross(g_swap_oc);
+#endif
         if (!g_headless) display_save(g_res_saved);
         fprintf(stderr, "menu: Circle/Cross %s (saved)\n", g_swap_oc ? "swapped" : "normal");
     }
+#ifdef PSP2I_VR
+    if (fx & MFX_VR) {
+        g_vr_on = g_menu.vr_on;
+        g_vr_dist_dm = g_menu.vr_dist_dm;
+        g_vr_width_dm = g_menu.vr_width_dm;
+        g_vr_hud_dist = (float)g_menu.vr_hud_dm / 10.0f;
+        g_render_scale = g_menu.vr_res;                 /* from the next start */
+        g_vr_sharpen = (float)g_menu.vr_sharpen / (float)VR_SHARPEN_STEPS;
+        g_vr_aniso = menu_vr_filter_aniso(g_menu.vr_filter);
+        g_vr_glow = g_menu.vr_glow;
+        if (g_renderer == REN_D3D11) d3d11_set_quality(g_vr_aniso, g_vr_sharpen);
+        if (g_menu.vr_motion != g_vr_motion) {
+            g_vr_motion = g_menu.vr_motion;
+            if (g_vr_motion && g_vr_live) vr_haptic(-1, 0.5f, 0.15f);   /* a buzz: the controllers are the hands now */
+            fprintf(stderr, "menu: VR input %s\n", g_vr_motion ? "motion (the hands shown)" : "pad");
+        }
+        if (g_menu.vr_world_pct > 0) {                   /* the view in use: life size * 100 / percent */
+            const float k = VR_FP_SCALE_DEFAULT * 100.0f / (float)g_menu.vr_world_pct;
+            if (g_vr_first) g_vr_fp_scale = k; else g_vr_world_scale = k;
+        }
+        vr_apply();
+        if (!g_headless) display_save(g_res_saved);
+        fprintf(stderr, "menu: VR %s, screen %d.%d m away, %d.%d m wide, HUD %.1f m, world %d%% (%s person) (saved)\n",
+                g_vr_on ? "on" : "off", g_vr_dist_dm / 10, g_vr_dist_dm % 10, g_vr_width_dm / 10, g_vr_width_dm % 10,
+                (double)g_vr_hud_dist, g_menu.vr_world_pct, g_vr_first ? "first" : "third");
+    }
+    if (fx & MFX_VR_RECENTER) { vr_recenter(); g_fp_yaw_ok = 0; }   /* first person faces the game camera's way again */
+#endif
     if (fx & MFX_FONT) {
         g_menu.font = font_win_select(g_menu.font);
         snprintf(g_menu.font_name, sizeof g_menu.font_name, "%s", font_win_name(g_menu.font));
@@ -1050,6 +2801,7 @@ static void menu_step(void) {
 static void update_camera_stick(uint64_t vb) {
     uint8_t rx = 128, ry = 128;
     if (g_sdl_on) input_sdl_right_stick(&rx, &ry);
+    if (g_vr_live && (stick_off_centre(g_vr_rx, g_vr_ry) || !stick_off_centre(rx, ry))) { rx = g_vr_rx; ry = g_vr_ry; }   /* the right VR controller */
     for (int i = 0; i < g_nrstick; i++)
         if (vb >= g_rstick[i].at && vb < g_rstick[i].at + g_rstick[i].len) { rx = g_rstick[i].x; ry = g_rstick[i].y; }
     if (g_rep_on) { rx = g_rep_rx; ry = g_rep_ry; }
@@ -1059,11 +2811,174 @@ static void update_camera_stick(uint64_t vb) {
 }
 
 static void poll_controllers(void) {
-    if (!g_sdl_on) return;
-    uint32_t b;
-    uint8_t ax, ay;
-    input_sdl_poll(&b, &ax, &ay);
-    if (b != g_pad_bits || ax != g_pad_ax || ay != g_pad_ay) {
+    if (!g_sdl_on && !g_vr_live) return;
+    uint32_t b = 0;
+    uint8_t ax = 128, ay = 128;
+    if (g_sdl_on) input_sdl_poll(&b, &ax, &ay);
+#ifdef PSP2I_VR
+    if (g_vr_live) {
+        vr_pad vp;
+        vr_pad_get(&vp);                      /* released (centred) while the headset has no focus */
+        b |= vp.buttons;
+        if (stick_off_centre(vp.ax, vp.ay) || !stick_off_centre(ax, ay)) { ax = vp.ax; ay = vp.ay; }
+        g_vr_host = vp.host;
+        g_vr_rx = vp.rx; g_vr_ry = vp.ry;
+#ifndef PSP2I_PROD
+        if (vp.host & VR_HOST_SHOT) { vrshot_request(); g_dump_key = 1; vr_body_dump_palettes(); }   /* left grip + left stick click: a capture, F12's GE dump, the body's palettes */
+        if (vp.host & VR_HOST_MARK) mf_mark();          /* both grips + Triangle: the menu finder's label */
+#endif
+        /* MOTION's shortcuts (both grips + Cross / Circle), as the gamepad's L3. */
+        if (vp.host & VR_HOST_RECENTER) { vr_recenter(); g_fp_yaw_ok = 0; }
+        if (vp.host & VR_HOST_HANDCAL) vr_body_hand_calibrate();   /* both grips + both triggers */
+        if (vr_body_hand_cal_changed() && !g_headless) display_save(g_res_saved);
+        if (vp.host & VR_HOST_VIEW) {
+            g_vr_first = !g_vr_first;
+            fprintf(stderr, "vr: both grips + Circle: %s person\n", g_vr_first ? "first" : "third");
+            if (!g_headless) display_save(g_res_saved);
+        }
+        /* Swings (MOTION): a press of Square / Triangle for a few game frames;
+         * a new swing restarts it. A buzz on that hand says it went. */
+        const uint64_t fl = psp_display_flips();
+        for (int h = 0; h < 2; h++) {
+            if (!vp.swing[h] || !g_vr_motion) continue;
+            const uint32_t btn = vp.swing[h] == 2 ? 0x1000u : 0x8000u;   /* Triangle with the grip, else Square */
+            if (g_menu.open) continue;
+            if (h == 0) {                                   /* the sub weapon: through R */
+                g_sub_btn = btn;
+                if (g_sub_phase == 2 && fl - g_swing_flip < SWING_PRESS + SUB_TAIL) {
+                    g_swing_btn = btn;                      /* R is still held: press now */
+                    g_swing_flip = fl;
+                } else {
+                    g_sub_phase = 1;
+                    g_sub_flip = fl;
+                }
+            } else {
+                g_swing_btn = btn;
+                g_swing_flip = fl;
+            }
+            vr_haptic(h, 0.4f, 0.05f);
+#ifndef PSP2I_PROD
+            if (vp.swing_speed[h] > 0)
+                fprintf(stderr, "vr: swing %s %.1f m/s%s: %s\n", h ? "right" : "left", (double)vp.swing_speed[h],
+                        vp.swing[h] == 2 ? " with the grip" : "", btn == 0x1000u ? "Triangle" : "Square");
+            else
+                fprintf(stderr, "vr: trigger %s%s: %s\n", h ? "right" : "left", vp.swing[h] == 2 ? " with the grip" : "",
+                        btn == 0x1000u ? "Triangle" : "Square");
+#endif
+        }
+        if (g_sub_phase == 1) {                             /* R held until the game is in its R stance */
+            const uint32_t pl = gamelog_local_player();
+            static uint64_t stance_since;
+            const int stance = pl && psp_read32(pl + 0x214u) != 0;
+            if (!stance) stance_since = fl;
+            if ((stance && fl - stance_since >= 2) || fl - g_sub_flip >= SUB_LEAD_MAX) {
+#ifndef PSP2I_PROD
+                fprintf(stderr, "vr: sub weapon: R held %llu flips (%s), then %s\n", (unsigned long long)(fl - g_sub_flip),
+                        stance ? "the R stance is on" : "no R stance seen", g_sub_btn == 0x1000u ? "Triangle" : "Square");
+#endif
+                g_sub_phase = 2;
+                g_swing_btn = g_sub_btn;
+                g_swing_flip = fl;
+            }
+        }
+        if (g_sub_phase == 2 && fl - g_swing_flip >= SWING_PRESS + SUB_TAIL) g_sub_phase = 0;
+        if (g_sub_phase) b |= 0x0200u;                      /* R */
+        if (g_swing_btn && fl - g_swing_flip < SWING_PRESS) b |= g_swing_btn;
+        else g_swing_btn = 0;
+    }
+    if (g_vr_live) {
+        /* In the game's menus the left stick presses the D-pad (vr_menu_dpad). */
+        static uint32_t last_v, prev_b;
+        static uint64_t changed_vb;
+        static int ended;
+        const uint64_t vb = psp_sched_vblank_count();
+        const uint32_t v = psp_read32(PSP2I_MENU_CURSOR_COUNTER);
+        if (v != last_v) {
+            if (last_v == 0) ended = 0;                 /* it starts again: a menu runs */
+            changed_vb = vb;
+            last_v = v;
+        }
+        /* The menu layer's share of the screen, per game frame (the last
+         * finished frame's). */
+        static uint64_t layer_flip;
+        static float layer;
+        const uint64_t flips = psp_display_flips();
+        if (flips != layer_flip) { layer = g_menu_layer_acc; g_menu_layer_acc = 0; layer_flip = flips; }
+#ifndef PSP2I_PROD
+        {   /* Dev: the menu layer's share each second (the threshold's tuning). */
+            static uint64_t lvb;
+            static float lmax;
+            if (layer > lmax) lmax = layer;
+            if (vb - lvb >= 60) {
+                fprintf(stderr, "vr: menu layer up to %.0f%% of the screen in the last second (vblank %llu)\n",
+                        (double)(lmax * 100.0f), (unsigned long long)vb);
+                lvb = vb; lmax = 0;
+            }
+        }
+#endif
+        const int counter = changed_vb && vb - changed_vb < MENU_DPAD_HOLD_VB && !ended;
+        int on = g_vr_menu_dpad && (counter || layer > MENU_DPAD_LAYER) && !g_menu.open;
+        if (on && (b & ~prev_b & 0x0008u)) { ended = 1; on = 0; }   /* Start: the start menu closes */
+        prev_b = b;
+        if (on != g_menu_dpad_on) fprintf(stderr, "vr: left stick %s (vblank %llu)\n", on ? "is the D-pad (a game menu)" : "moves again",
+                                          (unsigned long long)vb);
+        g_menu_dpad_on = on;
+        if (on && (stick_off_centre(ax, ay))) {
+            if (ay < 64)  b |= 0x0010u;                 /* up */
+            if (ay > 192) b |= 0x0040u;                 /* down */
+            if (ax < 64)  b |= 0x0080u;                 /* left */
+            if (ax > 192) b |= 0x0020u;                 /* right */
+        }
+        if (on) ax = ay = 128;
+    }
+    /* A gamepad in VR (no motion controllers needed): L3 tapped recenters,
+     * L3 held a second saves a VR capture (dev builds) instead. L3 is no
+     * PSP button, so the game never sees it. */
+    if (g_vr_live && g_sdl_on) {
+        static ULONGLONG down;                  /* when L3 went down; 0 = up */
+        static int held_done;
+        const int l3 = (input_sdl_host_buttons() & INPUT_HOST_LSTICK) != 0;
+        const ULONGLONG now = GetTickCount64();
+        if (l3 && !down) { down = now; held_done = 0; }
+#ifndef PSP2I_PROD
+        {   /* L3 held, then R3: the menu finder's label (as both grips + Triangle);
+             * L3's own tap and hold are then skipped */
+            static int r3_prev;
+            const int r3 = (input_sdl_host_buttons() & INPUT_HOST_RSTICK) != 0;
+            if (l3 && r3 && !r3_prev) { held_done = 1; mf_mark(); }
+            r3_prev = r3;
+        }
+#endif
+        if (l3 && !held_done && now - down >= 1000) {
+            held_done = 1;
+#ifndef PSP2I_PROD
+            fprintf(stderr, "vr: gamepad L3 held: a capture and a GE dump\n");
+            vrshot_request();
+            g_dump_key = 1;                     /* and F12's GE dump: every draw the game submits */
+#endif
+        }
+        if (!l3 && down) {
+            static ULONGLONG last_tap;              /* a second tap within 0.4 s: first / third person */
+            if (!held_done && last_tap && now - last_tap < 400) {
+                g_vr_first = !g_vr_first;
+                fprintf(stderr, "vr: gamepad L3 twice: %s person\n", g_vr_first ? "first" : "third");
+                if (!g_headless) display_save(g_res_saved);
+                last_tap = 0;
+            } else if (!held_done) {
+                fprintf(stderr, "vr: gamepad L3: recenter\n");
+                vr_recenter();
+                g_fp_yaw_ok = 0;
+                last_tap = now;
+            }
+            down = 0;
+        }
+    }
+#endif
+    if (b != g_pad_bits || ax != g_pad_ax || ay != g_pad_ay || g_fp_stick_on
+#ifdef PSP2I_VR
+        || g_nudge                                                                  /* the attack nudge runs by frames */
+#endif
+        ) {   /* first person's turned stick follows the head */
         g_pad_bits = b; g_pad_ax = ax; g_pad_ay = ay;
         ctrl_commit();
     }
@@ -1212,6 +3127,8 @@ static void find_iso(const char *dir, const char *root, char *out, size_t cap) {
 
 /* F12: the displayed frame as dumps/frame_<vblank>.ppm and every draw of the
  * next frame as dumps/draws_<vblank>.txt, next to the exe. */
+static uint64_t g_ge_dump_vb;              /* --ge-dump VBLANK: as F12 at that vblank */
+
 static void take_dump(uint64_t vb) {
     char dir[600], path[700];
     exe_dir(dir, sizeof dir);
@@ -1234,9 +3151,14 @@ static uint64_t g_prof_from, g_prof_to;
 static void on_vblank(void) {
     uint64_t vb = psp_sched_vblank_count();
     g_prof_on = vb >= g_prof_from && (!g_prof_to || vb < g_prof_to);
+    if (g_ge_dump_vb && vb == g_ge_dump_vb) g_dump_key = 1;
     if (g_dump_key) { g_dump_key = 0; take_dump(vb); }
 #ifndef PSP2I_PROD
     rateaudit_vblank();
+    vr_probe_vblank();
+#endif
+#ifdef PSP2I_VR
+    stereo_update();
 #endif
     if (g_find_vblank && vb == g_find_vblank) find_word();
     if (g_watch_late_addr && psp_display_flips() >= g_watch_late_flip) {
@@ -1284,7 +3206,40 @@ static void on_vblank(void) {
         psp_display_get(&addr, &stride, &fmt);
 #ifdef _WIN32
         const int p = addr ? gpu_present(addr, stride, (int)fmt, g_frame, SCREEN_W, SCREEN_H) : 0;
+        g_present_p = p;
         if (p == 1) have_frame = 1;
+        if (p == 1 && g_hi_s > 1) {                      /* the S-times picture of the same frame */
+            int hw, hh;
+            const uint32_t *hi = d3d11_present_hires(&hw, &hh);
+            g_hi_valid = hi && hw == SCREEN_W * g_hi_s && hh == SCREEN_H * g_hi_s;
+            if (g_hi_valid) memcpy(g_hi_frame, hi, (size_t)hw * hh * 4);
+        }
+        if (p == 0) g_hi_valid = 0;                      /* from VRAM: 480x272 only */
+#ifdef PSP2I_VR
+        /* The eye pictures stay until the next game frame replaces them (a
+         * frame shows for 2+ vblanks; d3d11_present then returns 2). A
+         * picture from VRAM (p 0: movies) has no eyes. */
+        g_eye_new = 0;
+        g_eye_shared = g_stereo_on && g_renderer == REN_D3D11
+                     ? d3d11_present_eye_shared(&g_eye_shared_w, &g_eye_shared_h, &g_eye_shared_tag) : NULL;
+        if (!g_stereo_on || p == 0) g_eye_px[0] = g_eye_px[1] = NULL;
+        if (p == 1 && g_stereo_on && g_renderer == REN_D3D11) {
+            int w1, h1, w2, h2;
+            const uint32_t *l = d3d11_present_eye(0, &w1, &h1), *r = d3d11_present_eye(1, &w2, &h2);
+            g_eye_px[0] = g_eye_px[1] = NULL;
+            if (l && r && w1 == w2 && h1 == h2 && w1 % SCREEN_W == 0 && w1 <= SCREEN_W * 6) {
+                g_eye_px[0] = l; g_eye_px[1] = r; g_eye_w = w1; g_eye_h = h1;
+                g_eye_px_tag = d3d11_present_eye_tag();
+                g_eye_new = 1;
+            }
+        }
+#ifndef PSP2I_PROD
+        vrshot_vblank(vb);
+        mf_sample();
+        menu_path_log(vb, g_mf_on, g_mf_menu_now);
+        tasks_log(vb);
+#endif
+#endif
         if (p == 1 && getenv("PSP2I_PRESENT_VERIFY")) {
             /* The asynchronous picture against VRAM made current (the access
              * hook reads the same target back): they must match exactly. */
@@ -1307,6 +3262,86 @@ static void on_vblank(void) {
         if (have_frame) g_have_frame = 1;
         if (g_have_frame) {
             compose();
+#ifdef PSP2I_VR
+            g_overlay_up = memcmp(g_rgba, g_frame, sizeof g_rgba) != 0;
+            /* Stereo: each eye's own picture, for each new game frame, and
+             * every vblank while the overlay (engine menu) is up so it stays
+             * live. On the GPU when it can be (no overlay). */
+            /* Head tracking: a picture drawn without the head (tag 0: a menu
+             * scene, or a frame of the game's loading transitions) goes on the
+             * flat screen only once that has lasted a second. Until then the
+             * headset keeps the last 3D picture at its pose (user: "the flat
+             * game sometimes appears floating on top of VR for a short
+             * moment": the area changes' loading frames). */
+            static uint64_t tracked_vb;                  /* the last picture drawn from the head */
+            if (g_vr_live && g_eye_shared && g_eye_shared_tag) tracked_vb = vb;
+            if (g_vr_live && !g_eye_shared && g_eye_px[0] && g_eye_px_tag) tracked_vb = vb;
+            const int hold_flat = tracked_vb && vb - tracked_vb < (g_menu_loading ? 300u : 60u);
+            if (g_vr_live && g_eye_shared) {
+                if (g_eye_shared_tag || !hold_flat)
+                    vr_submit_stereo_shared(g_eye_shared, g_eye_shared_w, g_eye_shared_h, eye_tan(g_eye_shared_tag),
+                                            eye_tan_y(g_eye_shared_tag), g_eye_shared_tag);
+                g_eye_shared_vb = vb;
+            }
+            if (g_vr_live && g_stereo_on && vb - g_eye_shared_vb < 8) {
+                /* The overlay as its own layer: the pixels compose() changed. */
+                for (int i = 0; i < SCREEN_W * SCREEN_H; i++)
+                    g_ovl_px[i] = g_rgba[i] != g_frame[i] ? g_rgba[i] | 0xFF000000u : 0;
+                if (!g_ovl_sent_valid || memcmp(g_ovl_px, g_ovl_sent, sizeof g_ovl_px) != 0) {
+                    vr_submit_overlay(g_ovl_px);
+                    memcpy(g_ovl_sent, g_ovl_px, sizeof g_ovl_sent);
+                    g_ovl_sent_valid = 1;
+                }
+            } else if (g_ovl_sent_valid) {               /* the CPU pictures carry it again */
+                vr_submit_overlay(NULL);
+                g_ovl_sent_valid = 0;
+            }
+#ifndef PSP2I_PROD
+            /* Dev: what each vblank's picture was and what the headset got, every
+             * 5 s while VR is on (the intro movie never reached the headset with
+             * it on, 2026-10-23: which branch drops it?). */
+            {
+                static unsigned n_p[3], n_shared, n_cpu_eyes, n_frame, n_hold, n_recent, n_noframe;
+                static uint64_t since;
+                if (g_vr_live) {
+                    n_p[g_present_p < 0 ? 0 : g_present_p > 2 ? 2 : g_present_p]++;
+                    const int shared = g_eye_shared != NULL, cpu_eyes = !g_eye_shared && g_eye_px[0] != NULL;
+                    const int recent = g_stereo_on && vb - g_eye_shared_vb < 8;
+                    if (shared) n_shared++;
+                    else if (cpu_eyes) n_cpu_eyes++;
+                    else if (!have_frame) n_noframe++;
+                    else if (recent) n_recent++;
+                    else if (hold_flat) n_hold++;
+                    else n_frame++;
+                    if (!since) since = vb;
+                    if (vb - since >= 300) {
+                        fprintf(stderr, "vr: pictures in 5 s: present copy %u, VRAM %u, kept %u; to the headset: shared %u, CPU eyes %u,"
+                                        " frame %u; not sent: no frame %u, shared just before %u, held for 3D %u\n",
+                                n_p[1], n_p[0], n_p[2], n_shared, n_cpu_eyes, n_frame, n_noframe, n_recent, n_hold);
+                        memset(n_p, 0, sizeof n_p);
+                        n_shared = n_cpu_eyes = n_frame = n_hold = n_recent = n_noframe = 0;
+                        since = vb;
+                    }
+                }
+            }
+#endif
+            if (g_vr_live && !g_eye_shared && g_eye_px[0]) {
+                if (g_eye_new || g_overlay_up) {
+                    compose_eyes();
+                    if (g_eye_rgba[0] && g_eye_rgba[1] && (g_eye_px_tag || !hold_flat))
+                        vr_submit_stereo(g_eye_rgba[0], g_eye_rgba[1], g_eye_w, g_eye_h, eye_tan(g_eye_px_tag),
+                                         eye_tan_y(g_eye_px_tag), g_eye_px_tag);
+                }
+            } else if (g_vr_live && have_frame && !(g_stereo_on && vb - g_eye_shared_vb < 8) && !hold_flat) {
+                /* the same picture, in the headset (not between shared stereo frames).
+                 * A frame from VRAM (movies: g_hi_valid 0) goes at 480x272: its
+                 * S-times picture is the same one scaled up, 16 times the pixels
+                 * to copy and convert every vblank (the intro movie stalled with
+                 * the headset on, 2026-10-23). */
+                if (g_hi_s > 1 && g_hi_valid) vr_submit_frame(g_hi_rgba, SCREEN_W * g_hi_s, SCREEN_H * g_hi_s);
+                else vr_submit_frame(g_rgba, SCREEN_W, SCREEN_H);
+            }
+#endif
             if (window_show() != 0) InvalidateRect(g_wnd, NULL, FALSE);
         }
 #ifndef PSP2I_PROD
@@ -1335,6 +3370,33 @@ static void on_vblank(void) {
             fclose(f);
             fprintf(stderr, "overlay-shot: vblank %llu -> %s\n", (unsigned long long)vb, path);
         }
+        if (g_hi_s > 1 && g_hi_valid) {                  /* the renderer's S-times picture (no overlay) */
+            const int W = SCREEN_W * g_hi_s, H = SCREEN_H * g_hi_s;
+            snprintf(path, sizeof path, "%s/overlay_%06llu_x%d.ppm", g_capture_dir, (unsigned long long)vb, g_hi_s);
+            if ((f = fopen(path, "wb")) != NULL) {
+                fprintf(f, "P6\n%d %d\n255\n", W, H);
+                for (int k = 0; k < W * H; k++) {
+                    const uint8_t rgb[3] = { (uint8_t)(g_hi_frame[k] >> 16), (uint8_t)(g_hi_frame[k] >> 8), (uint8_t)g_hi_frame[k] };
+                    fwrite(rgb, 1, 3, f);
+                }
+                fclose(f);
+                fprintf(stderr, "overlay-shot: vblank %llu -> %s\n", (unsigned long long)vb, path);
+            }
+        }
+#ifdef PSP2I_VR
+        for (int e = 0; e < 2 && g_eye_px[0] && g_eye_px[1]; e++) {   /* stereo: each eye (no overlay) */
+            snprintf(path, sizeof path, "%s/overlay_%06llu_%c.ppm", g_capture_dir, (unsigned long long)vb, e ? 'R' : 'L');
+            if ((f = fopen(path, "wb")) == NULL) continue;
+            fprintf(f, "P6\n%d %d\n255\n", g_eye_w, g_eye_h);
+            for (int k = 0; k < g_eye_w * g_eye_h; k++) {
+                const uint32_t c = g_eye_px[e][k];
+                const uint8_t rgb[3] = { (uint8_t)(c >> 16), (uint8_t)(c >> 8), (uint8_t)c };
+                fwrite(rgb, 1, 3, f);
+            }
+            fclose(f);
+            fprintf(stderr, "overlay-shot: vblank %llu -> %s\n", (unsigned long long)vb, path);
+        }
+#endif
     }
     if (g_capture_every && vb % g_capture_every == 0) {
         char path[700];
@@ -1371,6 +3433,9 @@ static void on_vblank(void) {
 static void prof_report(void);
 #endif
 static void report(void) {
+#if defined(PSP2I_VR) && !defined(PSP2I_PROD)
+    mf_report("exit");
+#endif
     fprintf(stderr, "\n==== psp2i report ====\n");
     fprintf(stderr, "  run time            %.2f s\n", psp_sched_now_us() / 1e6);
     report_fps();
@@ -1379,6 +3444,9 @@ static void report(void) {
     d3d11_report(stderr);
 #endif
     gl_ge_report(stderr);
+#ifdef PSP2I_TEXREPLACE
+    texreplace_report(stderr);
+#endif
 #ifdef _WIN32
     prof_report();
 #endif
@@ -2087,7 +4155,9 @@ int main(int argc, char **argv) {
     int extracted = 0;                     /* --extracted: the disc folder even with an ISO about */
     uint32_t oracle_addr = 0;
     const char *renderer = NULL;            /* --renderer; else psp2i_display.ini */
+    int vr_arg = -1;                        /* --vr / --no-vr; else psp2i_display.ini */
     int res_arg = -1;                       /* --resolution; else psp2i_display.ini */
+    const char *texpacks_arg = NULL;        /* --texture-packs; else psp2i_display.ini */
     int oracle_all = 0;
     int want_sdl = -1;                     /* -1: default (with a window) */
     int want_audio = -1;
@@ -2151,6 +4221,11 @@ int main(int argc, char **argv) {
             g_menu_vk = (WPARAM)(VK_F1 + n - 1);
 #endif
         }
+        else if (!strcmp(argv[i], "--vr"))                            vr_arg = 1;
+        else if (!strcmp(argv[i], "--no-vr"))                         vr_arg = 0;
+#ifdef PSP2I_VR
+        else if (!strcmp(argv[i], "--stereo"))                        g_stereo_arg = 1;
+#endif
         else if (!strcmp(argv[i], "--audio"))                         want_audio = 1;
         else if (!strcmp(argv[i], "--no-audio"))                      want_audio = 0;
         else if (!strcmp(argv[i], "--log-floats") && i + 3 < argc) {
@@ -2180,6 +4255,8 @@ int main(int argc, char **argv) {
             i += 2;
         }
         else if (!strcmp(argv[i], "--renderer") && i + 1 < argc)      renderer = argv[++i];
+        else if (!strcmp(argv[i], "--render-scale") && i + 1 < argc)  g_render_scale_arg = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--texture-packs") && i + 1 < argc) texpacks_arg = argv[++i];
         else if (!strcmp(argv[i], "--resolution") && i + 1 < argc) {
             res_arg = menu_res_parse(argv[++i]);
             if (res_arg < 0) { fprintf(stderr, "bad --resolution %s (want e.g. 1920x1080 or fullscreen)\n", argv[i]); return 1; }
@@ -2195,6 +4272,7 @@ int main(int argc, char **argv) {
 #endif
         else if (!strcmp(argv[i], "--label-ring"))                    ring_arm();
         else if (!strcmp(argv[i], "--dump-on-bad") && i + 1 < argc)   dump_on_bad_access(argv[++i]);
+        else if (!strcmp(argv[i], "--ge-dump") && i + 1 < argc)      g_ge_dump_vb = strtoull(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--dump-at") && i + 2 < argc)       { dump_addr = (uint32_t)strtoul(argv[i + 1], NULL, 0); dump_path = argv[i + 2]; i += 2; }
         else if (!strcmp(argv[i], "--args-from-flip") && i + 2 < argc) {
             args_addr = (uint32_t)strtoul(argv[i + 1], NULL, 0);
@@ -2299,9 +4377,43 @@ int main(int argc, char **argv) {
         g_gl_window = gl_platform_attach(g_wnd) == 0;
         if (!g_gl_window) present_init(g_wnd);
     }
-    if (g_renderer == REN_D3D11 && d3d11_init() != 0) {
-        fprintf(stderr, "psp2i: falling back to the software renderer\n");
-        g_renderer = REN_SOFTWARE;
+    if (g_renderer == REN_D3D11) {
+        int sc = g_render_scale_arg ? g_render_scale_arg : g_render_scale;
+        sc = sc < 1 ? 1 : sc > 6 ? 6 : sc;                 /* 5 and 6: for VR (the eyes cover the headset's wide view) */
+        d3d11_set_scale(sc);
+#ifdef PSP2I_VR
+        /* VR head tracking: the eyes see vr_fov_scale times the game's view
+         * across but vr_fov_scale_y times up and down, so the same rows
+         * would make pixels about 1.7x taller than wide in the headset (the
+         * blur and pixelation up and down). Rows for the same pixels per
+         * degree both ways. The window and VRAM still get S x S. */
+        if (sc > 1 && (vr_arg >= 0 ? vr_arg : g_vr_on) && g_vr_stereo && g_vr_head) {
+            const float tx = 1.0f / PSP2I_FIELD_PROJ_X, ty = tx * (float)SCREEN_H / (float)SCREEN_W;
+            const float fx = g_vr_fov > 1.0f ? g_vr_fov : 1.0f, fy = g_vr_fov_y > 1.0f ? g_vr_fov_y : 1.0f;
+            const float k = ((float)SCREEN_W / (float)SCREEN_H) * atanf(fy * ty) / atanf(fx * tx);
+            int sy = (int)lroundf((float)sc * k);
+            sy = sy < sc ? sc : sy > 12 ? 12 : sy;
+            d3d11_set_scale_y(sy);
+            g_hi_sy = sy;
+        }
+        if ((vr_arg >= 0 ? vr_arg : g_vr_on) && g_vr_stereo) {
+            d3d11_set_quality(g_vr_aniso, g_vr_sharpen);
+            fprintf(stderr, "d3d11: VR image quality: texture filtering %s, sharpening %.2f\n",
+                    g_vr_aniso ? "anisotropic with mipmaps" : "as the game's", (double)g_vr_sharpen);
+        }
+#endif
+        if (d3d11_init() != 0) {
+            fprintf(stderr, "psp2i: falling back to the software renderer\n");
+            g_renderer = REN_SOFTWARE;
+        } else if (sc > 1) {
+            g_hi_frame = (uint32_t *)calloc((size_t)SCREEN_W * sc * SCREEN_H * sc, 4);
+            g_hi_rgba = (uint32_t *)calloc((size_t)SCREEN_W * sc * SCREEN_H * sc, 4);
+            if (g_hi_frame && g_hi_rgba) g_hi_s = sc;
+            fprintf(stderr, "d3d11: internal resolution %dx (%dx%d)\n", sc, SCREEN_W * sc, SCREEN_H * sc);
+            if (g_hi_sy > sc)
+                fprintf(stderr, "d3d11: VR eye pictures %dx%d (%dx down, for square pixels in the headset)\n",
+                        SCREEN_W * sc, SCREEN_H * g_hi_sy, g_hi_sy);
+        }
     }
 #endif
     fprintf(stderr, "renderer: %s\n", g_renderer == REN_GL ? "OpenGL" : g_renderer == REN_D3D11 ? "Direct3D 11" : "software");
@@ -2309,6 +4421,14 @@ int main(int argc, char **argv) {
     audio_init(want_audio == 1 || (want_audio < 0 && !g_headless));
     atrac_at3_init(dir);           /* ATRAC music (psp2i_atrac.dll); silent without it */
     h264_openh264_init(dir, g_openh264);   /* movies; black (with sound) until it is ready */
+    {
+        const char *packs = texpacks_arg ? texpacks_arg : g_texpacks;
+#ifdef PSP2I_TEXREPLACE
+        texreplace_init(packs, dir);       /* none listed: off, textures drawn as before */
+#else
+        if (*packs) fprintf(stderr, "texreplace: this build has no PNG decoder (stb_image); texture_packs ignored\n");
+#endif
+    }
     if (replay_path) {                         /* a recorded route: its fps unless --fps */
         const int rf = replay_load(replay_path);
         if (rf < 0) return 1;
@@ -2352,6 +4472,52 @@ int main(int argc, char **argv) {
 #endif
     framerate_set_tests(g_test_ticks, g_test_logic);
     camera_init(menu_rs_speed(&g_menu));
+#ifdef PSP2I_VR
+    snprintf(g_exe_dir, sizeof g_exe_dir, "%s", dir);
+    if (vr_arg >= 0) g_vr_on = vr_arg;                  /* for this run; the menu saves its own choice */
+    g_menu.hidden &= ~MENU_BIT(MENU_VR);
+    g_menu.vr_on = g_vr_on;
+    g_menu.vr_dist_dm = g_vr_dist_dm;
+    g_menu.vr_width_dm = g_vr_width_dm;
+    psp_hook_set(FN_FRUSTUM_PLANES, hook_frustum_planes);   /* a no-op unless head tracking is on */
+    psp_hook_set(FN_APPLY_CAMERA, hook_apply_camera);       /* a no-op unless first person is on */
+#if defined(PSP2I_VR) && !defined(PSP2I_PROD)
+    menu_path_init();                                       /* dev: count the menu path's calls */
+#endif
+#ifdef PSP2I_VR
+    vr_body_init();                                         /* a no-op unless PSP2I_SKEL is set (dev) */
+    {
+        char legs[sizeof g_display_ini];
+        snprintf(legs, sizeof legs, "%s/psp2i_vr_legs.bin", dir);
+        vr_body_legs_file(legs);                            /* the avatar's learned strafe legs */
+    }
+#endif
+    psp_hook_set(FN_SET_PROJECTION, hook_set_projection);   /* a no-op unless first person is on */
+#ifndef PSP2I_PROD
+    psp_hook_set(FN_NODE_VIS, hook_node_vis);               /* counts only */
+#endif
+    {
+        static const uint32_t CULL_TESTS[] = { 0x08D7C934u, 0x08D7CAECu, 0x08D7CD88u, 0x08D7CE6Cu, 0x08D7CF90u };
+        for (int i = 0; i < (int)(sizeof CULL_TESTS / sizeof CULL_TESTS[0]); i++) psp_hook_set(CULL_TESTS[i], hook_cull_test);
+    }
+#ifndef PSP2I_PROD
+    {   /* PSP2I_VR_FAKE_HEAD=yaw,pitch (degrees; with --stereo): the eyes drawn from a turned head, no headset */
+        const char *e = getenv("PSP2I_VR_FAKE_HEAD");
+        if (e && sscanf(e, "%f,%f", &g_fake_yaw, &g_fake_pitch) >= 1) {
+            g_fake_head = 1;
+            fprintf(stderr, "vr: fake head turn: yaw %.1f, pitch %.1f degrees\n", (double)g_fake_yaw, (double)g_fake_pitch);
+        }
+        const char *se = getenv("PSP2I_VR_SHOT_EVERY");          /* seconds between VR captures */
+        if (se && atof(se) > 0) {
+            g_vrshot_every = (uint64_t)(atof(se) * 60.0);
+            fprintf(stderr, "vr: a capture every %.0f s while stereo is on (%s/vrshot_*)\n", atof(se), g_capture_dir);
+        }
+    }
+#endif
+    vr_apply();
+#else
+    (void)vr_arg;
+#endif
     /* PSP savedata encryption: saves interchangeable with a PSP / PPSSPP */
     static const psp_savedata_crypto SAVE_CRYPTO = { savecrypt_decrypt, savecrypt_encrypt, savecrypt_sfo_hash };
     psp_savedata_set_crypto(&SAVE_CRYPTO);
@@ -2360,6 +4526,11 @@ int main(int argc, char **argv) {
     functrace_init(dir);
 #ifndef PSP2I_PROD
     rateaudit_init(dir);                  /* the vblank-use census, and F7's frame-rate audit */
+    {
+        char probe[700];
+        log_path(probe, sizeof probe, dir, "vr_probe.txt");
+        vr_probe_init(probe);             /* F8: the camera and the characters, for the VR work */
+    }
 #endif
     psp_sched_set_vblank_hook(on_vblank);
 
@@ -2390,6 +4561,9 @@ int main(int argc, char **argv) {
      * audio streams too; destroying them after that freed them twice
      * (heap corruption 0xC0000374 on nearly every exit, and the crash
      * dump it wrote was the pause after closing the window). */
+#ifdef PSP2I_VR
+    if (g_vr_live) vr_stop();
+#endif
     audio_shutdown();
     if (g_sdl_on) input_sdl_shutdown();
 #ifdef _WIN32

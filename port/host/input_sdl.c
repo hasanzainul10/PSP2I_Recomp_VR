@@ -340,6 +340,7 @@ int input_sdl_poll(uint32_t *buttons, uint8_t *ax, uint8_t *ay) {
             }
             if (S.GetGamepadButton(p, GB_GUIDE))   g_host_bits |= INPUT_HOST_GUIDE;
             if (S.GetGamepadButton(p, GB_RSTICK))  g_host_bits |= INPUT_HOST_RSTICK;
+            if (S.GetGamepadButton(p, GB_LSTICK))  g_host_bits |= INPUT_HOST_LSTICK;
             if (S.GetGamepadAxis(p, GA_LTRIGGER) > 16384) bits |= P_L;
             if (S.GetGamepadAxis(p, GA_RTRIGGER) > 16384) bits |= P_R;
             sx = S.GetGamepadAxis(p, GA_LEFTX);
