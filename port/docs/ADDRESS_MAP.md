@@ -221,6 +221,18 @@ Last, one through-mode draw copies `0x0CC000` to the display buffer
   by order: the frame's first field camera is the field camera. Status:
   inferred from the log and the map's change; fix built, not yet confirmed.
 
+### The frame's clears (psprecomp reports, 2026-10-24)
+
+The 3D target `0x0CC000` is cleared at the frame's start, then (in the field)
+by a **depth-only** clear (bits 4 of GE `CLEAR`: 1 colour, 2 alpha /
+stencil, 4 depth) that starts the HUD pass, 150 of 150 frames in a 5 s
+window. Menus and loading screens clear it fully (7). An attack effect
+clears colour and alpha (3) mid-scene, after ~40 scene draws. The glow
+pass draws its 3D parts into `0x154000` after the scene, then shrinks and
+blurs through `0x000000` / `0x022000` and adds the result over the scene
+from `0x04000000` (256 x 128). Big attack flashes are orthographic sprites
+of up to ~300 x 270 starting mid-screen; bloom / copy passes start at 0,0.
+
 ### Menus and tasks (menu finder, write watch, task log, 2026-10-23)
 
 For the left stick as the D-pad in menus. The game's own "a menu is open"

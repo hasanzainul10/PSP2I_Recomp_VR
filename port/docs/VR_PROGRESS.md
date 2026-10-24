@@ -130,6 +130,45 @@ controls are fine; manual aim in first person not tried yet. They chose to
   Not checked: a weapon held against the face (may blink out at 3 units),
   party members standing inside you.
 
+- **HUD eye-tied in first person, then flat blips: fixed** (2026-10-24,
+  user in the headset: "head hiding on: no blips during attacks, head still
+  gone, HUD lazy"). Both came after the head hiding and the weapon in the
+  hand; found with psprecomp's per-frame reports (below), VR captures and a
+  settings test, after several wrong guesses (a glow composite, menu-scene
+  frames, split frames: those changes were tried and taken out, except the
+  two noted as harmless below).
+  - Eye-tied HUD: the HUD pass is found by a clear of the frame's 3D
+    target; that target was the last one a 3D draw went to, and the glow
+    pass draws into its buffer (`0x154000`) after the scene, so the clear of
+    the scene's target went unseen and the whole HUD (40-67 sheets) was
+    moved as 3D scene: fixed to the head in first person, where the game
+    camera is the head. Common now because the weapon (often glowing) is in
+    view in the hand. Fixed in psprecomp: once latched, only the scene's
+    target is the 3D target.
+  - That let an attack effect's mid-scene clear (colour + alpha, bits 3)
+    start the HUD pass: the rest of the scene went flat onto the panel. The
+    HUD pass now starts only at a clear with depth (the real one is bits 4).
+  - Big attack flashes (~290 x 260 sprites from mid-screen) counted as
+    full-screen passes (45% of the screen) and were drawn flat in both eyes:
+    a full-screen pass must now start at the screen's corner, so they are
+    effects placed in the world.
+  - The remaining blips were the head hiding's rigid drop: within 3 units of
+    the head it also caught what is placed at the camera itself (2.3 away in
+    first person): screen-space effects and the sky. Proven by turning
+    `vr_fp_hide_head` off (no blips). It now drops only perspective draws
+    whose origin isn't at the camera.
+  - Also kept: with glow off the glow chain's last full-screen add is
+    dropped too (nothing of the glow is drawn then); the menu-scene check
+    undoes first person's widening by its known factor as well.
+  - Still seen in the logs: ~30 frames a run split across two display
+    flips (the scene in one, the HUD in the next): their HUD is moved as
+    scene for a frame or so. Not reported by the user; a carry-over of the
+    frame state was tried and didn't catch them (the HUD clear has the
+    colour bit too).
+  - psprecomp prints three anomaly reports (`stereo: flip N: ...`): many
+    same-in-both-eyes draws, HUD-depth sheets put in the world, 3D geometry
+    on the HUD panel. Quiet in a good frame.
+
 **Next for M2:**
 1. Not checked: town with the weapon put away (a learned weapon would be
    drawn in the hand if the game still draws it there), twin and two-handed

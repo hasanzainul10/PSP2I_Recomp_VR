@@ -1394,7 +1394,15 @@ static void head_frame(psp_gpu_stereo *s) {
          * camera was 1.30-1.34 and the whole fight went flat (user) when
          * this allowed 3%. */
         const float px = pr[0] * g_ge_kx;                     /* the game's own x scale (GE widening undone) */
-        const int other_fov = px < 1.15f || px > 2.5f;
+        /* First person widens the field's projection by g_fp_kx, but
+         * g_ge_kx is that only while this frame's PROJ matches the one
+         * hook_set_projection wrote: when it didn't, walking frames read 0.42
+         * and went flat for seconds, the HUD drawn into the eyes (user: "the
+         * HUD sometimes becomes eye-tied, when moving"; psprecomp's flat-frame
+         * report, 2026-10-24). So in first person the widening is undone
+         * either way, and only a FOV off both counts. */
+        const float px_fp = g_vr_first ? pr[0] * g_fp_kx : px;
+        const int other_fov = (px < 1.15f || px > 2.5f) && (px_fp < 1.15f || px_fp > 2.5f);
         menu = unturned || off_centre || other_fov;
         g_menu_loading = menu && unturned && !off_centre && !other_fov;
         if (menu != g_menu_scene)
