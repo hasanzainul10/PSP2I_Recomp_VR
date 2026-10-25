@@ -134,7 +134,7 @@ static uint64_t    g_use;
 static uint64_t    g_draw_seq;
 
 static uint64_t n_draws, n_tris, n_uploads, n_readbacks, n_tex_decodes, n_rt_tex, n_approx,
-                n_finish, n_present, n_fail, n_evict;
+                n_finish, n_present, n_fail, n_evict, n_cmdfull;
 
 /* ---- where the time goes (c3d_ge_stats) ------------------------------------------------
  * Exclusive buckets: prof(b) charges the time since the last switch to the
@@ -253,6 +253,19 @@ static void gpu_finish(void) {
     g_seg++;
     n_finish++;
     frame_open();
+}
+
+/* Room in the command buffer for one more draw's commands, else submit and
+ * wait first (gpu_finish: it resets the vertex ring, so before ring_put).
+ * The buffer is reclaimed only when a frame begins, and citro3d's sync
+ * transfers split it mid-frame; C3D_GetCmdBufUsage is the fill at the last
+ * submit, not now. A town scene of 1,600 draws a frame ran it out:
+ * svcBreak in GPUCMD_AddInternal (3DS_PROGRESS.md, T4). */
+#define CMD_ROOM (16u << 10)
+static void cmd_room(void) {
+    u32 *buf, size, off;
+    GPUCMD_GetBuffer(&buf, &size, &off);
+    if ((size - off) * 4u < CMD_ROOM) { n_cmdfull++; gpu_finish(); }
 }
 
 /* Before the CPU reads or writes memory a queued draw may still use. Between
@@ -876,6 +889,7 @@ static void rt_xfer(rt_entry *t, rt_entry *o, uint32_t y0, uint32_t y1, int own)
         q[i].y = BOTTOM[i] ? ty1 : ty0;
         q[i].v = (float)(BOTTOM[i] ? y1 : y0);
     }
+    cmd_room();
     const int first = ring_put(q, 6);
     if (first < 0) return;
     draw_on(t, NULL);
@@ -974,7 +988,7 @@ static int c3d_draw_on(const psp_gpu_state *st, const psp_gpu_vertex *v, int nve
         return 1;
     if ((uint32_t)nverts > RING_VERTS) return 1;
     frame_open();
-    if (C3D_GetCmdBufUsage() > 0.85f) gpu_finish();      /* room for this draw's commands */
+    cmd_room();
     const uint32_t off = vram_off(st->fb_addr);
     uint32_t rows = (uint32_t)st->sy1 + 1;
     if (rows > RT_H) rows = RT_H;
@@ -1279,12 +1293,12 @@ void c3d_ge_report(FILE *out) {
     for (int i = 0; i < MAX_RT; i++) rts += g_rt[i].used;
     for (int i = 0; i < MAX_DEPTH; i++) depths += g_depth[i].used;
     for (int i = 0; i < MAX_TEX; i++) texs += g_tex[i].used;
-    fprintf(out, "c3d: %llu draws, %llu tris, %llu presents, %llu finishes; uploads %llu, readbacks %llu, "
+    fprintf(out, "c3d: %llu draws, %llu tris, %llu presents, %llu finishes (%llu for command room); uploads %llu, readbacks %llu, "
                  "texture decodes %llu (%d cached, %lu KB), target textures %llu, approximated %llu, "
                  "to software %llu, evictions %llu, GPU transfers %llu, overlaps dropped %llu; %d targets, %d depth buffers; linear free %lu KB, VRAM free %lu KB\n",
             (unsigned long long)n_draws, (unsigned long long)n_tris, (unsigned long long)n_present,
-            (unsigned long long)n_finish, (unsigned long long)n_uploads, (unsigned long long)n_readbacks,
-            (unsigned long long)n_tex_decodes, texs, (unsigned long)(g_tex_bytes >> 10),
+            (unsigned long long)n_finish, (unsigned long long)n_cmdfull, (unsigned long long)n_uploads,
+            (unsigned long long)n_readbacks, (unsigned long long)n_tex_decodes, texs, (unsigned long)(g_tex_bytes >> 10),
             (unsigned long long)n_rt_tex, (unsigned long long)n_approx, (unsigned long long)n_fail,
             (unsigned long long)n_evict, (unsigned long long)n_xfer, (unsigned long long)n_skip, rts, depths, (unsigned long)(linearSpaceFree() >> 10), (unsigned long)(vramSpaceFree() >> 10));
     for (int i = 0; i < MAX_RT; i++) {

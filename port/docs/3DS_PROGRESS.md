@@ -481,6 +481,33 @@ read its VRAM); uploads `new`, `rows`, `changed` (VRAM changed under it).
   cheaper powf), or the vertex work on the PICA200's vertex shader (the
   vertex data copied to linear memory, transform / skinning / lighting in
   the shader), which removes it from the CPU.
+- **The CPU vertex fast path (psprecomp `fast_vertices`, 2026-10-26).**
+  Transformed draws without morph or texgen: one pointer to the vertices
+  and one to the indices, components decoded in place, registers converted
+  once per draw, world x view x projection as one matrix for unlit draws;
+  on the 3DS a cheaper powf for the lights (`light_pow`, 1.1e-5 worst
+  relative error against powf over 2 million values). PC check
+  (`PSP2I_VTX_VERIFY=1`, town replay, 33 million vertices): on screen at
+  most 0.0037 px from the generic loop; uv and colours identical. The
+  user's town runs in Azahar (hot build; seconds by vertices a frame):
+
+  | | town s | GE us/vertex | 18,000+ v/f: fps, game, ge ms/f | 8,000-18,000 v/f: fps, ge ms/f |
+  |---|---|---|---|---|
+  | before | 184 | 5.23 | 2.8, 202, 128 | 4.3, 62 |
+  | fast path | 300 | 2.88 | 3.3, 185, 75 | 4.3, 46 |
+
+  Per vertex: static unlit 2.91 -> 0.94 us, skinned with two lights 8.06
+  -> 5.36. Lighting (`psp_ge_light`, ~3 us a vertex for two lights) is now
+  most of the GE time; in busy views the **game's own code (185 ms a
+  frame) is the biggest part**.
+- **A GPU command buffer PANIC in busy town scenes (fixed).** 1,550-1,630
+  draws a frame filled citro3d's 512 KB command buffer: svcBreak in
+  libctru's `GPUCMD_AddInternal` at 105 s. The check before each draw used
+  `C3D_GetCmdBufUsage()`, which is the fill at the last submit, and
+  citro3d's sync transfers split the buffer mid-frame (its space comes back
+  only when a frame begins). `cmd_room()` in `c3d_ge.c` now reads the bytes
+  left (`GPUCMD_GetBuffer`) and submits and waits under 16 KB; the buffer
+  is 1 MB. The next 300 s of town: no PANIC, 0 waits for room.
 - **Azahar's CPU speed is not the console's.** Azahar emulates the ARM11
   with its own cycle count and runs this build at "Speed 90-100%", but how
   that compares with the console's 804 MHz with L2 isn't known. The CPU

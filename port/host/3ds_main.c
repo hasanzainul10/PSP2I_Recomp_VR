@@ -451,7 +451,8 @@ int main(void)
 
     struct stat sw;
     if (stat(BASE "/software", &sw) != 0) {
-        if (C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 2) && c3d_ge_init() == 0) g_gpu = 1;
+        /* 1 MB of GPU commands: ~340 bytes a draw, 1,600 draws in busy town scenes */
+        if (C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 4) && c3d_ge_init() == 0) g_gpu = 1;
         else say("citro3d could not start: drawing in software");
     }
     say("drawing: %s", g_gpu ? "PICA200 (citro3d)" : "software");
