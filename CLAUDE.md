@@ -64,11 +64,46 @@ its feature set and lessons are the reference.
 - **Headset:** the user's is a PS VR2 on SteamVR. Ask before changing SteamVR
   settings (for example, the null driver for headset-free tests).
 
+## 3DS port (branch `3ds_port`)
+
+Plan and phases T0-T8: [port/docs/3DS_PLAN.md](port/docs/3DS_PLAN.md).
+Progress: [port/docs/3DS_PROGRESS.md](port/docs/3DS_PROGRESS.md). Skills:
+`psp2i-3ds-build`, `psp2i-3ds-test`. The user's console is a **New 3DS XL
+with Luma3DS**.
+
+- **3DS off means no change:** 3DS code is under `#ifdef PSP2I_3DS` (host)
+  and `PSPRECOMP_3DS` (runtime), or in `port/3ds/`. The Windows, Android,
+  macOS and VR builds behave exactly as before.
+- **The game ships as a `.cia`** (124 MB memory mode, core 2, 804 MHz + L2
+  in `port/3ds/psp2i.rsf`). The `.3dsx` is for small test apps and quick
+  3dslink pushes only; it doesn't get the memory the game needs.
+- **Budgets:** every 3DS build reports `.text` size; every run on the
+  console reports peak heap in `sdmc:/psp2i/report.txt`. A change that grows
+  either by more than 1 MB says why in its commit message.
+- **Say where it ran:** "builds", "PC layout mode", "Azahar" and "console"
+  are different claims. Frame rates and memory only count from the console:
+  Azahar doesn't model the CPU speed or enforce the memory limit.
+- **Online and HUD:** the same rule as VR. The bottom screen and touch only
+  change what is drawn locally and what is pressed through `psp_ctrl_set`.
+- **No game data in builds you publish:** a `.3dsx` / `.cia` of the game
+  contains code generated from the user's EBOOT. Never commit, upload or
+  attach one. Build artefacts stay in `port/3ds/build*` (git-ignored).
+- **No game art in the HOME menu assets:** `port/3ds/make_assets.py` draws
+  the icon and banner from text.
+
 ## Tools
 
 - **CMake:** `D:\work\Cmake\bin\cmake.exe` (on PATH).
 - **MSVC:** `D:\VSBuildTools\VC\Auxiliary\Build\vcvars64.bat`.
 - **Python** with PIL, to turn `.ppm` captures into PNGs.
+- **3DS (all under `D:\`):**
+  - devkitPro (devkitARM, libctru, citro3d, 3dslink) inside MSYS2:
+    `D:\msys64\opt\devkitpro`. Run builds through
+    `D:\msys64\usr\bin\bash.exe -l` (see `psp2i-3ds-build`).
+  - Azahar emulator: `D:\Tools\azahar\azahar-windows-msvc-2126.2\azahar.exe`.
+  - makerom: `D:\Tools\makerom\makerom.exe`; bannertool:
+    `D:\Tools\bannertool\bannertool-1.2.3-windows\bannertool.exe`.
+  - pkg.devkitpro.org answers 403 to curl's default user agent; pacman works.
 - **Debug switches in the game:**
   - Command line: `--overlay-shot VBLANK` (saves a frame), `--seconds N`, `--headless`.
   - Keys: F12 (GE frame dump), F8 (VR probe).
