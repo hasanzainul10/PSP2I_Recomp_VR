@@ -11,10 +11,30 @@ played into town, no drawing errors; saves load). **T4 (speed):** town went
 from 2 to 5.4 fps in Azahar (target thrashing fixed, overlapping targets on
 the GPU, runtime at -O2; section "T4"). The work in progress is the next
 step, hot game functions at -O2 with inline memory access: it reached
-**6-7 fps in town and then PANICked after about 80 s** (below). It's
-committed but **off by default**.
+**6-7 fps in town and then PANICked after about 80 s**. It's committed but
+**off by default**.
 
-**Resume here: the hot-function build's PANIC.**
+**The PANIC is found and fixed (2026-10-25, second session); not yet
+confirmed in town on the 3DS.** It was not the hot build: `user_main`'s host
+stack overflowed its 4 MB. The game's inflate (`0x08DE0C40`, ADDRESS_MAP.md
+"The data decoder") falls from `0x08DE0E10` into a label inside another
+body once per decoded byte, and the recompiler emitted that as a dispatch
+call, so a loaded file nested one call per byte: on PC in town, 177,000
+calls and 16.6 MB, still growing after 150 s (a 64 MB reserve hides it
+there). The hot build ran faster, so it loaded the file that crossed 4 MB
+sooner; the -Os build would have too. The overflow wrote below the stack
+between guard checks, so the guard's message never reached the log.
+Found with `port/3ds/tools/gdepth.c` (attach to the PC build: the fiber's
+depth each second, and a full stack walk at each new record). Fixed in
+allegrexrecomp (psprecomp 8d67e25, `fall_target` / `scc_fall`): such a fall
+now stays inside the tail-call cycle trampoline. Checked: PC town replay,
+deepest 22 KB in 150 s, town draws right (`town.rec` frame at vblank 3600);
+Azahar, the hot build: `user_main` peaks at 4 KB through the title and the
+save load (was 1,136 KB there). `.text` 29.68 MB (+0.39: more cycle
+wrappers). **Next:** the user plays into town for 2+ minutes in Azahar
+(peak stays small, no PANIC), then turn the hot list on by default.
+
+**Was: the hot-function build's PANIC** (kept for its details):
 
 - What it is: `split_gen.py` takes a hot list (`port/3ds/hot_functions.txt`,
   1,076 addresses) and moves those functions to `gen_split/recomp_hot_*.c`.

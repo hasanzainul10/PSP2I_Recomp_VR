@@ -233,6 +233,20 @@ blurs through `0x000000` / `0x022000` and adds the result over the scene
 from `0x04000000` (256 x 128). Big attack flashes are orthographic sprites
 of up to ~300 x 270 starting mid-screen; bloom / copy passes start at 0,0.
 
+### The data decoder (gdepth on the PC build, town replay, 2026-10-25)
+
+`0x08DE0C40` is the inflate routine (allegrexrecomp's name for it; in the
+walk it was entered at `0x08DE0C68` from `0x08D5DE08` <- `0x08D5DE64` <-
+`0x08D57620`, a loader, on `user_main`; the bit decoder it
+calls with `bltzal` exits through its epilogue, see allegrexrecomp's
+`emit_return_check`). Its literal loop is split across bodies by discovery:
+`0x08DE0E10` (decode a symbol, `jal 0x08DE0FAC`), falling into
+`0x08DE0E0C` (owned by `0x08DE0EAC`: store the byte), back to `0x08DE0E10`;
+copies run through `0x08DE0E50` / `0x08DE0E88` / `0x08DE0EAC`. Before the
+recompiler fix (psprecomp `fall_target`), the fall into `0x08DE0E0C` was a
+C call per byte: 177,000 nested calls (16 MB of host stack) on PC in town,
+and the 3DS's 4 MB `user_main` stack overflowed. Status: seen (stack walk).
+
 ### Menus and tasks (menu finder, write watch, task log, 2026-10-23)
 
 For the left stick as the D-pad in menus. The game's own "a menu is open"
