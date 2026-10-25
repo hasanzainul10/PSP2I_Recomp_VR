@@ -8,6 +8,13 @@ description: Run and check PSP2i 3DS builds - in the Azahar emulator (launch, in
 Build first with `psp2i-3ds-build`. Then say **where** each result comes
 from: "Azahar" and "console" are different claims.
 
+**Test in Azahar by default** (the user's call, 2026-10-25): use the
+console only when something can't be answered without it (real speed,
+memory limits, cores, stereo on the real screen), and ask first. The game
+files are on Azahar's emulated SD (`%APPDATA%\Azahar\sdmc\psp2i\`:
+`game.iso`, `GameData/flash`, `GameData/ms` with the DLC). The console's SD
+has the fonts, DLC and a game build, but **not the ISO**.
+
 | Question | Azahar | Console |
 |---|---|---|
 | Does it boot, draw, read files? | yes | yes |
@@ -23,9 +30,15 @@ from: "Azahar" and "console" are different claims.
 mode by default). Data: `%APPDATA%\Azahar\` (`log\azahar_log.txt`,
 `sdmc\` = the emulated SD card).
 
-- **The user may be using Azahar too.** Check `Get-Process azahar` before
-  starting it; never `Stop-Process` a window you didn't start in this command.
-  Ask first when one is already open.
+- **The user plays along in Azahar.** Check `Get-Process azahar` first;
+  if it's open, ask the user to load the new build (File > Load File).
+  Start it without waiting (`Start-Process` and return), read the log in a
+  later step (a background `until grep ...` loop), and **never stop
+  Azahar from a script**, even one you started: the user may be playing.
+- Game log while it runs: `%APPDATA%\Azahar\sdmc\psp2i\psp2i_log.txt`
+  (flushed once a second). Azahar's own log (crash register dumps,
+  "Exception Type"): `%APPDATA%\Azahar\logzahar_log.txt`; map a PC or LR
+  with `arm-none-eabi-addr2line -f -e port/3ds/build/psp2i.elf <addr>`.
 - `.3dsx`: `azahar.exe <path>.3dsx` (it runs it directly, `envhb=0`).
 - `.cia`: install, then run the installed `.app`:
 

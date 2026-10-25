@@ -67,6 +67,15 @@ set(PSP2I_GEN_PARTS 256 CACHE STRING "translation units recomp_funcs.c is split 
 
 add_subdirectory(${PSPRECOMP_DIR} psprecomp EXCLUDE_FROM_ALL)
 target_compile_definitions(psprecomp PUBLIC PSPRECOMP_3DS)
+# host stack per PSP thread (bytes); empty = the runtime's 3DS default
+set(PSP2I_FIBER_STACK "" CACHE STRING "PSPRECOMP_FIBER_STACK for the 3DS build")
+set(PSP2I_FIBER_STACK_SMALL "" CACHE STRING "PSPRECOMP_FIBER_STACK_SMALL for the 3DS build")
+if(PSP2I_FIBER_STACK)
+    target_compile_definitions(psprecomp PRIVATE PSPRECOMP_FIBER_STACK=${PSP2I_FIBER_STACK})
+endif()
+if(PSP2I_FIBER_STACK_SMALL)
+    target_compile_definitions(psprecomp PRIVATE PSPRECOMP_FIBER_STACK_SMALL=${PSP2I_FIBER_STACK_SMALL})
+endif()
 # newlib's uint32_t is `long` on ARM: every "%X" of one warns, harmlessly
 # (both are 32 bits here), and would bury the real messages
 target_compile_options(psprecomp PRIVATE -Os -Wno-format -Wno-comment
@@ -90,9 +99,10 @@ if(EXISTS ${PSP2I_GEN_DIR}/recomp_funcs.c)
     target_compile_options(psp2i_game PRIVATE -Os -g0 -w)
     target_link_libraries(psp2i_game PRIVATE psprecomp)
 
-    add_executable(psp2i ${PORT}/host/3ds_main.c)
-    target_compile_options(psp2i PRIVATE -O2 -Wall)
+    add_executable(psp2i ${PORT}/host/3ds_main.c ${PORT}/host/camera.c)
+    target_compile_options(psp2i PRIVATE -O2 -Wall -Wno-format)
     target_compile_definitions(psp2i PRIVATE PSP2I_3DS)
+    target_include_directories(psp2i PRIVATE ${PORT}/host)
     target_link_libraries(psp2i PRIVATE psp2i_game psprecomp ctru m)
     target_link_options(psp2i PRIVATE -Wl,--gc-sections -Wl,-Map=${CMAKE_CURRENT_BINARY_DIR}/psp2i.map)
     psp2i_package(psp2i "PSP2i Recomp" "Phantasy Star Portable 2 Infinity" 0xF5221 CTR-P-P2I3)

@@ -77,8 +77,13 @@ MSYSTEM=MSYS /d/msys64/usr/bin/bash.exe -l /d/work/PSP2I_Recomp_3DS/port/3ds/bui
 - `make_assets.py`: icon and banner drawn from text. Never put game art in.
 - `net_compat.h`: IPv6 declarations and `FIONREAD` for the runtime's
   networking code (soc:U is IPv4 only).
-- `../host/3ds_main.c`: the game's host (T1: a fit check that links all
-  the code and reports memory to `sdmc:/psp2i/report_game.txt`).
+- `../host/3ds_main.c`: the game's host (T2: boots the game from
+  `sdmc:/psp2i/game.iso` with the software rasterizer on the top screen;
+  log `sdmc:/psp2i/psp2i_log.txt`, with each thread's stack peak every 10 s).
+- Host stack sizes: `-DPSP2I_FIBER_STACK=` (threads asking the PSP for 32 KB
+  or more, default 4 MB) and `-DPSP2I_FIBER_STACK_SMALL=` (the rest,
+  512 KB), in bytes, empty = the default. Set them only to measure; an
+  overflow stops the game with "thread 'X' overflowed its N KB host stack".
 - `hello/`: the T0 check app (screens, memory, clock, cores; see
   `psp2i-3ds-test`).
 

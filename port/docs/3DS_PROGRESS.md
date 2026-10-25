@@ -143,9 +143,55 @@ code **63.2 MB**, measured):
 tables load on the console with 26 MB of heap and 31 MB of linear memory
 to spare. T2 has to keep the runtime's fixed buffers small.
 
-## Next: T2 (boot)
+## T2: boot (2026-10-25)
 
-- Shrink the fixed buffers first if the console confirms the tight budget:
-  the vertex buffers, thread stacks sized from what PSP2i creates.
-- Files from the SD (`sdmc:/psp2i/`: the ISO, fonts, saves), the pad,
-  the scheduler, the software rasterizer on the top screen.
+**Checked in Azahar by the user:** the game boots from the SD card, shows
+the translation disclaimer, offers a save file (can't make one: see
+below), plays the opening movie and reaches the **title screen**, at about
+**0.1 fps**. Not run on the console: the decision (with the user) is to
+test in Azahar until the game runs better. The fonts, the DLC and a game
+build are on the console's SD, the ISO is not.
+
+Done:
+
+- `port/host/3ds_main.c`, the T2 host: the ISO from `sdmc:/psp2i/game.iso`
+  (or any `*.iso` there), `GameData/` beside it (fonts, memory stick), the
+  ELF loaded as in `sdl_main.c`, the HLE, the scheduler. Each vblank: the
+  pad (A Circle, B Cross, Y Square, X Triangle, L/ZL L, R/ZR R, Circle Pad
+  the stick, C-stick the camera through `camera.c`) and the PSP's
+  framebuffer from emulated VRAM to the top screen (480x272 picked down to
+  400x240). The bottom screen: the log's lines and the fps. Log
+  `sdmc:/psp2i/psp2i_log.txt`, report `report_game.txt`.
+- psprecomp `3ds` 690be56: `gpu.c`'s three 3.5 MB vertex buffers grow on
+  demand on the 3DS; the game's `.bss` is **1.23 MB** with the whole HLE
+  (it would be ~11.7 MB). `.text` 28.25 MB.
+- Host stacks per thread, from what the thread asks the PSP for: 32 KB or
+  more gets 4 MB, the rest 512 KB. Measured at the title screen:
+
+  | thread | PSP stack | host stack peak |
+  |---|---|---|
+  | user_main | 48 KB | 1,135 KB |
+  | SOUND_THREAD | 12 KB | 8 KB |
+  | fio_th | 4 KB | 3 KB |
+
+  5 MB of stacks in all. The PSP's stack size doesn't predict the host's
+  (user_main 24x): with 1 MB for everyone, user_main overflowed into the
+  scheduler's stack and the next switch jumped to 0; with 8 MB for
+  everyone, the heap ran out before `fio_th` existed and the game waited at
+  the disclaimer for files forever. Each stack has a 4 KB guard checked at
+  every switch: an overflow now stops with the thread's name.
+
+Found, not fixed:
+
+- **Saves:** the PC's save is encrypted (`savecrypt.c`, Windows AES only),
+  so it reads as garbage here and the game can't save over it. A portable
+  AES in `savecrypt.c` (T7) makes saves move between PC, PSP and 3DS. The
+  console copy leaves that save out.
+- **Music:** ATRAC3plus has no decoder here ("playback is silent"), T4.
+- Firmware calls 0xA1336091 and 0x8218B4DD are unimplemented (also on PC).
+
+## Next: T3 (citro3d renderer)
+
+0.1 fps in Azahar is the software rasterizer on an emulated 268 MHz CPU.
+`c3d_ge.c`, a `psp_gpu_backend` on citro3d, moves the drawing to the
+PICA200 (3DS_PLAN.md section 3).
