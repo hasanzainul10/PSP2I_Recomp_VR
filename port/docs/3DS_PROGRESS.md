@@ -456,6 +456,31 @@ read its VRAM); uploads `new`, `rows`, `changed` (VRAM changed under it).
   28.37 MB). Next for the game's own code: find its hot functions (a
   profile of the PC build runs the same generated code) and build those at
   -O2; the 200 MB in all has to stay -Os to fit.
+- **Why some town views cost 5x the GE time (the user's run, hot build,
+  2026-10-26).** The log's `vtx:` line (psprecomp
+  `psp_gpu_vkinds_take`: the CPU vertex loop timed per kind of draw) over
+  290 s, 184 of them in town. The slow views draw **5x the vertices**, at
+  the same cost per vertex; it isn't a bug or a fallback:
+
+  | views | s | fps | game ms/f | ge ms/f | draw ms/f | static unlit v/f | skinned lit v/f |
+  |---|---|---|---|---|---|---|---|
+  | normal (ge < 50 ms/f) | 50 | 5.3 | 113 | 38 | 18 | 3,000-5,000 | 750-1,500 |
+  | slow (ge > 100 ms/f) | 89 | 2.7 | 194 | 130 | 22 | ~19,700 (272 draws) | ~7,240 (77 draws) |
+
+  Cost per vertex (Azahar ticks): **2.9 us** static unlit (`w0 l0`), 6.4
+  with two lights and powf (`w0 l2 p`), **8.1** with 4 bone weights and two
+  lights (`w4 l2 p`), 4.2 skinned unlit. So two lights with powf add ~3.5
+  us a vertex and 4-weight skinning ~1.3. Even the plainest vertex is
+  expensive: `read_one` decodes each component through `comp()` and a
+  memory lookup, `memset`s, then three matrix products (world, view,
+  projection: `to_clip` doesn't combine them), and `to_screen` converts
+  the viewport registers per vertex. The game's own code also grows in
+  those views (113 -> 194 ms/f: more characters to animate).
+  **Options:** a CPU fast path per draw (combined matrix, direct pointers
+  to the vertex data, the common formats decoded without `comp()`, a
+  cheaper powf), or the vertex work on the PICA200's vertex shader (the
+  vertex data copied to linear memory, transform / skinning / lighting in
+  the shader), which removes it from the CPU.
 - **Azahar's CPU speed is not the console's.** Azahar emulates the ARM11
   with its own cycle count and runs this build at "Speed 90-100%", but how
   that compares with the console's 804 MHz with L2 isn't known. The CPU

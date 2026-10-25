@@ -354,6 +354,22 @@ static void time_report(double secs, uint64_t frames) {
     was = s;
     prim_was = prim;
     idle_was = idle_us;
+
+    /* ge by kind of draw: the vertex loop's ms/s and vertices per frame
+     * (w skin weights, l lights, p powf, t through, g texgen, m morph) */
+    psp_gpu_vkind vk[5];
+    const int nvk = psp_gpu_vkinds_take(vk, 5);
+    char line[320];
+    int at = snprintf(line, sizeof line, "vtx:");
+    for (int i = 0; i < nvk && at < (int)sizeof line - 48; i++) {
+        const uint32_t k = vk[i].kind;
+        at += snprintf(line + at, sizeof line - (size_t)at, " [w%u l%u%s%s%s%s %.0f ms %.0f v/f %.0f d/f]",
+                       (unsigned)PSP_VK_WEIGHTS(k), (unsigned)PSP_VK_LIGHTS(k), (k & PSP_VK_POW) ? " p" : "",
+                       (k & PSP_VK_THROUGH) ? " t" : "", (k & PSP_VK_TEXGEN) ? " g" : "",
+                       (k & PSP_VK_MORPH) ? " m" : "", (double)vk[i].ticks * ms,
+                       (double)vk[i].verts / f, (double)vk[i].draws / f);
+    }
+    fprintf(stderr, "%s\n", line);
 }
 
 static void on_vblank(void) {
