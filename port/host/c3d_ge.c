@@ -133,6 +133,11 @@ static int         g_scratch_ok;
 static uint64_t    g_use;
 static uint64_t    g_draw_seq;
 
+/* c3d_draw_on's parts, ticks (D_* below; the c3d report gives us per draw) */
+enum { D_TARGET, D_TEXTURE, D_RING, D_STATE, D_SUBMIT, D_ROWS, D_N };
+static uint64_t g_dt[D_N];
+static uint64_t g_hash_ticks, g_hash_n, g_hash_bytes, g_fill_ticks, g_tex_evictions;   /* tex_get's checks */
+
 static uint64_t n_draws, n_tris, n_uploads, n_readbacks, n_tex_decodes, n_rt_tex, n_approx,
                 n_finish, n_present, n_fail, n_evict, n_cmdfull;
 
@@ -593,11 +598,61 @@ static tex_entry *tex_evict(void) {
         for (int i = 0; i < MAX_TEX; i++)
             if (g_tex[i].used && (!old || g_tex[i].last_use < old->last_use)) old = &g_tex[i];
     }
-    if (old) tex_free(old);
+    if (old) { tex_free(old); g_tex_evictions++; }
     return old;
 }
 
+/* The paletted formats (CLUT4, CLUT8: almost every texture PSP2i decodes)
+ * in one pass: the source walked in its own layout through one pointer, the
+ * palette converted to the PICA's order once, each texel written straight to
+ * its tile position. The generic path below decodes texel by texel into a
+ * temporary, then tiles it: a 512x512 CLUT4 texture took ~150 ms in Azahar
+ * (3DS_PROGRESS.md, T4). Same texels; 0 to leave the texture to that path. */
+static int tex_fill_clut(tex_entry *e, const psp_gpu_state *st) {
+    if ((st->tex_psm != 4 && st->tex_psm != 5) || e->gw != st->tex_w || e->gh != st->tex_h) return 0;
+    psp_gpu_texinfo ti;
+    if (!psp_gpu_texture_info(&ti) || ti.w != e->gw || ti.h != e->gh) return 0;
+    const int c4 = ti.psm == 4;
+    uint32_t pal[256];
+    for (uint32_t i = 0; i < (c4 ? 16u : 256u); i++) pal[i] = to_pica(ti.pal[i]);
+    const uint32_t row_bytes = c4 ? ti.bufw / 2 : ti.bufw;          /* the buffer's */
+    const uint32_t bpr = row_bytes / 16 ? row_bytes / 16 : 1;          /* swizzle blocks a row */
+    const uint32_t wbytes = c4 ? ti.w / 2 : ti.w;                     /* the texture's */
+    uint32_t *tx = (uint32_t *)e->tex.data;
+    for (uint32_t y = 0; y < ti.h; y++) {
+        const uint32_t my = mrow(y, e->gh);
+        uint32_t *trow = tx + (((my >> 3) * (e->gw >> 3)) << 6) + g_my[my & 7];
+        for (uint32_t xb = 0; xb < wbytes; xb += 16) {
+            const uint8_t *src = ti.swizzled ? ti.data + ((y / 8) * bpr + xb / 16) * 128 + (y % 8) * 16
+                                             : ti.data + y * row_bytes + xb;
+            const uint32_t nb = wbytes - xb < 16 ? wbytes - xb : 16;
+            for (uint32_t k = 0; k < nb; k++) {
+                const uint32_t b = src[k];
+                if (c4) {
+                    const uint32_t x = (xb + k) * 2;
+                    trow[((x >> 3) << 6) + g_mx[x & 7]] = pal[b & 15];
+                    trow[(((x + 1) >> 3) << 6) + g_mx[(x + 1) & 7]] = pal[b >> 4];
+                } else {
+                    const uint32_t x = xb + k;
+                    trow[((x >> 3) << 6) + g_mx[x & 7]] = pal[b];
+                }
+            }
+        }
+    }
+    return 1;
+}
+
 static void tex_fill(tex_entry *e, const psp_gpu_state *st) {
+    {
+        const int pb = prof(P_TEX);
+        const int ok = tex_fill_clut(e, st);
+        prof(pb);
+        if (ok) {
+            GSPGPU_FlushDataCache(e->tex.data, e->tex.size);
+            n_tex_decodes++;
+            return;
+        }
+    }
     uint32_t *px = (uint32_t *)malloc((size_t)st->tex_w * st->tex_h * 4);
     if (!px) return;
     const int pb = prof(P_TEX);
@@ -618,8 +673,14 @@ static tex_entry *tex_get(const psp_gpu_state *st) {
     tex_entry *e = tex_find(st->tex_key);
     uint64_t f = frame_no();
     if (e && e->check_frame == f) { e->last_use = ++g_use; return e; }
+    const uint64_t h0 = svcGetSystemTick();
     uint64_t h = psp_gpu_texture_hash();
+    g_hash_ticks += svcGetSystemTick() - h0;
+    g_hash_n++;
+    g_hash_bytes += (uint64_t)st->tex_bufw * st->tex_h;   /* texels, roughly */
     if (e && e->hash == h) { e->check_frame = f; e->last_use = ++g_use; return e; }
+    const int was_new = !e;
+    const uint64_t ev0 = g_tex_evictions;
     if (e) before_cpu_write(e->seg);             /* new bytes under the same key */
     else {
         const uint32_t gw = st->tex_w < 8 ? 8 : st->tex_w, gh = st->tex_h < 8 ? 8 : st->tex_h;
@@ -634,7 +695,19 @@ static tex_entry *tex_get(const psp_gpu_state *st) {
         g_tex_bytes += e->tex.size;
         e->key = st->tex_key; e->w = st->tex_w; e->h = st->tex_h; e->gw = gw; e->gh = gh; e->used = 1;
     }
+    const uint64_t f0 = svcGetSystemTick();
     tex_fill(e, st);
+    const uint64_t fd = svcGetSystemTick() - f0;
+    g_fill_ticks += fd;
+    {   /* which textures are decoded (a few per 10 s) */
+        static uint64_t win, logged;
+        if (f / 600 != win) { win = f / 600; logged = 0; }
+        if (logged++ < 30)
+            fprintf(stderr, "c3d: decode %s%s addr %08X psm %d %ux%u bufw %u swz %d: %.2f ms\n",
+                    was_new ? "new" : "changed", g_tex_evictions != ev0 ? " (evicted to fit)" : "",
+                    (unsigned)st->tex_addr, st->tex_psm, (unsigned)st->tex_w, (unsigned)st->tex_h,
+                    (unsigned)st->tex_bufw, st->tex_swz, (double)fd * 1000.0 / SYSCLOCK_ARM11);
+    }
     e->hash = h; e->check_frame = f; e->last_use = ++g_use;
     return e;
 }
@@ -987,6 +1060,8 @@ static int c3d_draw_on(const psp_gpu_state *st, const psp_gpu_vertex *v, int nve
     if (!g_ok || (st->fb_addr & 0x0F000000u) != 0x04000000u || !st->fb_stride || st->fb_stride > RT_W || nverts <= 0)
         return 1;
     if ((uint32_t)nverts > RING_VERTS) return 1;
+    uint64_t tk = svcGetSystemTick(), tn;
+#define DPART(p) (tn = svcGetSystemTick(), g_dt[p] += tn - tk, tk = tn)
     frame_open();
     cmd_room();
     const uint32_t off = vram_off(st->fb_addr);
@@ -1013,6 +1088,7 @@ static int c3d_draw_on(const psp_gpu_state *st, const psp_gpu_vertex *v, int nve
         }
     }
 
+    DPART(D_TARGET);
     void *depth = NULL;
     if (st->zb_stride && (st->ztest || (st->clear && (st->clear_which & 4)))) depth = depth_get(vram_off(st->zb_addr));
 
@@ -1023,8 +1099,10 @@ static int c3d_draw_on(const psp_gpu_state *st, const psp_gpu_vertex *v, int nve
         if (!tex) { n_fail++; return 1; }
     }
 
+    DPART(D_TEXTURE);
     const int first = ring_put(v, nverts);
     if (first < 0) return 1;
+    DPART(D_RING);
 
     draw_on(t, depth);
     t->seg = g_seg;
@@ -1040,7 +1118,9 @@ static int c3d_draw_on(const psp_gpu_state *st, const psp_gpu_vertex *v, int nve
         C3D_TexBind(0, tex);
     }
     C3D_FVUnifSet(GPU_VERTEX_SHADER, u_vp, 2.0f / (float)t->w, 2.0f / (float)t->h, uvs[0], uvs[1]);
+    DPART(D_STATE);
     C3D_DrawArrays(GPU_TRIANGLES, first, nverts);
+    DPART(D_SUBMIT);
 
     float ymin = 1e9f, ymax = -1e9f;
     for (int i = 0; i < nverts; i++) { if (v[i].y < ymin) ymin = v[i].y; if (v[i].y > ymax) ymax = v[i].y; }
@@ -1052,6 +1132,8 @@ static int c3d_draw_on(const psp_gpu_state *st, const psp_gpu_vertex *v, int nve
     t->seq = ++g_draw_seq;
     n_draws++;
     n_tris += (uint64_t)nverts / 3;
+    DPART(D_ROWS);
+#undef DPART
     return 0;
 }
 
@@ -1301,6 +1383,24 @@ void c3d_ge_report(FILE *out) {
             (unsigned long long)n_readbacks, (unsigned long long)n_tex_decodes, texs, (unsigned long)(g_tex_bytes >> 10),
             (unsigned long long)n_rt_tex, (unsigned long long)n_approx, (unsigned long long)n_fail,
             (unsigned long long)n_evict, (unsigned long long)n_xfer, (unsigned long long)n_skip, rts, depths, (unsigned long)(linearSpaceFree() >> 10), (unsigned long)(vramSpaceFree() >> 10));
+    {   /* where a draw's time goes, since the last report (nested waits and decodes included) */
+        static uint64_t was[D_N], draws_was;
+        const double nd = n_draws > draws_was ? (double)(n_draws - draws_was) : 1.0, us = 1e6 / SYSCLOCK_ARM11 / nd;
+        fprintf(out, "c3d: us per draw: target %.1f, depth+texture %.1f, ring %.1f, state %.1f, submit %.1f, rows %.1f\n",
+                (double)(g_dt[D_TARGET] - was[D_TARGET]) * us, (double)(g_dt[D_TEXTURE] - was[D_TEXTURE]) * us,
+                (double)(g_dt[D_RING] - was[D_RING]) * us, (double)(g_dt[D_STATE] - was[D_STATE]) * us,
+                (double)(g_dt[D_SUBMIT] - was[D_SUBMIT]) * us, (double)(g_dt[D_ROWS] - was[D_ROWS]) * us);
+        memcpy(was, g_dt, sizeof was);
+        draws_was = n_draws;
+        static uint64_t hn_was, ht_was, hb_was, ft_was, fr_was;
+        const uint64_t fr = frame_no();
+        const double nf = fr > fr_was ? (double)(fr - fr_was) : 1.0;
+        fprintf(out, "c3d: texture checks per frame: %.0f hashes, %.0f K texels, %.1f ms hashing, %.1f ms decoding\n",
+                (double)(g_hash_n - hn_was) / nf, (double)(g_hash_bytes - hb_was) / nf / 1024.0,
+                (double)(g_hash_ticks - ht_was) * 1000.0 / SYSCLOCK_ARM11 / nf,
+                (double)(g_fill_ticks - ft_was) * 1000.0 / SYSCLOCK_ARM11 / nf);
+        hn_was = g_hash_n; ht_was = g_hash_ticks; hb_was = g_hash_bytes; ft_was = g_fill_ticks; fr_was = fr;
+    }
     for (int i = 0; i < MAX_RT; i++) {
         const rt_entry *t = &g_rt[i];
         if (!t->used) continue;

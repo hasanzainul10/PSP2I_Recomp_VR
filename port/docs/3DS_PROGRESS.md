@@ -512,6 +512,24 @@ read its VRAM); uploads `new`, `rows`, `changed` (VRAM changed under it).
   **4.25 -> 2.88** (static, two lights); unlit unchanged at 0.95. Its
   busiest seconds drew 35,000 vertices and 609 draws a frame (the last
   run's: 27,500 and 430) at 3.6 fps with the same GE time (77 ms a frame).
+- **O2, where a citro3d draw's time goes (2026-10-26).** `c3d_draw_on`
+  timed in parts (the `c3d: us per draw` line every 10 s), the user's town
+  runs in Azahar: target bookkeeping 4-13 us, **depth + texture lookup
+  26-154**, vertex ring 2-11, state setters 2.7, submit (`C3D_DrawArrays`,
+  citro3d emitting dirty state) 16, row marking 5-10. So caching state
+  saves at most part of ~19 us a draw. The texture part (`c3d: texture
+  checks per frame`): 60-137 hashes a frame (~0.8 M texels, 4-6 ms), and
+  decoding up to 70 ms a frame in bursts. The decodes (`c3d: decode` lines)
+  were nearly all **new** CLUT4 / CLUT8 textures in main RAM, ~150 ms for a
+  512x512 CLUT4 (texel by texel through `psp_gpu_decode_texture`, then a
+  second pass into tiles); a few evicted to fit the 12 MB budget.
+  **Fast paletted decode** (`tex_fill_clut`, psprecomp
+  `psp_gpu_texture_info`): one pass through a pointer, palette converted
+  once, straight to tile order; the first 20 checked against the old path,
+  0 texels different. Decoding 8-70 -> 0-2 ms a frame; steady frame rates
+  unchanged (busy views 3.6 fps): decodes come in bursts as scenery comes
+  into view, so this shortens those stalls. Left in the draw: hashing
+  (4-6 ms a frame) and the submit.
 - **A GPU command buffer PANIC in busy town scenes (fixed).** 1,550-1,630
   draws a frame filled citro3d's 512 KB command buffer: svcBreak in
   libctru's `GPUCMD_AddInternal` at 105 s. The check before each draw used
