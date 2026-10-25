@@ -76,9 +76,13 @@ endif()
 if(PSP2I_FIBER_STACK_SMALL)
     target_compile_definitions(psprecomp PRIVATE PSPRECOMP_FIBER_STACK_SMALL=${PSP2I_FIBER_STACK_SMALL})
 endif()
+# The runtime is small, and its GE vertex work (gpu.c) took 300-470 ms of
+# every second in town at -Os (T4): it's built for speed. -Os only matters
+# for the ~200 MB of game code below.
+set(PSP2I_RUNTIME_OPT "-O2" CACHE STRING "optimization flag for the psprecomp runtime")
 # newlib's uint32_t is `long` on ARM: every "%X" of one warns, harmlessly
 # (both are 32 bits here), and would bury the real messages
-target_compile_options(psprecomp PRIVATE -Os -Wno-format -Wno-comment
+target_compile_options(psprecomp PRIVATE ${PSP2I_RUNTIME_OPT} -Wno-format -Wno-comment
     -include ${CMAKE_CURRENT_SOURCE_DIR}/net_compat.h)
 
 if(EXISTS ${PSP2I_GEN_DIR}/recomp_funcs.c)

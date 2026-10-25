@@ -13,7 +13,8 @@ each second goes (section "T4"), and the per-frame target thrashing in the
 field is fixed in code but **not yet checked in a field**.
 
 **Next step:** in Azahar the copies between targets and VRAM are gone
-(section "T4") and the game is CPU-bound at 2 fps: the game's code plus the
+(section "T4"), the runtime is built at -O2, and the game is CPU-bound at
+5-6 fps in town: the game's code plus the
 GE's vertex work. Measure that on the console before choosing CPU work (the
 ISO isn't on its SD: ask the user). The log's `time:` lines and the `c3d:`
 per-cause counts are in `%APPDATA%\Azahar\sdmc\psp2i\psp2i_log.txt` (on
@@ -384,6 +385,20 @@ read its VRAM); uploads `new`, `rows`, `changed` (VRAM changed under it).
   draw 45-65, wait 12, readback 0-75, present 3, idle 5. **Still 2 fps in
   Azahar**: the copies are gone, and what's left is CPU work (game + ge,
   about 900 ms of every second).
+- **The runtime at -O2 (it was -Os, like the game's code; `PSP2I_RUNTIME_OPT`
+  in `port/3ds/CMakeLists.txt`). The user's town runs before and after
+  (2026-10-25), the seconds with 330-480 draws a frame:**
+
+  | | frames a second | game ms/frame | ge ms/frame |
+  |---|---|---|---|
+  | -Os (80 s) | 3.2 (mostly 2-3) | 180 | 96 |
+  | -O2 (37 s) | **5.4 (all 5-6)** | 121 | 37 |
+
+  The GE's vertex work is 2.6 times faster, and the game's part too (it
+  calls the runtime for the HLE and memory). `.text` grew by 70 KB (28.30 to
+  28.37 MB). Next for the game's own code: find its hot functions (a
+  profile of the PC build runs the same generated code) and build those at
+  -O2; the 200 MB in all has to stay -Os to fit.
 - **Azahar's CPU speed is not the console's.** Azahar emulates the ARM11
   with its own cycle count and runs this build at "Speed 90-100%", but how
   that compares with the console's 804 MHz with L2 isn't known. The CPU
