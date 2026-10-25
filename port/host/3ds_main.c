@@ -240,6 +240,46 @@ static uint8_t stick_byte(int v, int flip) {
     return (uint8_t)(b < 0 ? 0 : b > 255 ? 255 : b);
 }
 
+/* sdmc:/psp2i/input: presses played at fixed times, for testing without
+ * hands on the pad (Azahar or the console). One per line:
+ *   <second> <BUTTON[+BUTTON...]> <duration>      e.g.  20.5 CROSS 0.3
+ *   <second> STICK <x> <y> <duration>             PSP stick bytes, 128 = centre
+ * seconds from boot; buttons CROSS CIRCLE SQUARE TRIANGLE START SELECT L R
+ * UP DOWN LEFT RIGHT. They add to the real pad; no file, no change. */
+typedef struct { float at, dur; uint32_t bits; int ax, ay; int told; } scripted_press;
+static scripted_press g_script[256];
+static int g_nscript;
+static u64 g_boot_tick;
+
+static void script_load(void) {
+    static const struct { const char *name; uint32_t bit; } NAMES[] = {
+        { "CROSS", P_CROSS }, { "CIRCLE", P_CIRCLE }, { "SQUARE", P_SQUARE }, { "TRIANGLE", P_TRIANGLE },
+        { "START", P_START }, { "SELECT", P_SELECT }, { "L", P_L }, { "R", P_R },
+        { "UP", P_UP }, { "DOWN", P_DOWN }, { "LEFT", P_LEFT }, { "RIGHT", P_RIGHT },
+    };
+    FILE *f = fopen(BASE "/input", "r");
+    if (!f) return;
+    char line[128];
+    while (g_nscript < 256 && fgets(line, sizeof line, f)) {
+        scripted_press p = { 0 };
+        char what[64];
+        p.ax = p.ay = -1;
+        if (sscanf(line, "%f %63s", &p.at, what) != 2) continue;
+        if (!strcmp(what, "STICK")) {
+            if (sscanf(line, "%*f %*s %d %d %f", &p.ax, &p.ay, &p.dur) != 3) continue;
+        } else {
+            if (sscanf(line, "%*f %*s %f", &p.dur) != 1) continue;
+            for (char *tok = strtok(what, "+"); tok; tok = strtok(NULL, "+"))
+                for (size_t k = 0; k < sizeof NAMES / sizeof NAMES[0]; k++)
+                    if (!strcmp(tok, NAMES[k].name)) p.bits |= NAMES[k].bit;
+            if (!p.bits) continue;
+        }
+        g_script[g_nscript++] = p;
+    }
+    fclose(f);
+    if (g_nscript) say("input: %d scripted presses from " BASE "/input", g_nscript);
+}
+
 static void read_pad(void) {
     static const struct { u32 key; uint32_t bit; } MAP[] = {
         { KEY_A, P_CIRCLE }, { KEY_B, P_CROSS }, { KEY_Y, P_SQUARE }, { KEY_X, P_TRIANGLE },
@@ -254,7 +294,18 @@ static void read_pad(void) {
     circlePosition cp, cs;
     hidCircleRead(&cp);
     hidCstickRead(&cs);
-    psp_ctrl_set(bits, stick_byte(cp.dx, 0), stick_byte(cp.dy, 1));
+    uint8_t ax = stick_byte(cp.dx, 0), ay = stick_byte(cp.dy, 1);
+    if (g_nscript) {
+        const float now = (float)((double)(svcGetSystemTick() - g_boot_tick) / SYSCLOCK_ARM11);
+        for (int k = 0; k < g_nscript; k++) {
+            scripted_press *p = &g_script[k];
+            if (now < p->at || now >= p->at + p->dur) continue;
+            bits |= p->bits;
+            if (p->ax >= 0) { ax = (uint8_t)p->ax; ay = (uint8_t)p->ay; }
+            if (!p->told) { p->told = 1; fprintf(stderr, "input: %.1f s press %04lX stick %d,%d\n", now, (unsigned long)p->bits, p->ax, p->ay); }
+        }
+    }
+    psp_ctrl_set(bits, ax, ay);
     camera_set_stick(stick_byte(cs.dx, 0), stick_byte(cs.dy, 1));
 }
 
@@ -343,6 +394,8 @@ int main(void)
         else say("citro3d could not start: drawing in software");
     }
     say("drawing: %s", g_gpu ? "PICA200 (citro3d)" : "software");
+    g_boot_tick = svcGetSystemTick();
+    script_load();
     for (int x = 0; x < TOP_W; x++) g_sx[x] = (uint16_t)(x * SCREEN_W / TOP_W);
     for (int y = 0; y < TOP_H; y++) g_sy[y] = (uint16_t)(y * SCREEN_H / TOP_H);
 

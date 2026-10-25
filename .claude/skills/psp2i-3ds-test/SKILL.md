@@ -66,7 +66,8 @@ mode by default). Data: `%APPDATA%\Azahar\` (`log\azahar_log.txt`,
   window is on screen and on top. The working recipe: find the window,
   `SetWindowPos(HWND_TOPMOST, 40, 40, 1021, 727, NOACTIVATE)`, grab that
   rectangle with `CopyFromScreen`. A ready script from this session did
-  exactly that; rewrite it if it's gone (the user allowed driving Azahar
+  exactly that, now `port/3ds/tools/azrun.ps1` (`-Wait N -Shot name
+  [-NoRestart]`, screenshots into `port/3ds/build/shots/`) (the user allowed driving Azahar
   while debugging the renderer: restart it with each build, screenshot).
 - **sdmc:/psp2i/ control files** (the host reads them at start-up; leave
   them empty or delete them when done, they cost time on every run):
@@ -75,6 +76,11 @@ mode by default). Data: `%APPDATA%\Azahar\` (`log\azahar_log.txt`,
     second into `dump_<s>.txt` (`psp_gpu_dump_next_frame`);
   - `shots`: seconds: the displayed buffer as `shot_<s>.ppm` (480x272),
     read back from the GPU.
+  - `input`: scripted presses, `<second> <BUTTON[+BUTTON]> <duration>` or
+    `<second> STICK <x> <y> <duration>` per line (seconds from boot; names
+    CROSS CIRCLE SQUARE TRIANGLE START SELECT L R UP DOWN LEFT RIGHT); the
+    log prints `input: ...` as each fires. How to drive the game without
+    hands on the pad.
 - The log's `c3d:` lines every 10 s: draws, read-backs, uploads, texture
   decodes, VRAM free, and per target its draws/uploads/read-backs and
   whether the GPU is ahead of VRAM.

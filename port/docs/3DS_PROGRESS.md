@@ -4,6 +4,45 @@ Plan: [3DS_PLAN.md](3DS_PLAN.md). Branch `3ds_port`, worktree
 `D:\work\PSP2I_Recomp_3DS`. Skills: `psp2i-3ds-build`, `psp2i-3ds-test`.
 The user's console: **New 3DS XL, Luma3DS**.
 
+## Handoff (2026-10-25): where to pick up
+
+**State:** T0-T2 done. T3 (citro3d renderer) works for the screens checked
+in Azahar: the translation disclaimer and the save dialog render like the
+PC build at 28-30 fps. Everything after the save dialog is unchecked,
+because the dialog waits for a button.
+
+**Next step, ready to run:** scripted input is in the host (built, **not
+yet run**): `sdmc:/psp2i/input` = `%APPDATA%\Azahar\sdmc\psp2i\input`,
+lines `<second> <BUTTON[+BUTTON]> <duration>` or `<second> STICK <x> <y>
+<duration>`, seconds from boot (format in `3ds_main.c`, `script_load`). A
+first script is already on Azahar's SD: CIRCLE/CROSS at 17-24 s, START at
+27 s, more at 30-33 s. Then:
+
+1. Build: `MSYSTEM=MSYS /d/msys64/usr/bin/bash.exe -l
+   /d/work/PSP2I_Recomp_3DS/port/3ds/build.sh Release psp2i_3dsx` (`port/gen`
+   is generated; only changed files rebuild).
+2. Run and screenshot: `powershell -File port/3ds/tools/azrun.ps1 -Wait 16
+   -Shot a16`, then `-NoRestart -Wait 5 -Shot a21` and so on. It restarts
+   Azahar, puts its window on top at 40,40 (1021x727), saves
+   `port/3ds/build/shots/<name>.png` and prints the log tail; the log shows
+   `input: <t> s press ...` for each scripted press. The user allowed driving
+   Azahar (closing and restarting it) for renderer debugging.
+3. Get past the dialog, through the title, into new game / the lobby / a
+   field, and compare each with the PC build's frames (`psp2i.exe ...
+   --headless --seconds N --capture-every 300 --capture-dir <dir>` in the
+   main checkout's `port/build/Release`; see the test skill). Find each
+   difference with `dumpframes` and the `c3d:` counters before fixing it in
+   `c3d_ge.c` (CLAUDE.md: find the decision).
+
+**Open items:** saves (the PC save is encrypted; `savecrypt.c` needs a
+portable AES: T7), music (no ATRAC3plus decoder: T4), overlapping targets
+go through VRAM (gl_ge.c's GPU `rt_xfer` not ported), nothing measured on
+the console since T1 (its SD has the fonts, the DLC and an old build, not
+the ISO; the user wants Azahar until the game runs better).
+
+**Don't touch** `D:\work\PSP2I_Recomp_VR`: another session's uncommitted VR
+work lives there. Only read it or run its PC build.
+
 ## Decisions
 
 - **2026-10-25 · The game ships as a `.cia`.** Its exheader
