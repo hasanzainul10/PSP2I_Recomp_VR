@@ -207,6 +207,31 @@ exit criterion.
 | **T7 Saves, settings, polish** | Saves on SD (compatible with the Windows `GameData/ms` layout), an engine menu page (stereo strength, HUD layout), a home menu banner and icon. | A save made on 3DS loads on PC and the reverse. |
 | **T8 Online (optional)** | RPCN / ad hoc server over soc:u, after offline is stable. | A lobby joined with a PC player, nothing changed in the shared state. |
 
+### T4 speed: the plan from 2026-10-26
+
+Where a busy town frame goes in Azahar after the stack fix, the hot build and
+the CPU vertex fast path (3DS_PROGRESS.md, T4): **game code 185 ms, GE vertex
+work 75, citro3d draws 25, waits and the rest ~15** (3.3 fps); normal views
+113 / 38 / 18 (5-6 fps). Two facts set the order: the generated code keeps
+the MIPS registers in the global `psp_cpu` (`#define r_v0 psp_cpu.r[2]`), so
+the compiler reloads them after every guest store (a byte store may alias
+it) and every call; and GE lists run synchronously inside the enqueue
+(`ge.c`), so the game waits for all GE work.
+
+| Step | Work | Measure | Guess |
+|---|---|---|---|
+| **O0** console baseline | The ISO on the console's SD, the current `.cia`; read `time:` / `vtx:`. Azahar doesn't model the CPU speed or cores, so this can reorder the rest. | console | - |
+| **O1** lighting | Per draw instead of per vertex: directional lights' directions and half vectors, terms with a zero colour skipped, specular only when it contributes. `PSP2I_VTX_VERIFY` checks it. All platforms. | `vtx:` us/vertex for `l2 p` kinds | busy GE 75 -> ~45 ms |
+| **O2** citro3d state | ~55 us a draw: don't send texenv, blend, depth, uniforms that didn't change. | `draw` ms/frame | part of 25 ms |
+| **O3** registers in locals | allegrexrecomp: each function copies the registers it uses into locals at entry, writes them back to `psp_cpu` before any call, syscall, dispatch or return and reloads after calls (a call can switch PSP threads or run a hook). Prototype on the hot list; game time on PC (town replay) then 3DS; `.text` watched. All platforms. | `game` ms/frame | if 1.5-2x: busy -60..90 ms |
+| **O4** GE off the game's thread | (a) each draw's vertex loop split with core 2 (no change in behaviour), or (b) lists asynchronous like the hardware, waiting at DrawSync / ListSync / callbacks / VRAM reads (hides up to ~100 ms; risk: a game changing data a queued list still reads). Chosen after O0. | console | up to -100 ms |
+| **O5** vertex work on the PICA200 | Vertex data copied to linear memory, transform and skinning (then lighting) in the vertex shader; replaces O1 / O4 for the GE time. Only if the GE is still the bottleneck on the console. | console | most of the GE time |
+
+Order: O1, O2 (small, measurable in Azahar), then O3 (the biggest number);
+O4 / O5 after O0. If O1-O3 land as guessed: busy views ~150-180 ms a frame
+(5-6 fps), normal views 8-10 fps in Azahar; the console decides what that
+means.
+
 ## 11. Risks
 
 - **CPU speed is the main risk.** PSP2i has more enemies and effects than

@@ -500,6 +500,18 @@ read its VRAM); uploads `new`, `rows`, `changed` (VRAM changed under it).
   -> 5.36. Lighting (`psp_ge_light`, ~3 us a vertex for two lights) is now
   most of the GE time; in busy views the **game's own code (185 ms a
   frame) is the biggest part**.
+- **O1, prepared lighting (3DS_PLAN.md "T4 speed", 2026-10-26).**
+  `psp_ge_light_prepare` once per draw (directional lights' direction and
+  half vector, light x material colours, directional ambient folded, zero
+  terms dropped), `psp_ge_light_fast` per vertex, in the fast path only.
+  Checked: a randomized test (`test_ge_vertex`, 160,000 cases, within
+  1e-4); PC town replay, 13.1 million lit vertices with identical colours
+  (this game's lights have no ambient or specular colour, so the prepared
+  form does the same float operations). The user's town run in Azahar
+  (208 s): lit vertices **5.36 -> 3.82 us** (skinned, two lights) and
+  **4.25 -> 2.88** (static, two lights); unlit unchanged at 0.95. Its
+  busiest seconds drew 35,000 vertices and 609 draws a frame (the last
+  run's: 27,500 and 430) at 3.6 fps with the same GE time (77 ms a frame).
 - **A GPU command buffer PANIC in busy town scenes (fixed).** 1,550-1,630
   draws a frame filled citro3d's 512 KB command buffer: svcBreak in
   libctru's `GPUCMD_AddInternal` at 105 s. The check before each draw used
