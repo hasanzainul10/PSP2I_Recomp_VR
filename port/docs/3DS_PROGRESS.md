@@ -530,6 +530,23 @@ read its VRAM); uploads `new`, `rows`, `changed` (VRAM changed under it).
   unchanged (busy views 3.6 fps): decodes come in bursts as scenery comes
   into view, so this shortens those stalls. Left in the draw: hashing
   (4-6 ms a frame) and the submit.
+- **O2, the rest: a citro3d state cache and a texture re-check schedule
+  (2026-10-26).** `cs_*` in `c3d_ge.c` call a citro3d setter only when the
+  value changed (scissor, depth, blend, blend colour, alpha test, texenv,
+  bound texture, viewport uniform); `C3D_FrameDrawOn` turns the scissor off
+  (its `C3D_SetViewport` writes the scissor mode: disassembly), so a target
+  switch forgets it, and the overlap copies and the present forget all of
+  it. **Submit 16 -> 10 us a draw, a draw 56 -> 44-45 us** in town.
+  Texture bytes in RAM are re-hashed on a schedule (1, 2, 4 ... 16 frames
+  while unchanged), every frame for VRAM textures and for 3 s after a
+  loading-like file read (`psp_mem_load_writes`: 96 KB or more, or 4 KB or
+  more somewhere the last 8 reads didn't touch; the town streams a 270 MB
+  file 57-70 KB at a time into one buffer, ~5 reads a second, found with
+  `PSPRECOMP_IO_TRACE` on the PC build), the CLUT on every first use in a
+  frame; a faster 32-bit hash. In town after a few seconds: ~20 hashes a
+  frame with ~140 skipped, hashing 4-6 -> 1-2 ms a frame. The user saw no
+  stale or wrong textures (2 runs). Busy views 3.6-3.8 fps across the runs
+  (the views differ run to run). O2 in all: ~10 ms a frame of ~290.
 - **A GPU command buffer PANIC in busy town scenes (fixed).** 1,550-1,630
   draws a frame filled citro3d's 512 KB command buffer: svcBreak in
   libctru's `GPUCMD_AddInternal` at 105 s. The check before each draw used

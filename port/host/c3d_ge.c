@@ -118,7 +118,9 @@ typedef struct {
 
 typedef struct {
     int used;
-    uint64_t key, hash, check_frame, last_use;
+    uint64_t key, data_hash, clut_hash, check_frame, last_use;
+    uint64_t next_data_check;                    /* tex_get: the bytes' next check (frame) */
+    uint32_t data_gap;                           /* frames between those checks, 1..TEX_GAP_MAX */
     uint32_t w, h, gw, gh;                       /* the PSP's size; the GPU's (8 at least) */
     C3D_Tex tex;
     uint32_t seg;
@@ -136,7 +138,7 @@ static uint64_t    g_draw_seq;
 /* c3d_draw_on's parts, ticks (D_* below; the c3d report gives us per draw) */
 enum { D_TARGET, D_TEXTURE, D_RING, D_STATE, D_SUBMIT, D_ROWS, D_N };
 static uint64_t g_dt[D_N];
-static uint64_t g_hash_ticks, g_hash_n, g_hash_bytes, g_fill_ticks, g_tex_evictions;   /* tex_get's checks */
+static uint64_t g_hash_ticks, g_hash_n, g_hash_bytes, g_fill_ticks, g_tex_evictions, g_hash_skip;   /* tex_get's checks */
 
 static uint64_t n_draws, n_tris, n_uploads, n_readbacks, n_tex_decodes, n_rt_tex, n_approx,
                 n_finish, n_present, n_fail, n_evict, n_cmdfull;
@@ -669,16 +671,47 @@ static void tex_fill(tex_entry *e, const psp_gpu_state *st) {
     prof(pb);
 }
 
+/* When a cached texture is checked against the PSP's memory. Its CLUT on the
+ * first use in every frame (palette animations; at most 1 KB). Its bytes:
+ * every frame for a texture in VRAM (the GE draws there) and while the game
+ * is loading (a loading-like file read, psp_mem_load_writes, in the last
+ * TEX_LOAD_MS: PSP2i decompresses what it reads after reading it; time, not
+ * frames, as the 3DS draws a few frames a second), else on a schedule that doubles while they stay the same, up to
+ * TEX_GAP_MAX frames, back to every frame when they change. Hashing every texture every frame was 4-6 ms a
+ * frame in town (3DS_PROGRESS.md, T4). */
+#define TEX_GAP_MAX     16u
+#define TEX_LOAD_MS     3000u
+static uint32_t g_io_seen;
+static uint64_t g_io_tick;
+
 static tex_entry *tex_get(const psp_gpu_state *st) {
     tex_entry *e = tex_find(st->tex_key);
     uint64_t f = frame_no();
     if (e && e->check_frame == f) { e->last_use = ++g_use; return e; }
+    const uint32_t io = psp_mem_load_writes();
+    const uint64_t now = svcGetSystemTick();
+    if (io != g_io_seen) { g_io_seen = io; g_io_tick = now; }
+    const int sure = (st->tex_addr & 0x0F000000u) == 0x04000000u ||
+                     now - g_io_tick < (uint64_t)SYSCLOCK_ARM11 / 1000u * TEX_LOAD_MS;
     const uint64_t h0 = svcGetSystemTick();
-    uint64_t h = psp_gpu_texture_hash();
+    const uint64_t ch = psp_gpu_clut_hash();
+    uint64_t dh = 0;
+    const int skip = e && e->clut_hash == ch && !sure && f < e->next_data_check;
+    if (skip) g_hash_skip++;
+    if (!skip) {
+        dh = psp_gpu_texture_data_hash();
+        g_hash_n++;
+        g_hash_bytes += (uint64_t)st->tex_bufw * st->tex_h;   /* texels, roughly */
+    }
     g_hash_ticks += svcGetSystemTick() - h0;
-    g_hash_n++;
-    g_hash_bytes += (uint64_t)st->tex_bufw * st->tex_h;   /* texels, roughly */
-    if (e && e->hash == h) { e->check_frame = f; e->last_use = ++g_use; return e; }
+    if (e && e->clut_hash == ch && (skip || e->data_hash == dh)) {
+        if (!skip) {
+            e->data_gap = e->data_gap * 2 > TEX_GAP_MAX ? TEX_GAP_MAX : e->data_gap * 2;
+            e->next_data_check = f + e->data_gap;
+        }
+        e->check_frame = f; e->last_use = ++g_use;
+        return e;
+    }
     const int was_new = !e;
     const uint64_t ev0 = g_tex_evictions;
     if (e) before_cpu_write(e->seg);             /* new bytes under the same key */
@@ -708,7 +741,9 @@ static tex_entry *tex_get(const psp_gpu_state *st) {
                     (unsigned)st->tex_addr, st->tex_psm, (unsigned)st->tex_w, (unsigned)st->tex_h,
                     (unsigned)st->tex_bufw, st->tex_swz, (double)fd * 1000.0 / SYSCLOCK_ARM11);
     }
-    e->hash = h; e->check_frame = f; e->last_use = ++g_use;
+    e->data_hash = dh; e->clut_hash = ch;
+    e->data_gap = 1; e->next_data_check = f + 1;
+    e->check_frame = f; e->last_use = ++g_use;
     return e;
 }
 
@@ -791,6 +826,80 @@ static GPU_BLENDFACTOR map_factor(int f, int is_src, uint32_t fix, uint32_t *ble
     }
 }
 
+/* citro3d sends a state group to the GPU when its setter marks it dirty, and
+ * the setters mark it dirty even for the value it already has
+ * (C3D_GetTexEnv does by being called). So the draws set what changed only:
+ * the submit (C3D_DrawArrays) was 16 us a draw in town (3DS_PROGRESS.md,
+ * T4). Code that sets state another way (the overlap copies, the present,
+ * set-up) calls state_forget. */
+static struct {
+    int valid;
+    u32 sc[4];
+    int dt_on; GPU_TESTFUNC dt_fn; GPU_WRITEMASK dt_mask;
+    GPU_BLENDEQUATION be_c, be_a; GPU_BLENDFACTOR bs_c, bd_c, bs_a, bd_a;
+    u32 bcolor;
+    int at_on; GPU_TESTFUNC at_fn; int at_ref;
+    C3D_TexEnv env;
+    const C3D_Tex *tex; C3D_Tex tex_snap;
+    float vp[4];
+} g_cs;
+
+static void state_forget(void) { g_cs.valid = 0; g_cs.tex = NULL; }
+
+static void cs_begin(void) {
+    if (g_cs.valid) return;
+    memset(&g_cs, 0, sizeof g_cs);
+    g_cs.dt_fn = (GPU_TESTFUNC)-1; g_cs.at_fn = (GPU_TESTFUNC)-1; g_cs.be_c = (GPU_BLENDEQUATION)-1;
+    g_cs.sc[2] = 0xFFFFFFFFu; g_cs.bcolor = 0x12345678u; g_cs.vp[0] = -1.0f;
+    g_cs.env.srcRgb = 0xFFFF;                            /* matches no real stage */
+    C3D_CullFace(GPU_CULL_NONE);                         /* culling is done before submission */
+    g_cs.valid = 1;
+}
+static void cs_scissor(u32 x0, u32 y0, u32 x1, u32 y1) {
+    if (g_cs.sc[0] == x0 && g_cs.sc[1] == y0 && g_cs.sc[2] == x1 && g_cs.sc[3] == y1) return;
+    C3D_SetScissor(GPU_SCISSOR_NORMAL, x0, y0, x1, y1);
+    g_cs.sc[0] = x0; g_cs.sc[1] = y0; g_cs.sc[2] = x1; g_cs.sc[3] = y1;
+}
+static void cs_depth(GPU_TESTFUNC fn, GPU_WRITEMASK mask) {
+    if (g_cs.dt_on && g_cs.dt_fn == fn && g_cs.dt_mask == mask) return;
+    C3D_DepthTest(true, fn, mask);
+    g_cs.dt_on = 1; g_cs.dt_fn = fn; g_cs.dt_mask = mask;
+}
+static void cs_blend(GPU_BLENDEQUATION ec, GPU_BLENDEQUATION ea, GPU_BLENDFACTOR sc, GPU_BLENDFACTOR dc,
+                     GPU_BLENDFACTOR sa, GPU_BLENDFACTOR da) {
+    if (g_cs.be_c == ec && g_cs.be_a == ea && g_cs.bs_c == sc && g_cs.bd_c == dc && g_cs.bs_a == sa && g_cs.bd_a == da) return;
+    C3D_AlphaBlend(ec, ea, sc, dc, sa, da);
+    g_cs.be_c = ec; g_cs.be_a = ea; g_cs.bs_c = sc; g_cs.bd_c = dc; g_cs.bs_a = sa; g_cs.bd_a = da;
+}
+static void cs_bcolor(u32 c) {
+    if (g_cs.bcolor == c) return;
+    C3D_BlendingColor(c);
+    g_cs.bcolor = c;
+}
+static void cs_atest(int on, GPU_TESTFUNC fn, int ref) {
+    if (g_cs.at_fn != (GPU_TESTFUNC)-1 && g_cs.at_on == on && g_cs.at_fn == fn && g_cs.at_ref == ref) return;
+    C3D_AlphaTest(on, fn, ref);
+    g_cs.at_on = on; g_cs.at_fn = fn; g_cs.at_ref = ref;
+}
+static void cs_env(const C3D_TexEnv *env) {
+    if (!memcmp(&g_cs.env, env, sizeof *env)) return;
+    *C3D_GetTexEnv(0) = *env;
+    g_cs.env = *env;
+}
+/* the texture with its filter and wrap already set; re-bound when it, or
+ * what is in the struct (a texture re-made in the same slot), changed */
+static void cs_tex(const C3D_Tex *tex) {
+    if (g_cs.tex == tex && !memcmp(&g_cs.tex_snap, tex, sizeof *tex)) return;
+    C3D_TexBind(0, (C3D_Tex *)tex);
+    g_cs.tex = tex;
+    g_cs.tex_snap = *tex;
+}
+static void cs_vp(float a, float b, float c, float d) {
+    if (g_cs.vp[0] == a && g_cs.vp[1] == b && g_cs.vp[2] == c && g_cs.vp[3] == d) return;
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, u_vp, a, b, c, d);
+    g_cs.vp[0] = a; g_cs.vp[1] = b; g_cs.vp[2] = c; g_cs.vp[3] = d;
+}
+
 /* Blending, the colour mask, the depth test and the alpha test. */
 static void apply_state(const psp_gpu_state *st, int have_depth, int *approx) {
     int mask = 0;
@@ -814,7 +923,7 @@ static void apply_state(const psp_gpu_state *st, int have_depth, int *approx) {
     else { zon = st->ztest; zwrite = st->zwrite; zfn = (GPU_TESTFUNC)(st->zfunc & 7); }   /* same order as the GE's */
     if (!have_depth) zon = 0;
     if (zon && zwrite) mask |= GPU_WRITE_DEPTH;
-    C3D_DepthTest(true, zon ? zfn : GPU_ALWAYS, (GPU_WRITEMASK)mask);
+    cs_depth(zon ? zfn : GPU_ALWAYS, (GPU_WRITEMASK)mask);
 
     uint32_t bc = 0xFFFFFFFFu;
     if (st->blend && !st->clear) {
@@ -823,18 +932,18 @@ static void apply_state(const psp_gpu_state *st, int have_depth, int *approx) {
         static const GPU_BLENDEQUATION OPS[6] = { GPU_BLEND_ADD, GPU_BLEND_SUBTRACT, GPU_BLEND_REVERSE_SUBTRACT,
                                                   GPU_BLEND_MIN, GPU_BLEND_MAX, GPU_BLEND_MAX };
         if (st->beq >= 5) *approx = 1;
-        C3D_AlphaBlend(OPS[st->beq < 6 ? st->beq : 0], GPU_BLEND_ADD, s, d, GPU_ONE, GPU_ZERO);   /* keeps the source alpha */
-    } else C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+        cs_blend(OPS[st->beq < 6 ? st->beq : 0], GPU_BLEND_ADD, s, d, GPU_ONE, GPU_ZERO);   /* keeps the source alpha */
+    } else cs_blend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
     if (bc == 0xFFFFFFFFu) bc = 0;
-    C3D_BlendingColor(0xFF000000u | bc);
+    cs_bcolor(0xFF000000u | bc);
 
-    if (st->atest && !st->clear) C3D_AlphaTest(true, (GPU_TESTFUNC)(st->afunc & 7), (int)(st->aref & 0xFF));
-    else C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    if (st->atest && !st->clear) cs_atest(1, (GPU_TESTFUNC)(st->afunc & 7), (int)(st->aref & 0xFF));
+    else cs_atest(0, GPU_ALWAYS, 0);
 }
 
-/* The texture function on TEV stage 0 (gl_ge.c's fragment shader). */
-static void apply_tev(const psp_gpu_state *st, int textured) {
-    C3D_TexEnv *env = C3D_GetTexEnv(0);
+/* The texture function on TEV stage 0 (gl_ge.c's fragment shader), built
+ * here and set by cs_env when it differs from the last draw's. */
+static void build_tev(const psp_gpu_state *st, int textured, C3D_TexEnv *env) {
     C3D_TexEnvInit(env);
     if (!textured || st->clear) {
         C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, 0, 0);
@@ -884,12 +993,19 @@ static void apply_tev(const psp_gpu_state *st, int textured) {
     if (st->tdbl) C3D_TexEnvScale(env, C3D_RGB, GPU_TEVSCALE_2);
 }
 
+static void apply_tev(const psp_gpu_state *st, int textured) {
+    C3D_TexEnv env;
+    build_tev(st, textured, &env);
+    cs_env(&env);
+}
+
 /* Draw on target t with depth buffer `depth` (or none). */
 static void draw_on(rt_entry *t, void *depth) {
     if (g_cur == t->rt && g_cur_depth == depth && t->depth == depth) return;
     C3D_FrameBufDepth(&t->rt->frameBuf, depth, GPU_RB_DEPTH16);
     t->depth = depth;
-    C3D_FrameDrawOn(t->rt);
+    C3D_FrameDrawOn(t->rt);                      /* its C3D_SetViewport turns the scissor off */
+    g_cs.sc[2] = 0xFFFFFFFFu;
     g_cur = t->rt;
     g_cur_depth = depth;
 }
@@ -966,6 +1082,7 @@ static void rt_xfer(rt_entry *t, rt_entry *o, uint32_t y0, uint32_t y1, int own)
     const int first = ring_put(q, 6);
     if (first < 0) return;
     draw_on(t, NULL);
+    state_forget();                              /* sets its own state below */
     C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, (u32)ty0, (u32)w, (u32)ty1);
     C3D_DepthTest(true, GPU_ALWAYS, GPU_WRITE_COLOR);
     C3D_AlphaTest(false, GPU_ALWAYS, 0);
@@ -1106,8 +1223,8 @@ static int c3d_draw_on(const psp_gpu_state *st, const psp_gpu_vertex *v, int nve
 
     draw_on(t, depth);
     t->seg = g_seg;
-    C3D_SetScissor(GPU_SCISSOR_NORMAL, (u32)st->sx0, (u32)st->sy0, (u32)st->sx1 + 1, (u32)st->sy1 + 1);
-    C3D_CullFace(GPU_CULL_NONE);                         /* culling is done before submission */
+    cs_begin();
+    cs_scissor((u32)st->sx0, (u32)st->sy0, (u32)st->sx1 + 1, (u32)st->sy1 + 1);
     int approx = 0;
     apply_state(st, depth != NULL, &approx);
     if (approx) n_approx++;
@@ -1115,9 +1232,9 @@ static int c3d_draw_on(const psp_gpu_state *st, const psp_gpu_vertex *v, int nve
     if (tex) {
         C3D_TexSetFilter(tex, st->tex_linear ? GPU_LINEAR : GPU_NEAREST, st->tex_linear ? GPU_LINEAR : GPU_NEAREST);
         C3D_TexSetWrap(tex, st->tex_clamp_u ? GPU_CLAMP_TO_EDGE : GPU_REPEAT, st->tex_clamp_v ? GPU_CLAMP_TO_EDGE : GPU_REPEAT);
-        C3D_TexBind(0, tex);
+        cs_tex(tex);
     }
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, u_vp, 2.0f / (float)t->w, 2.0f / (float)t->h, uvs[0], uvs[1]);
+    cs_vp(2.0f / (float)t->w, 2.0f / (float)t->h, uvs[0], uvs[1]);
     DPART(D_STATE);
     C3D_DrawArrays(GPU_TRIANGLES, first, nverts);
     DPART(D_SUBMIT);
@@ -1238,6 +1355,7 @@ int c3d_ge_present(uint32_t addr, uint32_t stride, int fmt) {
     }
     C3D_RenderTargetClear(g_top, C3D_CLEAR_ALL, 0x000000FF, 0);
     C3D_FrameDrawOn(g_top);
+    state_forget();                              /* the scissor went off; the quad sets its own state */
     g_cur = g_top;
     g_cur_depth = NULL;
     if (t) {
@@ -1250,6 +1368,7 @@ int c3d_ge_present(uint32_t addr, uint32_t stride, int fmt) {
         quad_vertex(&q[5], TOP_W, TOP_H, SCREEN_W, SCREEN_H);
         const int first = ring_put(q, 6);
         if (first >= 0) {
+            state_forget();                      /* sets its own state below */
             C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
             C3D_DepthTest(true, GPU_ALWAYS, GPU_WRITE_COLOR);
             C3D_AlphaTest(false, GPU_ALWAYS, 0);
@@ -1395,11 +1514,12 @@ void c3d_ge_report(FILE *out) {
         static uint64_t hn_was, ht_was, hb_was, ft_was, fr_was;
         const uint64_t fr = frame_no();
         const double nf = fr > fr_was ? (double)(fr - fr_was) : 1.0;
-        fprintf(out, "c3d: texture checks per frame: %.0f hashes, %.0f K texels, %.1f ms hashing, %.1f ms decoding\n",
-                (double)(g_hash_n - hn_was) / nf, (double)(g_hash_bytes - hb_was) / nf / 1024.0,
+        static uint64_t sk_was;
+        fprintf(out, "c3d: texture checks per frame: %.0f hashes (%.0f skipped), %.0f K texels, %.1f ms hashing, %.1f ms decoding\n",
+                (double)(g_hash_n - hn_was) / nf, (double)(g_hash_skip - sk_was) / nf, (double)(g_hash_bytes - hb_was) / nf / 1024.0,
                 (double)(g_hash_ticks - ht_was) * 1000.0 / SYSCLOCK_ARM11 / nf,
                 (double)(g_fill_ticks - ft_was) * 1000.0 / SYSCLOCK_ARM11 / nf);
-        hn_was = g_hash_n; ht_was = g_hash_ticks; hb_was = g_hash_bytes; ft_was = g_fill_ticks; fr_was = fr;
+        sk_was = g_hash_skip; hn_was = g_hash_n; ht_was = g_hash_ticks; hb_was = g_hash_bytes; ft_was = g_fill_ticks; fr_was = fr;
     }
     for (int i = 0; i < MAX_RT; i++) {
         const rt_entry *t = &g_rt[i];
