@@ -6,41 +6,35 @@ The user's console: **New 3DS XL, Luma3DS**.
 
 ## Handoff (2026-10-25): where to pick up
 
-**State:** T0-T2 done. T3 (citro3d renderer) works for the screens checked
-in Azahar: the translation disclaimer and the save dialog render like the
-PC build at 28-30 fps. Everything after the save dialog is unchecked,
-because the dialog waits for a button.
+**State:** T0-T2 done. T3: the user played into the game in Azahar
+(2026-10-25) and saw no drawing errors, at **1.8-3 fps**. The PC save
+loads (section "Saves"). **T4 (speed) has started**: the host reports where
+each second goes (section "T4"), and the per-frame target thrashing in the
+field is fixed in code but **not yet checked in a field**.
 
-**Next step, ready to run:** scripted input is in the host (built, **not
-yet run**): `sdmc:/psp2i/input` = `%APPDATA%\Azahar\sdmc\psp2i\input`,
-lines `<second> <BUTTON[+BUTTON]> <duration>` or `<second> STICK <x> <y>
-<duration>`, seconds from boot (format in `3ds_main.c`, `script_load`). A
-first script is already on Azahar's SD: CIRCLE/CROSS at 17-24 s, START at
-27 s, more at 30-33 s. Then:
+**Next step:** the user plays the installed `.cia` into town and a field
+in Azahar; then read the `time:` lines and the `c3d:` per-cause counts from
+`%APPDATA%\Azahar\sdmc\psp2i\psp2i_log.txt` (section "T4", "How to
+read"). Decide the next speed work from those numbers, then measure on the
+console (the ISO isn't on its SD: ask the user).
+
+Testing loop:
 
 1. Build: `MSYSTEM=MSYS /d/msys64/usr/bin/bash.exe -l
-   /d/work/PSP2I_Recomp_3DS/port/3ds/build.sh Release psp2i_3dsx` (`port/gen`
-   is generated; only changed files rebuild).
-2. Run and screenshot: `powershell -File port/3ds/tools/azrun.ps1 -Wait 16
-   -Shot a16`, then `-NoRestart -Wait 5 -Shot a21` and so on. It restarts
-   Azahar, puts its window on top at 40,40 (1021x727), saves
-   `port/3ds/build/shots/<name>.png` and prints the log tail; the log shows
-   `input: <t> s press ...` for each scripted press. The user allowed driving
-   Azahar (closing and restarting it) for renderer debugging.
-3. Get past the dialog, through the title, into new game / the lobby / a
-   field, and compare each with the PC build's frames (`psp2i.exe ...
-   --headless --seconds N --capture-every 300 --capture-dir <dir>` in the
-   main checkout's `port/build/Release`; see the test skill). Find each
-   difference with `dumpframes` and the `c3d:` counters before fixing it in
-   `c3d_ge.c` (CLAUDE.md: find the decision).
-
-**Saves fixed (2026-10-25, see "Saves" below):** the PC save now loads
-in Azahar. Writing one isn't seen in the game yet: the title screen
-ignored the scripted START and Circle presses (27-54 s), so the game never
-got past it. That is the next thing to look at (the pad, not the saves).
+   /d/work/PSP2I_Recomp_3DS/port/3ds/build.sh Release psp2i_3dsx` (and
+   `psp2i_cia`; `port/gen` is generated; only changed files rebuild).
+2. The user runs the installed title: install with `azahar.exe -i
+   port\3ds\build\psp2i.cia` (title `000400000F522100`; `0F522000` is the
+   check app). `port/3ds/tools/azrun.ps1` runs the `.3dsx` (96 MB in
+   Azahar) and screenshots it. The user allowed restarting Azahar for this.
+3. Scripted input: `sdmc:/psp2i/input`, lines `<second> <BUTTON[+BUTTON]>
+   <duration>` or `<second> STICK <x> <y> <duration>` (`script_load`). The
+   7-press script on Azahar's SD sometimes gets past the title and
+   sometimes not (two runs, 2026-10-25): it's timing, not checked further.
 
 **Open items:** music (no ATRAC3plus decoder: T4), overlapping targets
-go through VRAM (gl_ge.c's GPU `rt_xfer` not ported), nothing measured on
+go through VRAM (gl_ge.c's GPU `rt_xfer` not ported), a save written by the
+3DS (not seen yet), nothing measured on
 the console since T1 (its SD has the fonts, the DLC and an old build, not
 the ISO; the user wants Azahar until the game runs better).
 
@@ -310,3 +304,49 @@ Windows too, for the test below.
   title screen.
 - Not checked: a save written by the 3DS (the title screen didn't take
   the scripted presses), and nothing on the console.
+
+## T4: speed (2026-10-25, started)
+
+### Measuring
+
+Once a second the host writes a `time:` line to the log and lines 2-4 of
+the bottom screen: milliseconds per second in each part, each counted once.
+
+| Part | What |
+|---|---|
+| game | the game's code and the HLE: what's left |
+| ge | the runtime's vertex work for the GE (`psp_gpu_prim` minus the backend; psprecomp b0a0383 `psp_gpu_set_clock`) |
+| draw | `c3d_ge.c` turning draws into citro3d calls |
+| wait | waiting for the GPU or its transfer engine (`C3D_FrameBegin/End`, the sync transfers) |
+| readback / upload | converting targets to and from emulated VRAM on the CPU |
+| texture | decoding textures |
+| present | the top screen's quad |
+| idle | no PSP thread runnable (`psp_sched_idle_us`, waiting for the vblank) |
+
+Also per frame: draws, evictions, read-backs, uploads, finishes. Every
+10 s, `c3d_ge_report` gives each target's size and its read-backs and
+uploads **by cause**: read-backs `evict`, `rows` (it grew), `texture` (a
+draw samples VRAM it covers), `overlap` (another target over the same
+bytes), `sync` (a GE block transfer or software fallback), `cpu` (the game
+read its VRAM); uploads `new`, `rows`, `changed` (VRAM changed under it).
+
+### Found
+
+- **Before (the user's run, old build):** in game, 4 targets of 256x128
+  (VRAM+0x000000, 0x022000, 0x044000, 0x066000, format 3: passes drawn
+  every frame) were each made and evicted **5,119 times**. Every target was
+  512 rows tall (512 KB at 256 wide), VRAM had 137 KB free, and each
+  eviction cost a read-back, a GPU wait and an upload: 31,000 read-backs
+  and 40,800 uploads in the run.
+- **Fix:** a target is as tall as its rows (the next power of two, 64 at
+  least): 256x128 now takes 128 KB. A target asked for more rows than its
+  texture has is made again from VRAM. Field not checked yet.
+- **A scene after the title (the `.3dsx`, scripted, with the fix):** 587
+  draws per frame at 2 fps, **0 evictions**. In ms per second: ge
+  450-500, game 240-330, upload 70-90, readback 50-130, draw 50-60,
+  texture 15-130, wait about 10. So the runtime's vertex work is the
+  biggest part there, then the game. (This scene's lines came from the
+  build without `idle`; the game part may include some idle time.)
+- **Loading screen:** 1 fps with 990 of 1000 ms in the game's code.
+- Azahar measures correctness, not speed. These numbers say where the
+  time goes in Azahar; only the console says how fast it is.

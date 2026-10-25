@@ -5,8 +5,9 @@
  * rasterizes it on the PICA200 and keeps emulated VRAM coherent with the
  * render targets it holds, as gl_ge.c does (its comments apply here):
  *
- *   - each colour buffer the game draws into is a 512x512 RGBA8 texture used
- *     as a citro3d render target, keyed by (VRAM offset, stride, format) and
+ *   - each colour buffer the game draws into is an RGBA8 texture used as a
+ *     citro3d render target (its stride wide and its rows tall, each rounded
+ *     up to a power of two), keyed by (VRAM offset, stride, format) and
  *     seeded from VRAM; depth buffers are kept by their VRAM address;
  *   - dirty rows are read back only when something is about to read VRAM,
  *     and a CPU access to VRAM reaches cpu_access through psp_mem_set_vram_hook;
@@ -27,12 +28,15 @@
  *
  * Memory: the PICA200 draws only into VRAM (6 MB; citro3d refuses a render
  * target anywhere else), so the targets and the depth buffer live there --
- * as many targets as fit (1 MB at 512 wide, 0.5 MB at 256), a 16-bit depth
- * buffer of 0.5 MB, the top screen's 0.4 MB -- and the CPU reads and writes
- * them in place. PSP2i's title uses five targets (two displayed buffers, the
- * scene, two 256-wide ones overlapping them); with four slots one was
- * evicted every frame and overlapping targets swapped garbage through VRAM. Textures and
- * the vertex ring are in linear (FCRAM) memory.
+ * as many targets as fit (1 MB at 512x512, 128 KB at 256x128), a 16-bit
+ * depth buffer of 0.5 MB, the top screen's 0.4 MB -- and the CPU reads and
+ * writes them in place. PSP2i's title uses five targets (two displayed
+ * buffers, the scene, two 256-wide ones overlapping them); with four slots
+ * one was evicted every frame and overlapping targets swapped garbage through
+ * VRAM. In the field four more 256x128 passes come every frame: at 512 rows
+ * each they didn't fit and evicted each other every frame (a read-back, a
+ * GPU wait and an upload each), so a target is only as tall as its rows.
+ * Textures and the vertex ring are in linear (FCRAM) memory.
  *
  * Not done yet: logic ops, stencil, the doubled blend factors (approximated
  * as in gl_ge.c), partial colour masks (a channel is written or not), the
@@ -55,7 +59,7 @@
 
 #define VRAM_SIZE  0x200000u
 #define RT_W       512u                          /* the widest target (stride <= 512); narrower fit their stride */
-#define RT_H       512u                          /* every target's rows */
+#define RT_H       512u                          /* the tallest target; shorter fit their rows */
 #define MAX_RT     8                             /* slots; VRAM decides how many are used */
 #define MAX_DEPTH  1
 #define MAX_TEX    256
@@ -95,7 +99,14 @@ typedef struct {
     uint64_t last_use;
     uint32_t seg;
     uint64_t n_drawn, n_up, n_back;              /* draws into it, uploads, readbacks (c3d_ge_report) */
+    uint64_t back_why[6], up_why[3];             /* readbacks and uploads by cause (RB_*, UP_*) */
 } rt_entry;
+
+/* Why a target goes to or comes from VRAM (counted, c3d_ge_report) */
+enum { RB_EVICT, RB_ROWS, RB_TEXTURE, RB_OVERLAP, RB_SYNC, RB_CPU };
+enum { UP_NEW, UP_ROWS, UP_CHANGED };
+static const char *const RB_NAMES[6] = { "evict", "rows", "texture", "overlap", "sync", "cpu" };
+static const char *const UP_NAMES[3] = { "new", "rows", "changed" };
 
 typedef struct {
     int used;
@@ -121,7 +132,23 @@ static int         g_scratch_ok;
 static uint64_t    g_use;
 
 static uint64_t n_draws, n_tris, n_uploads, n_readbacks, n_tex_decodes, n_rt_tex, n_approx,
-                n_finish, n_present, n_fail;
+                n_finish, n_present, n_fail, n_evict;
+
+/* ---- where the time goes (c3d_ge_stats) ------------------------------------------------
+ * Exclusive buckets: prof(b) charges the time since the last switch to the
+ * bucket that was running and makes b run; it returns that one, to switch
+ * back to. Outside the backend (P_OUT) nothing is charged. */
+enum { P_OUT, P_DRAW, P_WAIT, P_RB, P_UP, P_TEX, P_PRESENT, P_N };
+static uint64_t g_pt[P_N], g_pt0;
+static int g_pb;
+static int prof(int b) {
+    const uint64_t n = svcGetSystemTick();
+    if (g_pb) g_pt[g_pb] += n - g_pt0;
+    g_pt0 = n;
+    const int o = g_pb;
+    g_pb = b;
+    return o;
+}
 
 /* ---- helpers (as gl_ge.c) ------------------------------------------------------------- */
 
@@ -199,7 +226,9 @@ static int g_readback_flip;                      /* staging_from's rows run h-1 
 
 static void frame_open(void) {
     if (g_in_frame) return;
+    const int pb = prof(P_WAIT);
     C3D_FrameBegin(0);                           /* waits until the GPU has finished what was queued */
+    prof(pb);
     g_in_frame = 1;
     g_ring_pos = 0;
     g_cur = NULL;
@@ -215,7 +244,9 @@ static void ring_flush(void) {
 static void gpu_finish(void) {
     if (!g_in_frame) return;
     ring_flush();
+    const int pb = prof(P_WAIT);
     C3D_FrameEnd(0);
+    prof(pb);
     g_in_frame = 0;
     g_seg++;
     n_finish++;
@@ -277,8 +308,10 @@ static uint32_t *g_staging;                      /* RT_W x RT_H x 4 bytes */
      GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 static const uint32_t *staging_from(C3D_Tex *tex) {
     const u32 dim = GX_BUFFER_DIM(tex->width, tex->height);
+    const int pb = prof(P_WAIT);
     C3D_SyncDisplayTransfer((u32 *)tex->data, dim, g_staging, dim, READBACK_FLAGS);
     GSPGPU_InvalidateDataCache(g_staging, tex->size);
+    prof(pb);
     return g_staging;
 }
 /* which row of staging_from's picture is PSP row y */
@@ -286,8 +319,10 @@ static uint32_t srow(uint32_t y, uint32_t h) { return g_readback_flip ? h - 1 - 
 
 /* What the CPU wrote in g_staging into tex (a target). */
 static void staging_to(C3D_Tex *tex) {
+    const int pb = prof(P_WAIT);
     GSPGPU_FlushDataCache(g_staging, tex->size);
     C3D_SyncTextureCopy(g_staging, 0, (u32 *)tex->data, 0, tex->size, GX_TRANSFER_RAW_COPY(1));
+    prof(pb);
 }
 
 /* Which way round staging_from's rows come (the display transfer's own
@@ -317,7 +352,9 @@ static void rt_free(rt_entry *t) {
          * next draw waits for the GPU and opens another) */
         if (g_in_frame) {
             ring_flush();
+            const int pb = prof(P_WAIT);
             C3D_FrameEnd(0);
+            prof(pb);
             g_in_frame = 0;
             g_seg++;
             n_finish++;
@@ -329,11 +366,12 @@ static void rt_free(rt_entry *t) {
 }
 
 /* The target's dirty rows into emulated VRAM, converted to its format. */
-static void rt_readback(rt_entry *t) {
+static void rt_readback(rt_entry *t, int why) {
     if (!t->dirty) return;
     uint8_t *v = vram();
     uint32_t y0 = t->dy0, y1 = t->dy1 > t->h ? t->h : t->dy1;
     if (!v || y0 >= y1) { t->dirty = 0; memset(t->drow, 0, sizeof t->drow); return; }
+    const int pb = prof(P_RB);
     before_cpu_write(t->seg);                    /* its queued draws must have run */
     const uint32_t *tx = staging_from(&t->tex);
     const int bpp = bpp_of(t->fmt);
@@ -354,16 +392,19 @@ static void rt_readback(rt_entry *t) {
     if (t->off + bytes > VRAM_SIZE) bytes = VRAM_SIZE - t->off;
     t->synced_hash = hash_bytes(v + t->off, bytes);
     t->n_back++;
+    t->back_why[why]++;
     for (int i = 0; i < MAX_RT; i++)
         if (g_rt[i].used && &g_rt[i] != t && overlaps(t->off, t->off + bytes, g_rt[i].off, rt_end(&g_rt[i])))
             g_rt[i].check_frame = (uint64_t)-1;
     n_readbacks++;
+    prof(pb);
 }
 
 /* Emulated VRAM into the target (its first `rows` rows). */
-static void rt_upload(rt_entry *t) {
+static void rt_upload(rt_entry *t, int why) {
     uint8_t *v = vram();
     if (!v) return;
+    const int pb = prof(P_UP);
     before_cpu_write(t->seg);
     uint32_t *tx = g_staging;
     const int bpp = bpp_of(t->fmt);
@@ -384,7 +425,9 @@ static void rt_upload(rt_entry *t) {
     t->synced_hash = hash_bytes(v + t->off, bytes);
     pages_set(g_pg_armed, t->off, t->off + bytes);
     t->n_up++;
+    t->up_why[why]++;
     n_uploads++;
+    prof(pb);
 }
 
 static rt_entry *rt_find(uint32_t off, uint32_t stride, int fmt) {
@@ -397,14 +440,19 @@ static rt_entry *rt_find(uint32_t off, uint32_t stride, int fmt) {
 static void rt_evict(rt_entry *t) {
     fprintf(stderr, "c3d: evicting render target VRAM+0x%06lX stride %lu format %d\n",
             (unsigned long)t->off, (unsigned long)t->stride, t->fmt);
-    rt_readback(t);
+    rt_readback(t, RB_EVICT);
     before_cpu_write(t->seg);
     rt_free(t);
     frame_open();                                /* rt_free ended the frame */
+    n_evict++;
 }
 
 static rt_entry *rt_get(uint32_t off, uint32_t stride, int fmt, uint32_t rows) {
     rt_entry *t = rt_find(off, stride, fmt);
+    if (t && rows > t->h) {                      /* taller than its texture: made again, from VRAM */
+        rt_evict(t);
+        t = NULL;
+    }
     if (!t) {
         for (int i = 0; i < MAX_RT && !t; i++) if (!g_rt[i].used) t = &g_rt[i];
         if (!t) {
@@ -413,9 +461,10 @@ static rt_entry *rt_get(uint32_t off, uint32_t stride, int fmt, uint32_t rows) {
             rt_evict(t);
         }
         /* the narrowest power of two that holds the stride: VRAM is short */
-        uint32_t w = 64;
+        uint32_t w = 64, h = 64;
         while (w < stride) w <<= 1;
-        while (!C3D_TexInitVRAM(&t->tex, (u16)w, RT_H, GPU_RGBA8)) {
+        while (h < rows) h <<= 1;
+        while (!C3D_TexInitVRAM(&t->tex, (u16)w, (u16)h, GPU_RGBA8)) {
             rt_entry *old = NULL;                /* VRAM is full: the least recently used target goes */
             for (int i = 0; i < MAX_RT; i++)
                 if (g_rt[i].used && (!old || g_rt[i].last_use < old->last_use)) old = &g_rt[i];
@@ -434,18 +483,19 @@ static rt_entry *rt_get(uint32_t off, uint32_t stride, int fmt, uint32_t rows) {
             return NULL;
         }
         t->off = off; t->stride = stride; t->fmt = fmt;
-        t->w = w; t->h = RT_H;
+        t->w = w; t->h = h;
         t->used = 1;
         t->rows = rows;
-        fprintf(stderr, "c3d: render target VRAM+0x%06lX stride %lu format %d rows %lu\n",
-                (unsigned long)off, (unsigned long)stride, fmt, (unsigned long)rows);
-        rt_upload(t);
+        fprintf(stderr, "c3d: render target VRAM+0x%06lX stride %lu format %d rows %lu (%lux%lu, VRAM free %lu KB)\n",
+                (unsigned long)off, (unsigned long)stride, fmt, (unsigned long)rows, (unsigned long)w,
+                (unsigned long)h, (unsigned long)(vramSpaceFree() >> 10));
+        rt_upload(t, UP_NEW);
         t->check_frame = frame_no();
     }
     if (rows > t->rows) {
-        rt_readback(t);
+        rt_readback(t, RB_ROWS);
         t->rows = rows;
-        rt_upload(t);
+        rt_upload(t, UP_ROWS);
     }
     t->last_use = ++g_use;
     return t;
@@ -458,7 +508,7 @@ static void rt_check(rt_entry *t) {
     uint8_t *v = vram();
     uint32_t bytes = t->rows * t->stride * (uint32_t)bpp_of(t->fmt);
     if (t->off + bytes > VRAM_SIZE) bytes = VRAM_SIZE - t->off;
-    if (v && hash_bytes(v + t->off, bytes) != t->synced_hash) rt_upload(t);
+    if (v && hash_bytes(v + t->off, bytes) != t->synced_hash) rt_upload(t, UP_CHANGED);
     pages_set(g_pg_armed, t->off, t->off + bytes);
 }
 
@@ -522,6 +572,7 @@ static tex_entry *tex_evict(void) {
 static void tex_fill(tex_entry *e, const psp_gpu_state *st) {
     uint32_t *px = (uint32_t *)malloc((size_t)st->tex_w * st->tex_h * 4);
     if (!px) return;
+    const int pb = prof(P_TEX);
     psp_gpu_decode_texture(px);
     uint32_t *tx = (uint32_t *)e->tex.data;
     /* a texture under 8 texels a side repeats to fill the GPU's 8 (the UVs
@@ -532,6 +583,7 @@ static void tex_fill(tex_entry *e, const psp_gpu_state *st) {
     free(px);
     GSPGPU_FlushDataCache(e->tex.data, e->tex.size);
     n_tex_decodes++;
+    prof(pb);
 }
 
 static tex_entry *tex_get(const psp_gpu_state *st) {
@@ -562,12 +614,14 @@ static tex_entry *tex_get(const psp_gpu_state *st) {
 /* A copy of target t to sample while t is being drawn to. */
 static C3D_Tex *scratch_copy(rt_entry *t) {
     gpu_finish();                                /* t's queued draws first; the scratch is free after */
-    if (g_scratch_ok && g_scratch.width != t->w) { C3D_TexDelete(&g_scratch); g_scratch_ok = 0; }
+    if (g_scratch_ok && (g_scratch.width != t->w || g_scratch.height != t->h)) { C3D_TexDelete(&g_scratch); g_scratch_ok = 0; }
     if (!g_scratch_ok) {
         if (!C3D_TexInit(&g_scratch, (u16)t->w, (u16)t->h, GPU_RGBA8)) return NULL;
         g_scratch_ok = 1;
     }
+    const int pb = prof(P_WAIT);
     C3D_SyncTextureCopy((u32 *)t->tex.data, 0, (u32 *)g_scratch.data, 0, t->tex.size, GX_TRANSFER_RAW_COPY(1));
+    prof(pb);
     return &g_scratch;
 }
 
@@ -589,7 +643,7 @@ static C3D_Tex *texture_view(const psp_gpu_state *st, rt_entry *target, float sc
                 if (t != target) { t->seg = g_seg; return &t->tex; }
                 return scratch_copy(t);
             }
-            if (t->dirty && overlaps(toff, tend, row_addr(t, t->dy0), row_addr(t, t->dy1))) rt_readback(t);
+            if (t->dirty && overlaps(toff, tend, row_addr(t, t->dy0), row_addr(t, t->dy1))) rt_readback(t, RB_TEXTURE);
         }
     }
     tex_entry *e = tex_get(st);
@@ -741,7 +795,15 @@ static int ring_put(const psp_gpu_vertex *v, int nverts) {
 
 /* ---- the draw ------------------------------------------------------------------------------------ */
 
+static int c3d_draw_on(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts);
 static int c3d_draw(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts) {
+    const int pb = prof(P_DRAW);
+    const int r = c3d_draw_on(st, v, nverts);
+    prof(pb);
+    return r;
+}
+
+static int c3d_draw_on(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts) {
     if (!g_ok || (st->fb_addr & 0x0F000000u) != 0x04000000u || !st->fb_stride || st->fb_stride > RT_W || nverts <= 0)
         return 1;
     if ((uint32_t)nverts > RING_VERTS) return 1;
@@ -758,7 +820,7 @@ static int c3d_draw(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts
         for (int i = 0; i < MAX_RT; i++) {
             rt_entry *o = &g_rt[i];
             if (!o->used || o == t || !o->dirty || !overlaps(t0, t1, o->off, rt_end(o))) continue;
-            rt_readback(o);
+            rt_readback(o, RB_OVERLAP);
             flushed = 1;
         }
         if (flushed && !t->dirty) t->check_frame = (uint64_t)-1;
@@ -814,7 +876,7 @@ static void c3d_sync_vram(uint32_t addr, uint32_t bytes) {
     if ((addr & 0x0F000000u) != 0x04000000u) return;
     uint32_t a0 = vram_off(addr), a1 = a0 + bytes;
     for (int i = 0; i < MAX_RT; i++)
-        if (g_rt[i].used && g_rt[i].dirty && overlaps(a0, a1, g_rt[i].off, rt_end(&g_rt[i]))) rt_readback(&g_rt[i]);
+        if (g_rt[i].used && g_rt[i].dirty && overlaps(a0, a1, g_rt[i].off, rt_end(&g_rt[i]))) rt_readback(&g_rt[i], RB_SYNC);
 }
 
 static void c3d_vram_written(uint32_t addr, uint32_t bytes) {
@@ -836,7 +898,7 @@ static void cpu_access(uint32_t off, uint32_t size) {
     if (dirty) {
         for (int i = 0; i < MAX_RT; i++)
             if (g_rt[i].used && g_rt[i].dirty && overlaps(a0, a1, g_rt[i].off, rt_end(&g_rt[i])))
-                { rt_readback(&g_rt[i]); g_rt[i].check_frame = (uint64_t)-1; }
+                { rt_readback(&g_rt[i], RB_CPU); g_rt[i].check_frame = (uint64_t)-1; }
         memset(g_pg_dirty + p0, 0, p1 - p0 + 1);
         for (int i = 0; i < MAX_RT; i++) {
             const rt_entry *t = &g_rt[i];
@@ -890,6 +952,7 @@ static void quad_vertex(psp_gpu_vertex *o, float sx, float sy, float u, float v)
 
 int c3d_ge_present(uint32_t addr, uint32_t stride, int fmt) {
     if (!g_ok) return -1;
+    const int pb = prof(P_PRESENT);
     frame_open();
     rt_entry *t = NULL;
     if ((addr & 0x0F000000u) == 0x04000000u && stride && stride <= RT_W) {
@@ -930,7 +993,9 @@ int c3d_ge_present(uint32_t addr, uint32_t stride, int fmt) {
         }
     }
     ring_flush();
+    prof(P_WAIT);
     C3D_FrameEnd(0);                             /* submits; the top screen shows it once drawn */
+    prof(pb);
     g_in_frame = 0;
     g_seg++;
     n_present++;
@@ -1014,6 +1079,14 @@ int c3d_ge_init(void) {
     return 0;
 }
 
+void c3d_ge_stats_get(c3d_ge_stats *s) {
+    prof(g_pb);                                  /* charge the running bucket up to now */
+    s->draw = g_pt[P_DRAW]; s->wait = g_pt[P_WAIT]; s->readback = g_pt[P_RB];
+    s->upload = g_pt[P_UP]; s->texture = g_pt[P_TEX]; s->present = g_pt[P_PRESENT];
+    s->draws = n_draws; s->finishes = n_finish; s->readbacks = n_readbacks;
+    s->uploads = n_uploads; s->evictions = n_evict;
+}
+
 void c3d_ge_report(FILE *out) {
     int rts = 0, depths = 0, texs = 0;
     for (int i = 0; i < MAX_RT; i++) rts += g_rt[i].used;
@@ -1021,17 +1094,24 @@ void c3d_ge_report(FILE *out) {
     for (int i = 0; i < MAX_TEX; i++) texs += g_tex[i].used;
     fprintf(out, "c3d: %llu draws, %llu tris, %llu presents, %llu finishes; uploads %llu, readbacks %llu, "
                  "texture decodes %llu (%d cached, %lu KB), target textures %llu, approximated %llu, "
-                 "to software %llu; %d targets, %d depth buffers; linear free %lu KB, VRAM free %lu KB\n",
+                 "to software %llu, evictions %llu; %d targets, %d depth buffers; linear free %lu KB, VRAM free %lu KB\n",
             (unsigned long long)n_draws, (unsigned long long)n_tris, (unsigned long long)n_present,
             (unsigned long long)n_finish, (unsigned long long)n_uploads, (unsigned long long)n_readbacks,
             (unsigned long long)n_tex_decodes, texs, (unsigned long)(g_tex_bytes >> 10),
             (unsigned long long)n_rt_tex, (unsigned long long)n_approx, (unsigned long long)n_fail,
-            rts, depths, (unsigned long)(linearSpaceFree() >> 10), (unsigned long)(vramSpaceFree() >> 10));
+            (unsigned long long)n_evict, rts, depths, (unsigned long)(linearSpaceFree() >> 10), (unsigned long)(vramSpaceFree() >> 10));
     for (int i = 0; i < MAX_RT; i++) {
         const rt_entry *t = &g_rt[i];
         if (!t->used) continue;
-        fprintf(out, "c3d:   target VRAM+0x%06lX/%lu fmt %d: %llu draws, %llu uploads, %llu readbacks, %s\n",
-                (unsigned long)t->off, (unsigned long)t->stride, t->fmt, (unsigned long long)t->n_drawn,
+        fprintf(out, "c3d:   target VRAM+0x%06lX/%lu fmt %d %lux%lu: %llu draws, %llu uploads, %llu readbacks, %s\n",
+                (unsigned long)t->off, (unsigned long)t->stride, t->fmt, (unsigned long)t->w, (unsigned long)t->h,
+                (unsigned long long)t->n_drawn,
                 (unsigned long long)t->n_up, (unsigned long long)t->n_back, t->dirty ? "GPU ahead" : "in step with VRAM");
+        if (!t->n_up && !t->n_back) continue;
+        fprintf(out, "c3d:     readbacks by cause:");
+        for (int k = 0; k < 6; k++) if (t->back_why[k]) fprintf(out, " %s %llu", RB_NAMES[k], (unsigned long long)t->back_why[k]);
+        fprintf(out, "; uploads:");
+        for (int k = 0; k < 3; k++) if (t->up_why[k]) fprintf(out, " %s %llu", UP_NAMES[k], (unsigned long long)t->up_why[k]);
+        fprintf(out, "\n");
     }
 }

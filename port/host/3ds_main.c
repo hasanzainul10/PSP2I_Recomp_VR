@@ -315,6 +315,47 @@ static void read_pad(void) {
 static u64 g_stat_tick;
 static uint64_t g_stat_flips;
 
+static uint64_t ticks_now(void) { return svcGetSystemTick(); }
+
+/* Where the last second went (ms in a second, each counted once) and the
+ * target traffic per frame: the bottom screen's lines 2-4 and the log. */
+static void time_report(double secs, uint64_t frames) {
+    static c3d_ge_stats was;
+    static uint64_t prim_was, idle_was;
+    c3d_ge_stats s;
+    c3d_ge_stats_get(&s);
+    const uint64_t prim = psp_gpu_prim_ticks(), idle_us = psp_sched_idle_us();
+    const double ms = 1000.0 / SYSCLOCK_ARM11 / secs, f = frames ? (double)frames : 1.0;
+    const double draw = (double)(s.draw - was.draw) * ms, wait = (double)(s.wait - was.wait) * ms,
+                 rb = (double)(s.readback - was.readback) * ms, up = (double)(s.upload - was.upload) * ms,
+                 tex = (double)(s.texture - was.texture) * ms, pres = (double)(s.present - was.present) * ms;
+    /* prims include the backend's draw and what it calls (waits, transfers) */
+    const double backend = draw + wait + rb + up + tex;
+    double ge = (double)(prim - prim_was) * ms - backend;
+    if (ge < 0) ge = 0;
+    /* idle: no PSP thread runnable (waiting for the next vblank) */
+    const double idle = (double)(idle_us - idle_was) / 1000.0 / secs;
+    double game = 1000.0 - idle - ge - backend - pres;
+    if (game < 0) game = 0;
+    /* 40 columns: ms/s on two lines, then per frame */
+    printf("game %3.0f ge %3.0f draw %3.0f wait %3.0f  \n"
+           "rb %3.0f up %3.0f tex %3.0f pr %3.0f idle %3.0f\n"
+           "/f: ev %4.1f rb %4.1f up %4.1f fin %4.1f  \n",
+           game, ge, draw, wait, rb, up, tex, pres, idle,
+           (double)(s.evictions - was.evictions) / f, (double)(s.readbacks - was.readbacks) / f,
+           (double)(s.uploads - was.uploads) / f, (double)(s.finishes - was.finishes) / f);
+    fprintf(stderr, "time: %llu frames; ms/s game %.0f ge %.0f draw %.0f wait %.0f readback %.0f upload %.0f "
+                    "texture %.0f present %.0f idle %.0f; per frame %.1f draws, %.1f evictions, %.1f readbacks, "
+                    "%.1f uploads, %.1f finishes\n",
+            (unsigned long long)frames, game, ge, draw, wait, rb, up, tex, pres, idle,
+            (double)(s.draws - was.draws) / f, (double)(s.evictions - was.evictions) / f,
+            (double)(s.readbacks - was.readbacks) / f, (double)(s.uploads - was.uploads) / f,
+            (double)(s.finishes - was.finishes) / f);
+    was = s;
+    prim_was = prim;
+    idle_was = idle_us;
+}
+
 static void on_vblank(void) {
     if (!aptMainLoop()) { psp_request_exit(); return; }   /* HOME > Close */
     read_pad();
@@ -327,8 +368,11 @@ static void on_vblank(void) {
     if (now - g_stat_tick >= SYSCLOCK_ARM11) {            /* once a second */
         const uint64_t flips = psp_display_flips();
         consoleSelect(&g_bottom);
-        printf("\x1b[1;1H%.1f fps  heap %lu KiB used   \n",
+        /* lines 1-4, the cursor kept where the log is */
+        printf("\x1b[s\x1b[1;1H%.1f fps  heap %lu KiB used   \n",
                (double)(flips - g_stat_flips) * SYSCLOCK_ARM11 / (double)(now - g_stat_tick), used_kib());
+        if (g_gpu) time_report((double)(now - g_stat_tick) / SYSCLOCK_ARM11, flips - g_stat_flips);
+        printf("\x1b[u");
         g_stat_flips = flips;
         g_stat_tick = now;
         /* sdmc:/psp2i/dumpframes holds seconds ("6 9 12"): every draw of the
@@ -383,7 +427,7 @@ int main(void)
     /* the log: buffered (the SD card is slow), flushed once a second */
     if (freopen(BASE "/psp2i_log.txt", "w", stderr)) setvbuf(stderr, NULL, _IOFBF, 64 * 1024);
     g_report = fopen(BASE "/report_game.txt", "w");
-    printf("\x1b[3;1H");                                    /* line 1: the frame rate */
+    printf("\x1b[6;1H");                                    /* lines 1-4: the frame rate, time_report */
 
     say("PSP2i 3DS T2 (%s)", envIsHomebrew() ? "3dsx" : "cia");
     say("heap %lu KiB after the code, linear %lu KiB",
@@ -426,6 +470,7 @@ int main(void)
     psp_sysmem_set_heap(mi.load_hi, USER_PARTITION_TOP);
     psp_recomp_register();
     camera_init(1.0f);
+    psp_gpu_set_clock(ticks_now);                         /* the GE's share of time_report */
     psp_sched_set_vblank_hook(on_vblank);
     say("ready: heap %lu KiB used of %lu", used_kib(), (unsigned long)(__ctru_heap_size >> 10));
 
