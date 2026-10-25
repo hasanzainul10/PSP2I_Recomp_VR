@@ -75,10 +75,13 @@ with Luma3DS**.
   and `PSPRECOMP_3DS` (runtime), or in `port/3ds/`. The Windows, Android,
   macOS and VR builds behave exactly as before.
 - **The game ships as a `.cia`** (124 MB memory mode, core 2, 804 MHz + L2
-  in `port/3ds/psp2i.rsf`). The `.3dsx` is for small test apps and quick
-  3dslink pushes only; it doesn't get the memory the game needs.
+  in `port/3ds/psp2i.rsf`), so the memory doesn't depend on how homebrew is
+  started. On the user's console a `.3dsx` from the Homebrew Launcher also
+  gets 124 MB and core 2 (measured), so the `.3dsx` is fine for development
+  pushes there (ftpd at the console's IP, port 5000); Azahar gives a `.3dsx`
+  96 MB. Decided with the user; don't reopen it.
 - **Budgets:** every 3DS build reports `.text` size; every run on the
-  console reports peak heap in `sdmc:/psp2i/report.txt`. A change that grows
+  console reports peak heap in its `sdmc:/psp2i/report_*.txt`. A change that grows
   either by more than 1 MB says why in its commit message.
 - **Say where it ran:** "builds", "PC layout mode", "Azahar" and "console"
   are different claims. Frame rates and memory only count from the console:

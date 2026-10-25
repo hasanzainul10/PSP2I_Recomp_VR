@@ -5,9 +5,9 @@
  *   - how much APPLICATION memory this build actually gets (the game needs
  *     roughly 100-135 MB: 3DS_PLAN.md section 2), as .3dsx and as .cia;
  *   - whether the New 3DS speedup (804 MHz + L2) took;
- *   - whether a thread can run on core 1 and on core 2.
+ *   - how much work threads on core 1 and core 2 get done next to core 0.
  * The same lines go to the screens, to svcOutputDebugString (Azahar's log)
- * and to sdmc:/psp2i/report.txt (read back with ftpd). */
+ * and to sdmc:/psp2i/report_3dsx.txt or report_cia.txt (read with ftpd). */
 #include <3ds.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -32,37 +32,87 @@ static void say(const char *fmt, ...)
     if (report) { fprintf(report, "%s\n", line); fflush(report); }
 }
 
-static volatile int core_ran[4];
+/* ---- cores ------------------------------------------------------------------
+ * What matters for the game is not which core number a thread reports (the
+ * first run on the console said 2 for a thread asked onto core 1) but how
+ * much work it gets done while core 0 is busy too. So: count loop passes on
+ * core 0 alone, then on core 0 and a worker on core N at the same time.
+ *   worker/alone ~1.0  a parallel core of its own (core 2 expected)
+ *   worker/alone ~0.3  core 1 under APT_SetAppCpuTimeLimit(30)
+ *   worker/alone ~0    the worker never got a core of its own
+ * main/alone stays ~1.0 when the worker isn't taking time from core 0. */
 
-static void core_probe(void *arg)
+#define SPIN_TICKS (SYSCLOCK_ARM11 / 4)   /* 250 ms */
+
+static volatile int spin_stop, spin_started;
+static volatile u32 spin_count;
+static volatile s32 spin_cpu = -1;
+
+/* The work both sides count, the same per pass on either side: 4096
+ * increments of a counter in memory, then one check. */
+static void spin_block(volatile u32 *c)
 {
-    int core = (int)(intptr_t)arg;
-    s32 actual = svcGetProcessorID();
-    core_ran[core] = 1 + actual;   /* 0 = never ran */
+    for (int k = 0; k < 4096; k++) (*c)++;
 }
 
-/* Starts a short thread on `core`; returns the core it ran on, or -1. */
-static int try_core(int core)
+static void spin_worker(void *arg)
 {
-    Thread t = threadCreate(core_probe, (void *)(intptr_t)core, 4096, 0x30, core, false);
-    if (!t) return -1;
-    threadJoin(t, 1000000000ULL);
+    (void)arg;
+    spin_cpu = svcGetProcessorID();
+    spin_started = 1;
+    while (!spin_stop) spin_block(&spin_count);
+}
+
+static u32 spin_main(void)
+{
+    volatile u32 n = 0;
+    u64 end = svcGetSystemTick() + SPIN_TICKS;
+    while (svcGetSystemTick() < end) spin_block(&n);
+    return n;
+}
+
+/* One worker on `core` while core 0 spins. Prints a report line. */
+static void core_test(int core, u32 alone)
+{
+    spin_stop = spin_started = 0;
+    spin_count = 0;
+    spin_cpu = -1;
+    Thread t = threadCreate(spin_worker, NULL, 4096, 0x30, core, false);
+    if (!t) {
+        say("core%d: threadCreate failed", core);
+        return;
+    }
+    /* sleeping yields core 0, so a worker that landed there can start too */
+    for (int i = 0; i < 100 && !spin_started; i++) svcSleepThread(1000000);
+    if (!spin_started) {
+        say("core%d: created, didn't start in 100 ms", core);
+        spin_stop = 1;
+        threadJoin(t, U64_MAX);
+        threadFree(t);
+        return;
+    }
+    u32 base = spin_count;
+    u32 m = spin_main();
+    u32 w = spin_count - base;
+    spin_stop = 1;
+    threadJoin(t, U64_MAX);
     threadFree(t);
-    return core_ran[core] ? core_ran[core] - 1 : -1;
+    say("core%d: on cpu %ld, worker/alone %.2f, main/alone %.2f",
+        core, (long)spin_cpu, (double)w / alone, (double)m / alone);
 }
 
-/* The clock, measured: a dependent loop of known length against the system
- * tick (always SYSCLOCK_ARM11, 268 MHz), since osSetSpeedupEnable fails
- * silently when ptm:sysm can't be opened. Each iteration is a subs + bne,
- * about 2 cycles on the ARM11 once in cache. */
-static int cpu_mhz(void)
+/* ---- clock ------------------------------------------------------------------
+ * osSetSpeedupEnable fails silently when ptm:sysm can't be opened, so time
+ * the same loop with the speedup off and on. The system tick always counts
+ * at SYSCLOCK_ARM11 (268 MHz); a ratio of ~3 means 804 MHz works. (The first
+ * console run assumed 2 cycles per pass and read 321 MHz: the cycles per
+ * pass aren't known, the ratio doesn't need them.) */
+static u64 loop_ticks(void)
 {
-    const u32 n = 20000000;
-    u32 i = n;
+    u32 i = 20000000;
     u64 t0 = svcGetSystemTick();
     __asm__ volatile("1: subs %0, %0, #1\n\tbne 1b" : "+r"(i) : : "cc");
-    u64 dt = svcGetSystemTick() - t0;
-    return (int)((2.0 * n * SYSCLOCK_ARM11) / ((double)dt * 1e6) + 0.5);
+    return svcGetSystemTick() - t0;
 }
 
 int main(void)
@@ -71,12 +121,21 @@ int main(void)
     consoleInit(GFX_TOP, &top);
     consoleInit(GFX_BOTTOM, &bottom);
 
+    /* one report per format, so a .3dsx run and a .cia run don't overwrite
+     * each other (envIsHomebrew: started by the Homebrew Launcher) */
+    const char *report_path = envIsHomebrew() ? "sdmc:/psp2i/report_3dsx.txt"
+                                              : "sdmc:/psp2i/report_cia.txt";
     mkdir("sdmc:/psp2i", 0777);
-    report = fopen("sdmc:/psp2i/report.txt", "w");
+    report = fopen(report_path, "w");
 
     bool n3ds = false;
     APT_CheckNew3DS(&n3ds);
+    osSetSpeedupEnable(false);
+    svcSleepThread(10000000);
+    u64 slow = loop_ticks();
     osSetSpeedupEnable(true);
+    svcSleepThread(10000000);
+    u64 fast = loop_ticks();
 
     /* core 1 needs a CPU time limit from APT first; core 2 needs the
      * exheader flag (the .cia's CanAccessCore2), so a .3dsx should fail it */
@@ -102,9 +161,14 @@ int main(void)
         (unsigned long)(__ctru_linear_heap_size >> 10),
         (unsigned long)(linearSpaceFree() >> 10));
 
-    say("cpu ~%d MHz (268 = no speedup, 804 = speedup)", cpu_mhz());
-    say("core1=%d core2=%d", try_core(1), try_core(2));
-    say("report: sdmc:/psp2i/report.txt");
+    say("clock: speedup off %llu ticks, on %llu, ratio %.2f (3 = 804 MHz)",
+        (unsigned long long)slow, (unsigned long long)fast, (double)slow / fast);
+
+    u32 alone = spin_main();
+    say("core0 alone: %lu passes in 250 ms", (unsigned long)alone);
+    core_test(1, alone);
+    core_test(2, alone);
+    say("report: %s", report_path);
     if (report) { fclose(report); report = NULL; }
 
     while (aptMainLoop()) {

@@ -65,9 +65,12 @@ MSYSTEM=MSYS /d/msys64/usr/bin/bash.exe -l /d/work/PSP2I_Recomp_3DS/port/3ds/bui
 
 ## Rules
 
-- `.3dsx` vs `.cia`: the **game is a `.cia`** (a `.3dsx` gets 96 MB, the game
-  needs ~100-135 MB). The `.3dsx` is for small apps pushed with 3dslink.
+- `.3dsx` vs `.cia`: the **game is a `.cia`** (its exheader guarantees
+  124 MB and core 2; the game needs ~100-135 MB). On the user's console a
+  `.3dsx` from the Homebrew Launcher gets the same, so it's fine for
+  development pushes; in Azahar a `.3dsx` gets 96 MB.
 - A build of the game contains code generated from the user's EBOOT: never
-  commit, upload or attach the `.3dsx` / `.cia` / `.elf`.
+  commit, publish or attach the `.3dsx` / `.cia` / `.elf` (copying it to
+  the user's own console is fine).
 - Host code for 3DS is under `PSP2I_3DS`, runtime code under
   `PSPRECOMP_3DS`; the PC, Android and VR builds must not change.
