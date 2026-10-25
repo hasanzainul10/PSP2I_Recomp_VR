@@ -46,8 +46,23 @@ MSYSTEM=MSYS /d/msys64/usr/bin/bash.exe -l /d/work/PSP2I_Recomp_3DS/port/3ds/bui
   `.smdh`, `.cia`, and `assets/` (icon.png, banner.png/.wav/.bnr).
 - The last lines are the budget line, `3ds: <target>.elf .text N MB`, and
   the file sizes. Quote the `.text` size whenever code size changed.
-- When the game target joins (T1), the build takes long: run it in the
-  background.
+- Only some targets: add them after the build type, e.g.
+  `build.sh Release psprecomp` (the runtime), `build.sh Release psp2i_3dsx`.
+  `PSP2I_JOBS` sets the parallel jobs (default 12; 32 GB of RAM).
+- **The game** (`psp2i`) is built when `port/gen/recomp_funcs.c` exists in
+  this worktree (or `-DPSP2I_GEN_DIR=`). Make it with the recompiler from the
+  main checkout (same as `psp2i-build-run`, about 4 s):
+
+  ```bash
+  cd /d/work/PSP2I_Recomp_3DS/port && /d/work/PSP2I_Recomp_VR/psprecomp/build/tools/allegrexrecomp/Release/allegrexrecomp.exe       emit /d/work/PSP2I_Recomp_VR/FinalBuild/EBOOT.BIN gen recomp --hooks hooks.txt --fixes fixes.txt
+  ```
+
+  Configuring splits it into 256 parts (`build/gen_split`, `PSP2I_GEN_PARTS`);
+  compiling them all takes ~1.5 minutes: **run the full build in the
+  background**. The link map is `build/psp2i.map`.
+- The runtime is built from `psprecomp` with `PSPRECOMP_3DS`, `-Os` and
+  `port/3ds/net_compat.h` force-included (IPv6 types libctru lacks).
+  `-Wno-format`: newlib's `uint32_t` is `long`, so every `%X` warns.
 
 ## What's in port/3ds
 
@@ -60,6 +75,10 @@ MSYSTEM=MSYS /d/msys64/usr/bin/bash.exe -l /d/work/PSP2I_Recomp_3DS/port/3ds/bui
   (at most 34 entries, includes `mvd:STD` for movies and `soc:U` for online).
   Don't take 178 MB: it starves the HOME menu.
 - `make_assets.py`: icon and banner drawn from text. Never put game art in.
+- `net_compat.h`: IPv6 declarations and `FIONREAD` for the runtime's
+  networking code (soc:U is IPv4 only).
+- `../host/3ds_main.c`: the game's host (T1: a fit check that links all
+  the code and reports memory to `sdmc:/psp2i/report_game.txt`).
 - `hello/`: the T0 check app (screens, memory, clock, cores; see
   `psp2i-3ds-test`).
 

@@ -1,11 +1,16 @@
 #!/bin/bash
 # Build the 3DS targets with devkitPro inside MSYS2. From Windows:
-#   D:\msys64\usr\bin\bash.exe -l port/3ds/build.sh [Release|Debug]
+#   D:\msys64\usr\bin\bash.exe -l port/3ds/build.sh [Release|Debug] [target...]
 # From Git Bash, the same path works: /d/msys64/usr/bin/bash.exe -l ...
 # Output: port/3ds/build/*.3dsx and *.cia, plus a .text size line per ELF.
 set -e
 here="$(cd "$(dirname "$0")" && pwd)"
 type="${1:-Release}"
+shift || true
+targets=()
+for t in "$@"; do targets+=(--target "$t"); done
+# the game's ~260 parts: a dozen GCCs at once fit in 32 GB (PSP2I_JOBS to change)
+jobs="${PSP2I_JOBS:-12}"
 : "${DEVKITPRO:=/opt/devkitpro}"
 export DEVKITPRO DEVKITARM="$DEVKITPRO/devkitARM"
 export PATH="$DEVKITPRO/tools/bin:$DEVKITARM/bin:$PATH"
@@ -24,7 +29,7 @@ fi
 cmake -S "$here" -B "$here/build" -G Ninja -DCMAKE_BUILD_TYPE="$type" \
       -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/3DS.cmake" \
       -DPython3_EXECUTABLE="$PSP2I_PYTHON"
-cmake --build "$here/build"
+cmake --build "$here/build" -j "$jobs" "${targets[@]}"
 
 # the code-size budget line (CLAUDE.md, 3DS rules)
 for elf in "$here"/build/*.elf; do
