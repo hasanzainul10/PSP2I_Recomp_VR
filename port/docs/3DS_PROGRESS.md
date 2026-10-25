@@ -14,8 +14,10 @@ step, hot game functions at -O2 with inline memory access: it reached
 **6-7 fps in town and then PANICked after about 80 s**. It's committed but
 **off by default**.
 
-**The PANIC is found and fixed (2026-10-25, second session); not yet
-confirmed in town on the 3DS.** It was not the hot build: `user_main`'s host
+**The PANIC is found and fixed (2026-10-25, second session), confirmed in
+Azahar: the user played the hot build into town (2+ minutes, 78 s of them
+at 300+ draws a frame); `user_main` peaked at 4 KB in all 15 reports, no
+PANIC.** It was not the hot build: `user_main`'s host
 stack overflowed its 4 MB. The game's inflate (`0x08DE0C40`, ADDRESS_MAP.md
 "The data decoder") falls from `0x08DE0E10` into a label inside another
 body once per decoded byte, and the recompiler emitted that as a dispatch
@@ -30,9 +32,11 @@ allegrexrecomp (psprecomp 8d67e25, `fall_target` / `scc_fall`): such a fall
 now stays inside the tail-call cycle trampoline. Checked: PC town replay,
 deepest 22 KB in 150 s, town draws right (`town.rec` frame at vblank 3600);
 Azahar, the hot build: `user_main` peaks at 4 KB through the title and the
-save load (was 1,136 KB there). `.text` 29.68 MB (+0.39: more cycle
-wrappers). **Next:** the user plays into town for 2+ minutes in Azahar
-(peak stays small, no PANIC), then turn the hot list on by default.
+save load (was 1,136 KB there), and in town as above. `.text` 29.68 MB
+(+0.39: more cycle wrappers). Town in that run: 6 fps at first, 3-4 later
+with `ge` at 600+ ms/s (the GE vertex work, not the game's code), 4.1 on
+average. **Next:** turn the hot list on by default, then measure on the
+console, then the GE vertex work on core 2.
 
 **Was: the hot-function build's PANIC** (kept for its details):
 
