@@ -12,9 +12,13 @@ at the banners that start each function, into N parts that compile alone:
 
 Nothing else changes, so the parts behave exactly as the single file does.
 
-  python split_gen.py <recomp_funcs.c> <out dir> [parts]
+  python split_gen.py <recomp_funcs.c> <out dir> [parts] [hot list]
 
-The output is rewritten only when the input is newer than it.
+A hot list (one PSP address per line, # comments; the 3DS port's
+hot_functions.txt) puts those functions in recomp_hot_NN.c instead, so a
+build can compile them differently (the 3DS: -O2 with inline memory access).
+
+The output is rewritten only when the input (or the hot list) is newer than it.
 """
 
 import os
@@ -31,10 +35,19 @@ EXTERN_DEF = re.compile(r'^(void psp_[a-z]+_[0-9A-F]{8}\([^)]*\))\s*\{')
 def main():
     src, out = sys.argv[1], sys.argv[2]
     parts = int(sys.argv[3]) if len(sys.argv) > 3 else 24
+    hot_path = sys.argv[4] if len(sys.argv) > 4 else None
     stamp = os.path.join(out, 'recomp_split.h')
-    if os.path.exists(stamp) and os.path.getmtime(stamp) >= os.path.getmtime(src):
+    newest = max(os.path.getmtime(src), os.path.getmtime(hot_path) if hot_path else 0)
+    if os.path.exists(stamp) and os.path.getmtime(stamp) >= newest:
         print('split_gen: up to date')
         return
+    hot = set()
+    if hot_path:
+        with open(hot_path, 'r', encoding='utf-8') as f:
+            for l in f:
+                l = l.split('#')[0].strip().upper()
+                if l:
+                    hot.add(l)
     os.makedirs(out, exist_ok=True)
     with open(src, 'r', encoding='utf-8', newline='') as f:
         lines = f.read().split('\n')
@@ -75,6 +88,17 @@ def main():
         h.write('\n\n#endif\n')
 
     starts = [i for i, l in enumerate(body) if l.startswith(BANNER)]
+    # the hot functions' blocks (banner to the next banner) move out
+    hot_blocks = []
+    if hot:
+        bounds = starts + [len(body)]
+        keep = []
+        for k in range(len(starts)):
+            block = body[bounds[k]:bounds[k + 1]]
+            m = re.match(r'^ \* psp_func_([0-9A-F]{8}) ', block[1] if len(block) > 1 else '')
+            (hot_blocks if m and m.group(1) in hot else keep).append(block)
+        body = [l for block in keep for l in block]
+        starts = [i for i, l in enumerate(body) if l.startswith(BANNER)]
     per = max(1, len(starts) // parts)
     cuts = [starts[k] for k in range(0, len(starts), per)][:parts] + [len(body)]
     for p in range(len(cuts) - 1):
@@ -85,12 +109,24 @@ def main():
                 f.write('uint32_t psp_scc_next;\n\n')
             f.write('\n'.join(body[cuts[p]:cuts[p + 1]]))
             f.write('\n')
+    nhot = min(4, len(hot_blocks))
+    for p in range(nhot):
+        with open(os.path.join(out, 'recomp_hot_%02d.c' % p), 'w', encoding='utf-8', newline='\n') as f:
+            f.write('/* Hot functions of recomp_funcs.c, part %d (port/android/split_gen.py) -- do not edit. */\n' % p)
+            f.write('#include "recomp_split.h"\n\n')
+            for block in hot_blocks[p::nhot]:
+                f.write('\n'.join(block))
+                f.write('\n')
     for stale in os.listdir(out):           # parts left over from a run with more parts
         m = re.match(r'recomp_part_(\d+)\.c$', stale)
         if m and int(m.group(1)) >= len(cuts) - 1:
             os.remove(os.path.join(out, stale))
+        m = re.match(r'recomp_hot_(\d+)\.c$', stale)
+        if m and int(m.group(1)) >= nhot:
+            os.remove(os.path.join(out, stale))
     os.replace(stamp + '.tmp', stamp)
-    print('split_gen: %d functions, %d prototypes, %d parts' % (len(starts), len(protos), len(cuts) - 1))
+    print('split_gen: %d functions (%d hot), %d prototypes, %d parts' %
+          (len(starts) + len(hot_blocks), len(hot_blocks), len(protos), len(cuts) - 1))
 
 
 if __name__ == '__main__':

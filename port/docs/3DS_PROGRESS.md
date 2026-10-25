@@ -6,19 +6,53 @@ The user's console: **New 3DS XL, Luma3DS**.
 
 ## Handoff (2026-10-25): where to pick up
 
-**State:** T0-T2 done. T3: the user played into the game in Azahar
-(2026-10-25) and saw no drawing errors, at **1.8-3 fps**. The PC save
-loads (section "Saves"). **T4 (speed) has started**: the host reports where
-each second goes (section "T4"), and the per-frame target thrashing in the
-field is fixed in code but **not yet checked in a field**.
+**State (2026-10-25, end of session):** T0-T3 done in Azahar (the user
+played into town, no drawing errors; saves load). **T4 (speed):** town went
+from 2 to 5.4 fps in Azahar (target thrashing fixed, overlapping targets on
+the GPU, runtime at -O2; section "T4"). The work in progress is the next
+step, hot game functions at -O2 with inline memory access: it reached
+**6-7 fps in town and then PANICked after about 80 s** (below). It's
+committed but **off by default**.
 
-**Next step:** in Azahar the copies between targets and VRAM are gone
-(section "T4"), the runtime is built at -O2, and the game is CPU-bound at
-5-6 fps in town: the game's code plus the
-GE's vertex work. Measure that on the console before choosing CPU work (the
-ISO isn't on its SD: ask the user). The log's `time:` lines and the `c3d:`
-per-cause counts are in `%APPDATA%\Azahar\sdmc\psp2i\psp2i_log.txt` (on
-the console `sdmc:/psp2i/psp2i_log.txt`).
+**Resume here: the hot-function build's PANIC.**
+
+- What it is: `split_gen.py` takes a hot list (`port/3ds/hot_functions.txt`,
+  1,076 addresses) and moves those functions to `gen_split/recomp_hot_*.c`.
+  CMake builds those at -O2 with `PSPRECOMP_INLINE_MEM` (psprecomp `mem.h`:
+  main-RAM loads and stores inline, the rest through `psp_read32` & co.;
+  `psp_mem_fast_rd/_wr`, kept by `mem.c`'s `fast_update`). `.text` 29.29 MB
+  (+0.9). Inline memory in all the game's code: 52 MB, doesn't fit.
+- Turn it on: configure with
+  `-DPSP2I_HOT_LIST=<worktree>/port/3ds/hot_functions.txt` (the default is
+  now empty). **Note:** the existing `port/3ds/build` cache may still hold
+  the hot list from the session; check `PSP2I_HOT_LIST` in its
+  CMakeCache.txt before trusting a build.
+- The crash: the `.cia` in Azahar, town, ~81 s: Azahar's log says
+  `Emulated program broke execution! Reason: PANIC` (svcBreak). The last
+  `time:` lines before it: 982 and then 2,106 draws a frame with 73 and 19
+  read-backs a frame (normal town: 330 draws, 0 read-backs). The game's log
+  is saved nowhere in the repo; rerun to reproduce. Not diagnosed. Suspects,
+  in order: (1) an inline store that should have gone through the slow path
+  (e.g. a write the runtime must see: VRAM is excluded by the range check,
+  but check the GE list / `psp_gpu_cpu_sync` assumptions and anything
+  hooked by address in `hooks.txt`); (2) -O2 exposing undefined behaviour in
+  generated code (strict aliasing: try `-fno-strict-aliasing` on the hot
+  files, then -O2 without `PSPRECOMP_INLINE_MEM`, to split the two causes);
+  (3) citro3d running out of something at 2,000 draws a frame (its panic
+  would also be svcBreak). Get the PC from Azahar's log
+  (`%APPDATA%\Azahar\log\azahar_log.txt`, "Exception") and map it with
+  `arm-none-eabi-addr2line -f -e port/3ds/build/psp2i.elf`.
+- Profiling tools: `port/3ds/tools/gsample.c` (attach to the PC build,
+  charge each sample to the innermost game function, memory helpers
+  included; build with MSVC + dbghelp.lib winmm.lib) and
+  `port/3ds/tools/town.rec` (the user's input from the title into town, for
+  `psp2i.exe --replay-input town.rec --headless --seconds 70`; town is
+  vblank ~1800-3900). The PC findings: game time is spread over ~1,000
+  functions (the biggest 0.7%); the cost is the call per guest load/store,
+  which makes the compiler spill and reload the MIPS registers kept in
+  `psp_cpu` (on the 3DS "game" was 3.3x the GE time; on PC 1:1).
+- After that: measure on the console (the ISO isn't on its SD; ask the
+  user), then the GE vertex work on core 2.
 
 Testing loop:
 

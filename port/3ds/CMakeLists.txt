@@ -87,20 +87,35 @@ target_compile_options(psprecomp PRIVATE ${PSP2I_RUNTIME_OPT} -Wno-format -Wno-c
 
 if(EXISTS ${PSP2I_GEN_DIR}/recomp_funcs.c)
     set(SPLIT_DIR ${CMAKE_BINARY_DIR}/gen_split)
+    # the functions the game spends its time in (hot_functions.txt) go to
+    # recomp_hot_*.c, built for speed below
+    # OFF by default: the first try PANICs after ~80 s in town (3DS_PROGRESS.md
+    # handoff); configure with -DPSP2I_HOT_LIST=${CMAKE_CURRENT_SOURCE_DIR}/hot_functions.txt
+    set(PSP2I_HOT_LIST "" CACHE FILEPATH
+        "game functions built at -O2 with inline memory access (empty: none)")
     execute_process(COMMAND ${Python3_EXECUTABLE} ${PORT}/android/split_gen.py
-                            ${PSP2I_GEN_DIR}/recomp_funcs.c ${SPLIT_DIR} ${PSP2I_GEN_PARTS}
+                            ${PSP2I_GEN_DIR}/recomp_funcs.c ${SPLIT_DIR} ${PSP2I_GEN_PARTS} ${PSP2I_HOT_LIST}
                     RESULT_VARIABLE split_rc)
     if(NOT split_rc EQUAL 0)
         message(FATAL_ERROR "split_gen.py could not split ${PSP2I_GEN_DIR}/recomp_funcs.c")
     endif()
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${PSP2I_GEN_DIR}/recomp_funcs.c)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${PSP2I_GEN_DIR}/recomp_funcs.c ${PSP2I_HOT_LIST})
     file(GLOB GEN_PARTS ${SPLIT_DIR}/recomp_part_*.c)
+    file(GLOB GEN_HOT ${SPLIT_DIR}/recomp_hot_*.c)
 
     # the game's code as a library of its own, so its size can be read alone;
     # -Os and no debug info (P3P3DS: -Os took its code from 77 to 44 MB)
-    add_library(psp2i_game STATIC ${GEN_PARTS} ${PSP2I_GEN_DIR}/recomp_imports.c)
+    add_library(psp2i_game STATIC ${GEN_PARTS} ${GEN_HOT} ${PSP2I_GEN_DIR}/recomp_imports.c)
     target_include_directories(psp2i_game PRIVATE ${PSP2I_GEN_DIR} ${SPLIT_DIR})
     target_compile_options(psp2i_game PRIVATE -Os -g0 -w)
+    # The hot functions: -O2, and main-RAM loads and stores inline (psprecomp
+    # mem.h; otherwise each is a call that spills and reloads the MIPS
+    # registers kept in psp_cpu). Not everywhere: inline memory in all the
+    # game's code took .text from 28 to 52 MB, more than the heap can give.
+    if(GEN_HOT)
+        set_source_files_properties(${GEN_HOT} PROPERTIES
+            COMPILE_OPTIONS "-O2" COMPILE_DEFINITIONS PSPRECOMP_INLINE_MEM)
+    endif()
     target_link_libraries(psp2i_game PRIVATE psprecomp)
 
     # the GE backend's vertex shader, assembled by picasso and linked in
