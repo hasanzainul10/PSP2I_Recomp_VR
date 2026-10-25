@@ -11,8 +11,8 @@
  *     seeded from VRAM; depth buffers are kept by their VRAM address;
  *   - dirty rows are read back only when something is about to read VRAM,
  *     and a CPU access to VRAM reaches cpu_access through psp_mem_set_vram_hook;
- *   - overlapping targets go through VRAM (gl_ge.c's GPU transfer, rt_xfer,
- *     isn't done here yet).
+ *   - overlapping targets hand rows over on the GPU where the PICA can
+ *     (rt_take; the rest goes through VRAM).
  *
  * Rows: as in gl_ge.c, texture row y IS PSP row y: row 0 is the first in
  * memory, where the vertex shader's NDC y = -1 lands (checked by reading a
@@ -100,6 +100,7 @@ typedef struct {
     uint32_t seg;
     uint64_t n_drawn, n_up, n_back;              /* draws into it, uploads, readbacks (c3d_ge_report) */
     uint64_t back_why[6], up_why[3];             /* readbacks and uploads by cause (RB_*, UP_*) */
+    uint64_t seq;                                /* when it was last drawn (g_draw_seq) */
 } rt_entry;
 
 /* Why a target goes to or comes from VRAM (counted, c3d_ge_report) */
@@ -130,6 +131,7 @@ static uint32_t    g_tex_bytes;
 static C3D_Tex     g_scratch;                    /* a copy of a target sampled while drawn to */
 static int         g_scratch_ok;
 static uint64_t    g_use;
+static uint64_t    g_draw_seq;
 
 static uint64_t n_draws, n_tris, n_uploads, n_readbacks, n_tex_decodes, n_rt_tex, n_approx,
                 n_finish, n_present, n_fail, n_evict;
@@ -286,6 +288,19 @@ static void rows_mark(rt_entry *t, uint32_t y0, uint32_t y1) {
     else { if (y0 < t->dy0) t->dy0 = y0; if (y1 > t->dy1) t->dy1 = y1; }
     t->dirty = 1;
     pages_set(g_pg_dirty, row_addr(t, y0), row_addr(t, y1));
+}
+
+static void rows_bounds(rt_entry *t) {
+    uint32_t lo = 512, hi = 0;
+    for (uint32_t y = 0; y < 512; y++) if (row_dirty(t, y)) { if (y < lo) lo = y; hi = y + 1; }
+    if (lo >= hi) { t->dirty = 0; t->dy0 = t->dy1 = 0; memset(t->drow, 0, sizeof t->drow); }
+    else { t->dirty = 1; t->dy0 = lo; t->dy1 = hi; }
+}
+
+static void rows_clear(rt_entry *t, uint32_t y0, uint32_t y1) {
+    if (y1 > 512) y1 = 512;
+    for (uint32_t y = y0; y < y1; y++) t->drow[y >> 6] &= ~(1ull << (y & 63));
+    rows_bounds(t);
 }
 
 /* ---- moving targets to and from the CPU ------------------------------------------------
@@ -625,6 +640,8 @@ static C3D_Tex *scratch_copy(rt_entry *t) {
     return &g_scratch;
 }
 
+static int rt_resolve(rt_entry *r);
+
 /* The texture for this draw (decoded, or a target the game drew), and the
  * UV scale (1 / the GPU texture's size). */
 static C3D_Tex *texture_view(const psp_gpu_state *st, rt_entry *target, float scale[2]) {
@@ -632,6 +649,16 @@ static C3D_Tex *texture_view(const psp_gpu_state *st, rt_entry *target, float sc
     if ((st->tex_addr & 0x0F000000u) == 0x04000000u) {
         static const int tbpp[11] = { 16, 16, 16, 32, 4, 8, 16, 32, 4, 8, 8 };
         uint32_t tend = toff + st->tex_bufw * st->tex_h * (uint32_t)tbpp[st->tex_psm > 10 ? 3 : st->tex_psm] / 8;
+        if (st->tex_psm <= 3 && !st->tex_swz) {        /* a target, with what others drew over it (rt_resolve) */
+            rt_entry *r = rt_find(toff, st->tex_bufw, st->tex_psm);
+            if (r && tend <= rt_end(r) && rt_resolve(r)) {
+                n_rt_tex++;
+                scale[0] = 1.0f / (float)r->w;
+                scale[1] = 1.0f / (float)r->h;
+                if (r != target) { r->seg = g_seg; return &r->tex; }
+                return scratch_copy(r);
+            }
+        }
         for (int i = 0; i < MAX_RT; i++) {
             rt_entry *t = &g_rt[i];
             if (!t->used || !overlaps(toff, tend, t->off, rt_end(t))) continue;
@@ -792,6 +819,145 @@ static int ring_put(const psp_gpu_vertex *v, int nverts) {
     return first;
 }
 
+/* ---- overlapping targets on the GPU -------------------------------------------------------------
+ * gl_ge.c hands a target's newer rows to an overlapping one on the GPU
+ * (rt_xfer), reinterpreting the bytes in a fragment shader. The PICA has no
+ * fragment shader, so here:
+ *   - same format and stride, whole rows apart: the rows are drawn from one
+ *     target's texture into the other, queued with the draws (no waiting);
+ *   - 16-bit pixels over 32-bit ones (PSP2i's bloom passes, drawn into the
+ *     memory of the displayed buffers every frame): not reinterpreted, as in
+ *     PPSSPP. The target drawn to now owns the bytes; the other's rows there
+ *     stop being newer than VRAM. Before, each of these went to VRAM and back
+ *     (about 4 read-backs and 4 uploads a frame in the field);
+ *   - anything else goes through VRAM, as before.
+ * sdmc:/psp2i/xfer_vram sends everything through VRAM, to compare. */
+static uint64_t n_xfer, n_skip;
+static int g_xfer_vram;
+
+enum { TAKE_VRAM, TAKE_GPU, TAKE_SKIP };
+
+static uint32_t rt_rowbytes(const rt_entry *t) { return t->stride * (uint32_t)bpp_of(t->fmt); }
+
+static int take_kind(const rt_entry *o, const rt_entry *t) {
+    if (g_xfer_vram) return TAKE_VRAM;
+    if (bpp_of(o->fmt) != bpp_of(t->fmt)) return TAKE_SKIP;
+    if (o->fmt != t->fmt || o->stride != t->stride) return TAKE_VRAM;
+    const int32_t delta = (int32_t)o->off - (int32_t)t->off;
+    return delta % (int32_t)rt_rowbytes(o) ? TAKE_VRAM : TAKE_GPU;
+}
+
+/* o's rows [*a, *b) whose bytes lie inside t */
+static void take_rows(const rt_entry *o, const rt_entry *t, uint32_t *a, uint32_t *b) {
+    const uint32_t ro = rt_rowbytes(o), oe = rt_end(o), te = rt_end(t);
+    const uint32_t lo = o->off > t->off ? o->off : t->off, hi = oe < te ? oe : te;
+    *a = *b = 0;
+    if (lo >= hi) return;
+    *a = (lo - o->off) / ro;
+    *b = (hi - o->off + ro - 1) / ro;
+    if (*b > o->h) *b = o->h;
+}
+
+/* o's rows [y0, y1) drawn into t at their own bytes (TAKE_GPU). own: t
+ * now holds them for VRAM too (it's being drawn to); else t only gets a
+ * copy to be sampled (rt_resolve), and o keeps them. */
+static void rt_xfer(rt_entry *t, rt_entry *o, uint32_t y0, uint32_t y1, int own) {
+    const int32_t d = ((int32_t)o->off - (int32_t)t->off) / (int32_t)rt_rowbytes(o);   /* t's row = o's + d */
+    if ((int32_t)y0 + d < 0) y0 = (uint32_t)-d;
+    if ((int32_t)y1 + d > (int32_t)t->h) y1 = (uint32_t)((int32_t)t->h - d);
+    if (y0 >= y1) return;
+    const float w = (float)t->stride, ty0 = (float)((int32_t)y0 + d), ty1 = (float)((int32_t)y1 + d);
+    psp_gpu_vertex q[6];
+    memset(q, 0, sizeof q);
+    for (int i = 0; i < 6; i++) { q[i].rhw = 1.0f; q[i].r = q[i].g = q[i].b = q[i].a = 255.0f; }
+    static const uint8_t RIGHT[6] = { 0, 1, 0, 0, 1, 1 }, BOTTOM[6] = { 0, 0, 1, 1, 0, 1 };
+    for (int i = 0; i < 6; i++) {
+        q[i].x = q[i].u = RIGHT[i] ? w : 0.0f;
+        q[i].y = BOTTOM[i] ? ty1 : ty0;
+        q[i].v = (float)(BOTTOM[i] ? y1 : y0);
+    }
+    const int first = ring_put(q, 6);
+    if (first < 0) return;
+    draw_on(t, NULL);
+    C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, (u32)ty0, (u32)w, (u32)ty1);
+    C3D_DepthTest(true, GPU_ALWAYS, GPU_WRITE_COLOR);
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+    C3D_TexEnv *env = C3D_GetTexEnv(0);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, 0, 0);
+    C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+    C3D_TexSetFilter(&o->tex, GPU_NEAREST, GPU_NEAREST);
+    C3D_TexSetWrap(&o->tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+    C3D_TexBind(0, &o->tex);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, u_vp, 2.0f / (float)t->w, 2.0f / (float)t->h, 1.0f / (float)o->w, 1.0f / (float)o->h);
+    C3D_DrawArrays(GPU_TRIANGLES, first, 6);
+    t->seg = o->seg = g_seg;
+    if (own) { rows_mark(t, (uint32_t)ty0, (uint32_t)ty1); t->seq = ++g_draw_seq; }
+    n_xfer++;
+}
+
+/* Before drawing on t: what the other targets drew over t's bytes, taken
+ * on the GPU or dropped (take_kind). t has been checked against VRAM. */
+static void rt_take(rt_entry *t) {
+    for (int i = 0; i < MAX_RT; i++) {
+        rt_entry *o = &g_rt[i];
+        if (!o->used || o == t || !o->dirty || !overlaps(t->off, rt_end(t), o->off, rt_end(o))) continue;
+        const int kind = take_kind(o, t);
+        if (kind == TAKE_VRAM) continue;
+        uint32_t a, b;
+        take_rows(o, t, &a, &b);
+        if (a >= b) continue;
+        if (kind == TAKE_GPU)
+            for (uint32_t y = a; y < b; ) {
+                if (!row_dirty(o, y)) { y++; continue; }
+                uint32_t z = y;
+                while (z < b && row_dirty(o, z)) z++;
+                rt_xfer(t, o, y, z, 1);
+                y = z;
+            }
+        if (kind == TAKE_GPU) rows_clear(o, a, b);
+        /* TAKE_SKIP: o keeps its rows, newer than VRAM: it's sampled from them
+         * (PSP2i draws its bloom into the displayed buffer's memory and samples
+         * it later; dropping them sent that sample to stale VRAM: a flickering
+         * glow in town). Where both are read back, the one drawn last wins
+         * (readback_range). */
+        else n_skip++;
+    }
+}
+
+/* Before sampling target r: whether its texture is newer than VRAM, after
+ * taking what other targets drew over its bytes (gl_ge.c rt_resolve_copy). */
+static int rt_resolve(rt_entry *r) {
+    const uint32_t r0 = r->off, r1 = rt_end(r);
+    int flushed = 0, newer = r->dirty;
+    for (int i = 0; i < MAX_RT; i++) {
+        rt_entry *o = &g_rt[i];
+        if (!o->used || o == r || !o->dirty || !overlaps(r0, r1, row_addr(o, o->dy0), row_addr(o, o->dy1))) continue;
+        if (take_kind(o, r) != TAKE_VRAM) continue;
+        rt_readback(o, RB_TEXTURE);
+        flushed = 1;
+    }
+    if (flushed && !r->dirty) r->check_frame = (uint64_t)-1;
+    rt_check(r);
+    for (int i = 0; i < MAX_RT; i++) {
+        rt_entry *o = &g_rt[i];
+        if (!o->used || o == r || !o->dirty || !overlaps(r0, r1, row_addr(o, o->dy0), row_addr(o, o->dy1))) continue;
+        if (take_kind(o, r) != TAKE_GPU || o->seq < r->seq) continue;   /* only rows newer than r's */
+        uint32_t a, b;
+        take_rows(o, r, &a, &b);
+        for (uint32_t y = a; y < b; ) {
+            if (!row_dirty(o, y)) { y++; continue; }
+            uint32_t z = y;
+            while (z < b && row_dirty(o, z)) z++;
+            rt_xfer(r, o, y, z, 0);
+            newer = 1;
+            y = z;
+        }
+    }
+    return newer;
+}
+
 
 /* ---- the draw ------------------------------------------------------------------------------------ */
 
@@ -814,17 +980,19 @@ static int c3d_draw_on(const psp_gpu_state *st, const psp_gpu_vertex *v, int nve
     if (rows > RT_H) rows = RT_H;
     rt_entry *t = rt_get(off, st->fb_stride, st->fb_fmt, rows);
     if (!t) { n_fail++; return 1; }
-    {   /* overlapping targets: their newer rows through VRAM (gl_ge.c without rt_xfer) */
+    {   /* overlapping targets: their newer rows on the GPU where it can (rt_take), else through VRAM */
         const uint32_t t0 = t->off, t1 = rt_end(t);
         int flushed = 0;
         for (int i = 0; i < MAX_RT; i++) {
             rt_entry *o = &g_rt[i];
             if (!o->used || o == t || !o->dirty || !overlaps(t0, t1, o->off, rt_end(o))) continue;
+            if (take_kind(o, t) != TAKE_VRAM) continue;
             rt_readback(o, RB_OVERLAP);
             flushed = 1;
         }
         if (flushed && !t->dirty) t->check_frame = (uint64_t)-1;
         rt_check(t);
+        rt_take(t);
         for (int i = 0; i < MAX_RT; i++) {
             rt_entry *o = &g_rt[i];
             if (o->used && o != t && overlaps(t0, t1, o->off, rt_end(o))) o->check_frame = (uint64_t)-1;
@@ -867,16 +1035,31 @@ static int c3d_draw_on(const psp_gpu_state *st, const psp_gpu_vertex *v, int nve
     if (y1 > st->sy1 + 1) y1 = st->sy1 + 1;
     if (y0 < y1) rows_mark(t, (uint32_t)y0, (uint32_t)y1);
     t->n_drawn++;
+    t->seq = ++g_draw_seq;
     n_draws++;
     n_tris += (uint64_t)nverts / 3;
     return 0;
 }
 
+/* The dirty targets over VRAM [a0, a1) back to VRAM, the one drawn last
+ * last, so it wins where they overlap (as the PSP's memory would hold). */
+static void readback_range(uint32_t a0, uint32_t a1, int why, int recheck) {
+    rt_entry *list[MAX_RT];
+    int n = 0;
+    for (int i = 0; i < MAX_RT; i++)
+        if (g_rt[i].used && g_rt[i].dirty && overlaps(a0, a1, g_rt[i].off, rt_end(&g_rt[i]))) list[n++] = &g_rt[i];
+    for (int i = 1; i < n; i++)
+        for (int k = i; k > 0 && list[k]->seq < list[k - 1]->seq; k--) { rt_entry *x = list[k]; list[k] = list[k - 1]; list[k - 1] = x; }
+    for (int i = 0; i < n; i++) {
+        rt_readback(list[i], why);
+        if (recheck) list[i]->check_frame = (uint64_t)-1;
+    }
+}
+
 static void c3d_sync_vram(uint32_t addr, uint32_t bytes) {
     if ((addr & 0x0F000000u) != 0x04000000u) return;
     uint32_t a0 = vram_off(addr), a1 = a0 + bytes;
-    for (int i = 0; i < MAX_RT; i++)
-        if (g_rt[i].used && g_rt[i].dirty && overlaps(a0, a1, g_rt[i].off, rt_end(&g_rt[i]))) rt_readback(&g_rt[i], RB_SYNC);
+    readback_range(a0, a1, RB_SYNC, 0);
 }
 
 static void c3d_vram_written(uint32_t addr, uint32_t bytes) {
@@ -896,9 +1079,7 @@ static void cpu_access(uint32_t off, uint32_t size) {
     if (!dirty && !armed) return;
     const uint32_t q0 = p0 << PG_SHIFT, q1 = (p1 + 1) << PG_SHIFT;
     if (dirty) {
-        for (int i = 0; i < MAX_RT; i++)
-            if (g_rt[i].used && g_rt[i].dirty && overlaps(a0, a1, g_rt[i].off, rt_end(&g_rt[i])))
-                { rt_readback(&g_rt[i], RB_CPU); g_rt[i].check_frame = (uint64_t)-1; }
+        readback_range(a0, a1, RB_CPU, 1);
         memset(g_pg_dirty + p0, 0, p1 - p0 + 1);
         for (int i = 0; i < MAX_RT; i++) {
             const rt_entry *t = &g_rt[i];
@@ -1057,6 +1238,12 @@ int c3d_ge_init(void) {
     g_staging = (uint32_t *)linearAlloc(RT_W * RT_H * 4);
     if (!g_staging) return -1;
     staging_selftest();
+    FILE *xv = fopen("sdmc:/psp2i/xfer_vram", "r");
+    if (xv) {
+        fclose(xv);
+        g_xfer_vram = 1;
+        fprintf(stderr, "c3d: xfer_vram: overlapping targets go through VRAM\n");
+    }
     C3D_BufInfo *bi = C3D_GetBufInfo();
     BufInfo_Init(bi);
     BufInfo_Add(bi, g_ring, sizeof(psp_gpu_vertex), 3, 0x210);
@@ -1094,12 +1281,12 @@ void c3d_ge_report(FILE *out) {
     for (int i = 0; i < MAX_TEX; i++) texs += g_tex[i].used;
     fprintf(out, "c3d: %llu draws, %llu tris, %llu presents, %llu finishes; uploads %llu, readbacks %llu, "
                  "texture decodes %llu (%d cached, %lu KB), target textures %llu, approximated %llu, "
-                 "to software %llu, evictions %llu; %d targets, %d depth buffers; linear free %lu KB, VRAM free %lu KB\n",
+                 "to software %llu, evictions %llu, GPU transfers %llu, overlaps dropped %llu; %d targets, %d depth buffers; linear free %lu KB, VRAM free %lu KB\n",
             (unsigned long long)n_draws, (unsigned long long)n_tris, (unsigned long long)n_present,
             (unsigned long long)n_finish, (unsigned long long)n_uploads, (unsigned long long)n_readbacks,
             (unsigned long long)n_tex_decodes, texs, (unsigned long)(g_tex_bytes >> 10),
             (unsigned long long)n_rt_tex, (unsigned long long)n_approx, (unsigned long long)n_fail,
-            (unsigned long long)n_evict, rts, depths, (unsigned long)(linearSpaceFree() >> 10), (unsigned long)(vramSpaceFree() >> 10));
+            (unsigned long long)n_evict, (unsigned long long)n_xfer, (unsigned long long)n_skip, rts, depths, (unsigned long)(linearSpaceFree() >> 10), (unsigned long)(vramSpaceFree() >> 10));
     for (int i = 0; i < MAX_RT; i++) {
         const rt_entry *t = &g_rt[i];
         if (!t->used) continue;

@@ -12,11 +12,12 @@ loads (section "Saves"). **T4 (speed) has started**: the host reports where
 each second goes (section "T4"), and the per-frame target thrashing in the
 field is fixed in code but **not yet checked in a field**.
 
-**Next step:** the user plays the installed `.cia` into town and a field
-in Azahar; then read the `time:` lines and the `c3d:` per-cause counts from
-`%APPDATA%\Azahar\sdmc\psp2i\psp2i_log.txt` (section "T4", "How to
-read"). Decide the next speed work from those numbers, then measure on the
-console (the ISO isn't on its SD: ask the user).
+**Next step:** in Azahar the copies between targets and VRAM are gone
+(section "T4") and the game is CPU-bound at 2 fps: the game's code plus the
+GE's vertex work. Measure that on the console before choosing CPU work (the
+ISO isn't on its SD: ask the user). The log's `time:` lines and the `c3d:`
+per-cause counts are in `%APPDATA%\Azahar\sdmc\psp2i\psp2i_log.txt` (on
+the console `sdmc:/psp2i/psp2i_log.txt`).
 
 Testing loop:
 
@@ -366,6 +367,23 @@ read its VRAM); uploads `new`, `rows`, `changed` (VRAM changed under it).
   they go through emulated VRAM (gl_ge.c's GPU `rt_xfer` would copy them on
   the GPU instead: about 160 ms/s here). The scene (VRAM+0x0CC000) has 564
   `cpu` read-backs in the run: the game reads it now and then.
+- **Overlapping targets on the GPU (`rt_take`, `rt_resolve`, `rt_xfer` in
+  `c3d_ge.c`), checked by the user in town (2026-10-25: "town looks right,
+  no flicker"):** same format and stride: the rows are drawn from one
+  target into the other on the GPU; 16-bit over 32-bit (the bloom passes in
+  the displayed buffers' memory): not reinterpreted, as in PPSSPP, and each
+  target keeps its own pixels. A first version dropped the bloom target's
+  rows when the displayed buffer was drawn over them, so the bloom was then
+  sampled from stale VRAM: **a flickering yellow glow in town**. Before a
+  target is sampled, it now takes the newer same-format rows drawn over it
+  (gl_ge.c's `rt_resolve_copy`), and readbacks of overlapping targets run in
+  drawing order. `sdmc:/psp2i/xfer_vram` brings back the VRAM path.
+- **After, in town (the user's run):** 0 uploads and 0-4 read-backs a frame
+  (only the game reading the scene, `cpu`), 1,472 GPU transfers and 5,167
+  dropped overlaps in the run. ms per second: game 470-630, ge 300-470,
+  draw 45-65, wait 12, readback 0-75, present 3, idle 5. **Still 2 fps in
+  Azahar**: the copies are gone, and what's left is CPU work (game + ge,
+  about 900 ms of every second).
 - **Azahar's CPU speed is not the console's.** Azahar emulates the ARM11
   with its own cycle count and runs this build at "Speed 90-100%", but how
   that compares with the console's 804 MHz with L2 isn't known. The CPU
