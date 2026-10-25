@@ -108,11 +108,27 @@ That's 28 MB of code, against the plan's 40-60 MB estimate and P3P3DS's 44 MB.
 
 In **Azahar** (`.3dsx` started directly, 96 MB region): heap after the code
 64,668 KiB; the guest RAM takes 34,832 KiB; `psp_recomp_register` 72 ms and
-3,072 KiB of dispatch tables. Azahar doesn't enforce the heap's end (the
-largest-block test reads the whole heap even after 38 MB were taken).
+3,072 KiB of dispatch tables.
 
-Budget for T2, from these numbers, in the 124 MB region (heap ≈ 93.8 MB
-for the check app, minus 28.9 MB of code and `.bss` ≈ **65 MB**):
+On the **console** (New 3DS XL, `.3dsx` from the Homebrew Launcher,
+2026-10-25):
+
+| | KiB |
+|---|---|
+| APPLICATION region | 126,976 |
+| heap after the code (`__ctru_heap_size`) | **64,676** |
+| used after the guest RAM + VRAM (`psp_mem_init`) | 34,849 |
+| used after the dispatch tables (`psp_recomp_register`, 92 ms) | 37,921 |
+| **heap left** | **26,755** |
+| linear memory free | 31,193 |
+
+The first build's "largest block" lines read the whole heap (64,612 KiB)
+in both places: GCC had removed the probe's malloc+free pair and assumed
+success. Fixed (the pointer goes through a volatile, and the ELF now calls
+malloc there); heap minus used is the real figure.
+
+Budget for T2, from these numbers, in the 124 MB region (heap after the
+code **63.2 MB**, measured):
 
 | | MB |
 |---|---|
@@ -120,11 +136,12 @@ for the check app, minus 28.9 MB of code and `.bss` ≈ **65 MB**):
 | dispatch tables | 3 |
 | `gpu.c` vertex buffers | 10.5 (to shrink in T3/T4: the 3DS draws far fewer vertices per frame than they hold) |
 | PSP thread stacks (1 MB each, PSP2i ~10-20 threads) | 10-20 |
-| **left for file cache, audio, the rest** | **~0-8**, more once the vertex buffers shrink |
-| linear memory (textures, GPU buffers), separate | 32 |
+| **left for file cache, audio, the rest** | **~6-16** (26.1 measured before the vertex buffers and stacks), more once the vertex buffers shrink |
+| linear memory (textures, GPU buffers), separate | 32 (libctru's default split; `__ctru_linear_heap_size` can move memory between the two) |
 
-Not checked yet, **on the console**: the fit check (heap after code, the
-largest block after the guest RAM and the tables).
+**T1 verdict: the game fits.** Its code, the PSP's memory and the dispatch
+tables load on the console with 26 MB of heap and 31 MB of linear memory
+to spare. T2 has to keep the runtime's fixed buffers small.
 
 ## Next: T2 (boot)
 

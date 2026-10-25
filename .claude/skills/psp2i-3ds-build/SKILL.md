@@ -54,7 +54,7 @@ MSYSTEM=MSYS /d/msys64/usr/bin/bash.exe -l /d/work/PSP2I_Recomp_3DS/port/3ds/bui
   main checkout (same as `psp2i-build-run`, about 4 s):
 
   ```bash
-  cd /d/work/PSP2I_Recomp_3DS/port && /d/work/PSP2I_Recomp_VR/psprecomp/build/tools/allegrexrecomp/Release/allegrexrecomp.exe       emit /d/work/PSP2I_Recomp_VR/FinalBuild/EBOOT.BIN gen recomp --hooks hooks.txt --fixes fixes.txt
+  cd /d/work/PSP2I_Recomp_3DS/port && /d/work/PSP2I_Recomp_VR/psprecomp/build/tools/allegrexrecomp/Release/allegrexrecomp.exe emit /d/work/PSP2I_Recomp_VR/FinalBuild/EBOOT.BIN gen recomp --hooks hooks.txt --fixes fixes.txt
   ```
 
   Configuring splits it into 256 parts (`build/gen_split`, `PSP2I_GEN_PARTS`);

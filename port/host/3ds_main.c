@@ -62,13 +62,16 @@ static unsigned long used_kib(void)
     return (unsigned long)(mi.uordblks >> 10);
 }
 
-/* The largest single block malloc can still give, in KiB (binary search). */
+/* The largest single block malloc can still give, in KiB (binary search).
+ * The pointer goes through a volatile: GCC drops a malloc+free pair whose
+ * result isn't used and treats it as successful (the first console run read
+ * the whole heap as free with 38 MB of it in use). */
 static unsigned long largest_kib(void)
 {
     size_t lo = 0, hi = __ctru_heap_size;
     while (hi - lo > 64 * 1024) {
         size_t mid = lo + (hi - lo) / 2;
-        void *p = malloc(mid);
+        void *volatile p = malloc(mid);
         if (p) { free(p); lo = mid; } else hi = mid;
     }
     return (unsigned long)(lo >> 10);
