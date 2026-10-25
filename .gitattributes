@@ -1,0 +1,2 @@
+# shell scripts run under bash (MSYS2, macOS): keep LF even with core.autocrlf
+*.sh text eol=lf
