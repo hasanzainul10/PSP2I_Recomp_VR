@@ -1,0 +1,38 @@
+; The GE's vertices on the PICA200 (c3d_ge.c). The runtime (psprecomp gpu.c)
+; already did the vertex work: positions arrive in the target's pixels with
+; the PSP's 16-bit depth and 1/w, texture coordinates in texels, colours in
+; 0..255. This only maps them to the PICA's clip space, as gl_ge.c's vertex
+; shader does for OpenGL.
+
+.fvec vp                ; 2 / target width, 2 / target height, 1 / texture width, 1 / texture height
+
+.constf k(1.0, 0.0000152590219, 0.00392156863, 0.0)    ; 1, 1/65535, 1/255, 0
+.alias one  k.xxxx
+.alias zero k.wwww
+
+.out outpos position
+.out outuv  texcoord0
+.out outclr color
+
+.alias inpos v0         ; x, y (pixels), z (0..65535), 1/w
+.alias inuv  v1         ; u, v (texels)
+.alias inclr v2         ; r, g, b, a (0..255)
+
+.proc main
+    rcp r1, inpos.w             ; w
+
+    mul r0.xy, vp.xy, inpos.xy  ; pixels to NDC: x * 2 / width - 1, y * 2 / height - 1
+    add r0.xy, -one, r0.xy      ; (row y lands in the target's row y, where the CPU puts it)
+
+    mul r0.z, k.y, inpos.z      ; depth 0..1, clamped
+    max r0.z, zero, r0.z
+    min r0.z, one, r0.z
+    mov r0.z, -r0.z             ; the PICA clips z to 0..-w (C3D_DepthMap -1, 0 maps it back)
+
+    mul outpos.xyz, r1, r0      ; times w: perspective-correct interpolation
+    mov outpos.w, r1
+
+    mul outuv.xy, vp.zw, inuv.xy
+    mul outclr, k.zzzz, inclr
+    end
+.end

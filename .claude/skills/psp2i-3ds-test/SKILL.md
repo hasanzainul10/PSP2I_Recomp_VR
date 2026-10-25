@@ -59,6 +59,33 @@ mode by default). Data: `%APPDATA%\Azahar\` (`log\azahar_log.txt`,
   CopyFromScreen, see this session's history), or ask the user to look.
   Settings dialogs can cover the game.
 
+## Seeing the screen and the draws
+
+- **Screenshots of Azahar's window**: Azahar renders with OpenGL, so
+  `PrintWindow` returns black and a grab of the screen only works while the
+  window is on screen and on top. The working recipe: find the window,
+  `SetWindowPos(HWND_TOPMOST, 40, 40, 1021, 727, NOACTIVATE)`, grab that
+  rectangle with `CopyFromScreen`. A ready script from this session did
+  exactly that; rewrite it if it's gone (the user allowed driving Azahar
+  while debugging the renderer: restart it with each build, screenshot).
+- **sdmc:/psp2i/ control files** (the host reads them at start-up; leave
+  them empty or delete them when done, they cost time on every run):
+  - `software`: draw with the software rasterizer instead of the PICA200;
+  - `dumpframes`: seconds, e.g. `6 12`: every draw of the frame at that
+    second into `dump_<s>.txt` (`psp_gpu_dump_next_frame`);
+  - `shots`: seconds: the displayed buffer as `shot_<s>.ppm` (480x272),
+    read back from the GPU.
+- The log's `c3d:` lines every 10 s: draws, read-backs, uploads, texture
+  decodes, VRAM free, and per target its draws/uploads/read-backs and
+  whether the GPU is ahead of VRAM.
+- Compare with the PC build: `psp2i.exe --root ../../../FinalBuild/GameData
+  --eboot ../../../FinalBuild/EBOOT.BIN --headless --seconds 60
+  --capture-every 300 --capture-dir <dir>` from the main checkout's
+  `port/build/Release` writes the PC's frames as PPMs.
+- **Don't trust a CPU read of a target in Azahar**: it doesn't write its
+  GPU's picture back for those, only for GX display transfers (that's why
+  c3d_ge.c reads back through one).
+
 ## The console (New 3DS XL, Luma3DS)
 
 The user does the steps on the console; ask, then read the results.

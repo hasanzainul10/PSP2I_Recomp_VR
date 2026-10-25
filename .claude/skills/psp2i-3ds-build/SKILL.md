@@ -77,9 +77,14 @@ MSYSTEM=MSYS /d/msys64/usr/bin/bash.exe -l /d/work/PSP2I_Recomp_3DS/port/3ds/bui
 - `make_assets.py`: icon and banner drawn from text. Never put game art in.
 - `net_compat.h`: IPv6 declarations and `FIONREAD` for the runtime's
   networking code (soc:U is IPv4 only).
-- `../host/3ds_main.c`: the game's host (T2: boots the game from
-  `sdmc:/psp2i/game.iso` with the software rasterizer on the top screen;
-  log `sdmc:/psp2i/psp2i_log.txt`, with each thread's stack peak every 10 s).
+- `../host/3ds_main.c`: the game's host: boots the game from
+  `sdmc:/psp2i/game.iso`, draws through `c3d_ge.c` (or the software
+  rasterizer with `sdmc:/psp2i/software`); log `sdmc:/psp2i/psp2i_log.txt`
+  with each thread's stack peak and the renderer's counters every 10 s.
+- `../host/c3d_ge.c` + `c3d_ge.v.pica`: the citro3d GE backend and its
+  vertex shader (picasso assembles it, `bin2s` embeds it: CMake's
+  `ctr_add_shader_library` / `dkp_add_embedded_binary_library`). Read its
+  header comment before changing rows, targets or read-backs.
 - Host stack sizes: `-DPSP2I_FIBER_STACK=` (threads asking the PSP for 32 KB
   or more, default 4 MB) and `-DPSP2I_FIBER_STACK_SMALL=` (the rest,
   512 KB), in bytes, empty = the default. Set them only to measure; an

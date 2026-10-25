@@ -1,9 +1,10 @@
 /* PSP2i on New 3DS: the host (3DS_PLAN.md).
  *
- * T2 (boot): the game from the SD card, drawn by the runtime's software
- * rasterizer into emulated VRAM and copied to the top screen each vblank;
- * the 3DS's buttons as the PSP's; the bottom screen shows the log's last
- * lines and the frame rate. No sound, no GPU drawing, no stereo yet (T3-T5).
+ * The game from the SD card, drawn on the PICA200 by c3d_ge.c (T3) and
+ * shown on the top screen each vblank; the 3DS's buttons as the PSP's; the
+ * bottom screen shows the log's last lines and the frame rate. No sound and
+ * no stereo yet (T4, T5). With sdmc:/psp2i/software present, the runtime's
+ * software rasterizer draws instead and its frame is copied by the CPU (T2).
  *
  * Files, all under sdmc:/psp2i/:
  *
@@ -13,11 +14,13 @@
  *   GameData/ms/      the memory stick: saves, DLC (created on first save)
  *   psp2i_log.txt     the log of the last run (stderr)
  *   report_game.txt   memory at start-up and each thread's stack use at exit
+ *   software          (any content) draw with the software rasterizer
  *
  * Buttons: A Circle, B Cross, Y Square, X Triangle, L/ZL L, R/ZR R, the
  * Circle Pad the analog stick, the C-stick the camera (camera.c), START,
  * SELECT, the D-pad. HOME suspends or quits as for any title. */
 #include <3ds.h>
+#include <citro3d.h>
 #include <dirent.h>
 #include <malloc.h>
 #include <stdarg.h>
@@ -29,7 +32,9 @@
 #include "psprecomp/cpu.h"
 #include "psprecomp/hle.h"
 #include "psprecomp/mem.h"
+#include "psprecomp/render.h"
 
+#include "c3d_ge.h"
 #include "camera.h"
 
 #define BASE "sdmc:/psp2i"
@@ -45,6 +50,7 @@ extern u32 __ctru_heap_size, __ctru_linear_heap_size;
 
 static PrintConsole g_bottom;
 static FILE *g_report;
+static int g_gpu;                        /* c3d_ge.c draws (else the software rasterizer) */
 
 /* A line to the bottom screen, the log and the report. */
 static void say(const char *fmt, ...)
@@ -260,7 +266,11 @@ static uint64_t g_stat_flips;
 static void on_vblank(void) {
     if (!aptMainLoop()) { psp_request_exit(); return; }   /* HOME > Close */
     read_pad();
-    present();
+    if (g_gpu) {
+        uint32_t addr, stride, fmt;
+        psp_display_get(&addr, &stride, &fmt);
+        c3d_ge_present(addr, stride, (int)fmt);
+    } else present();
     const u64 now = svcGetSystemTick();
     if (now - g_stat_tick >= SYSCLOCK_ARM11) {            /* once a second */
         const uint64_t flips = psp_display_flips();
@@ -269,8 +279,43 @@ static void on_vblank(void) {
                (double)(flips - g_stat_flips) * SYSCLOCK_ARM11 / (double)(now - g_stat_tick), used_kib());
         g_stat_flips = flips;
         g_stat_tick = now;
-        static int secs;
-        if (++secs % 10 == 0) psp_sched_stack_report(stderr);   /* each thread's peak, to size the stacks */
+        /* sdmc:/psp2i/dumpframes holds seconds ("6 9 12"): every draw of the
+         * frame at each of them goes to dump_<s>.txt (psp_gpu_dump_next_frame) */
+        static int secs, ndump = -1, dump_at[16];
+        ++secs;
+        if (ndump < 0) {
+            ndump = 0;
+            FILE *f = fopen(BASE "/dumpframes", "r");
+            if (f) { while (ndump < 16 && fscanf(f, "%d", &dump_at[ndump]) == 1) ndump++; fclose(f); }
+        }
+        int dump_now = 0;
+        for (int k = 0; k < ndump; k++) dump_now |= dump_at[k] == secs;
+        if (dump_now) {
+            char path[64];
+            snprintf(path, sizeof path, BASE "/dump_%02d.txt", secs);
+            psp_gpu_dump_next_frame(path);
+        }
+        /* sdmc:/psp2i/shots holds seconds too: the displayed picture at each
+         * goes to shot_<s>.ppm (480x272), as the PC build's --overlay-shot */
+        static int nshot = -1, shot_at[32];
+        if (nshot < 0) {
+            nshot = 0;
+            FILE *f = fopen(BASE "/shots", "r");
+            if (f) { while (nshot < 32 && fscanf(f, "%d", &shot_at[nshot]) == 1) nshot++; fclose(f); }
+        }
+        for (int k = 0; k < nshot; k++)
+            if (shot_at[k] == secs) {
+                uint32_t addr, stride, fmt;
+                psp_display_get(&addr, &stride, &fmt);
+                char path[64];
+                snprintf(path, sizeof path, BASE "/shot_%03d.ppm", secs);
+                if (g_gpu) c3d_ge_capture(addr, stride, (int)fmt, path);
+            }
+        if (secs % 10 == 0) {
+            psp_sched_stack_report(stderr);   /* each thread's peak, to size the stacks */
+            if (g_gpu) c3d_ge_report(stderr);
+        }
+        gfxFlushBuffers();                    /* the bottom screen's text */
         fflush(stderr);
     }
 }
@@ -292,6 +337,12 @@ int main(void)
     say("heap %lu KiB after the code, linear %lu KiB",
         (unsigned long)(__ctru_heap_size >> 10), (unsigned long)(__ctru_linear_heap_size >> 10));
 
+    struct stat sw;
+    if (stat(BASE "/software", &sw) != 0) {
+        if (C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 2) && c3d_ge_init() == 0) g_gpu = 1;
+        else say("citro3d could not start: drawing in software");
+    }
+    say("drawing: %s", g_gpu ? "PICA200 (citro3d)" : "software");
     for (int x = 0; x < TOP_W; x++) g_sx[x] = (uint16_t)(x * SCREEN_W / TOP_W);
     for (int y = 0; y < TOP_H; y++) g_sy[y] = (uint16_t)(y * SCREEN_H / TOP_H);
 
@@ -330,6 +381,7 @@ int main(void)
     say("the game ended (%d); heap %lu KiB used", rc, used_kib());
     if (g_report) psp_sched_stack_report(g_report);
     psp_sched_stack_report(stderr);
+    if (g_gpu) c3d_ge_report(stderr);
     if (g_report) fclose(g_report);
     fflush(stderr);
     psp_mem_free();

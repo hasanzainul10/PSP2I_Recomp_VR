@@ -190,8 +190,56 @@ Found, not fixed:
 - **Music:** ATRAC3plus has no decoder here ("playback is silent"), T4.
 - Firmware calls 0xA1336091 and 0x8218B4DD are unimplemented (also on PC).
 
-## Next: T3 (citro3d renderer)
+## T3: citro3d renderer (2026-10-25, in progress)
 
-0.1 fps in Azahar is the software rasterizer on an emulated 268 MHz CPU.
-`c3d_ge.c`, a `psp_gpu_backend` on citro3d, moves the drawing to the
-PICA200 (3DS_PLAN.md section 3).
+**Checked in Azahar (screenshots of its window):** the translation
+disclaimer and the save dialog draw on the PICA200 exactly as on PC (text,
+layout, orientation), at **28-30 fps** where the software rasterizer gave
+0.1. The dialog waits for a button; scenes after it are not checked yet.
+Not run on the console.
+
+`port/host/c3d_ge.c` (+ `c3d_ge.h`, `c3d_ge.v.pica`): gl_ge.c's design on
+citro3d. Render targets per (VRAM offset, stride, format), seeded from
+VRAM, read back only when the CPU touches them; textures decoded by the
+runtime and cached by `tex_key` + a per-frame hash; TEV for the texture
+functions; alpha test, depth test, blending mapped (the GE's and the PICA's
+test functions share their numbering); one quad presents the displayed
+buffer, 480x272 filtered to 400x240. `sdmc:/psp2i/software` switches back
+to the software rasterizer.
+
+What the PICA200 / citro3d / Azahar demanded (each found in Azahar, in the
+order it bit; all written up in c3d_ge.c's comments):
+
+- **Render targets only in VRAM** (6 MB): citro3d refuses others, so the
+  first build drew nothing. Targets take the narrowest power-of-two width
+  for their stride; depth is 16-bit like the PSP's (0.5 MB, shared).
+- **PSP2i uses five targets** at the title (the two displayed buffers, the
+  scene at 0x0CC000, two 256-wide ones overlapping them); four slots evicted
+  one every frame and overlapping targets swapped garbage through VRAM.
+  Slots are now limited by VRAM only.
+- **No target deletion inside a citro3d frame** (it panics): the frame is
+  ended first.
+- **The CPU never touches a target's VRAM itself.** Azahar renders on the
+  PC's GPU and writes the result into the 3DS's memory only for GX display
+  transfers; CPU reads of a target returned what the CPU had written at its
+  creation. Read-backs go through a display transfer into a linear staging
+  buffer, uploads through a GX texture copy, the depth clear through a GX
+  fill.
+- **Rows:** the sampler and rendering agree with each other, and both put
+  PSP row y at a texture's memory row height-1-y as the CPU writes it.
+  Decoded textures stored row 0 first came out upside down, and the text's
+  UVs read the empty bottom of the glyph atlas: no text anywhere. All CPU
+  writes go through `mrow()`; the display transfer's own row order is
+  measured at start-up (`staging_selftest`: reversed in Azahar).
+- **Waiting for the GPU before CPU access**, between frames too (present
+  submits without waiting).
+
+Tools added on the way (sdmc:/psp2i/ files the host reads at start-up):
+`dumpframes` (seconds: every draw of that frame to `dump_<s>.txt`),
+`shots` (seconds: the displayed buffer to `shot_<s>.ppm`, via the GPU
+read-back), the per-target counters in the `c3d:` stats line every 10 s.
+
+Next in T3: play past the dialog (needs input) and check the title, the
+lobby and a field against the PC build; overlapping-target transfers on
+the GPU (gl_ge.c's rt_xfer) instead of through VRAM; first numbers on the
+console.

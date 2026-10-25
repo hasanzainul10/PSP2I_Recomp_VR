@@ -6,7 +6,7 @@
 # (port/3ds/build.sh does this through MSYS2.) For now it builds the T0
 # check app, psp2i_hello, as a .3dsx and a .cia; the game joins in T1.
 cmake_minimum_required(VERSION 3.20)
-project(psp2i_3ds C)
+project(psp2i_3ds C ASM)
 
 set(MAKEROM    "D:/Tools/makerom/makerom.exe" CACHE FILEPATH "makerom (Project_CTR)")
 set(BANNERTOOL "D:/Tools/bannertool/bannertool-1.2.3-windows/bannertool.exe" CACHE FILEPATH "bannertool")
@@ -99,11 +99,15 @@ if(EXISTS ${PSP2I_GEN_DIR}/recomp_funcs.c)
     target_compile_options(psp2i_game PRIVATE -Os -g0 -w)
     target_link_libraries(psp2i_game PRIVATE psprecomp)
 
-    add_executable(psp2i ${PORT}/host/3ds_main.c ${PORT}/host/camera.c)
+    # the GE backend's vertex shader, assembled by picasso and linked in
+    ctr_add_shader_library(c3d_ge_shader ${PORT}/host/c3d_ge.v.pica OUTPUT c3d_ge.shbin)
+    dkp_add_embedded_binary_library(c3d_ge_shader_bin c3d_ge_shader)
+
+    add_executable(psp2i ${PORT}/host/3ds_main.c ${PORT}/host/c3d_ge.c ${PORT}/host/camera.c)
     target_compile_options(psp2i PRIVATE -O2 -Wall -Wno-format)
     target_compile_definitions(psp2i PRIVATE PSP2I_3DS)
     target_include_directories(psp2i PRIVATE ${PORT}/host)
-    target_link_libraries(psp2i PRIVATE psp2i_game psprecomp ctru m)
+    target_link_libraries(psp2i PRIVATE c3d_ge_shader_bin psp2i_game psprecomp citro3d ctru m)
     target_link_options(psp2i PRIVATE -Wl,--gc-sections -Wl,-Map=${CMAKE_CURRENT_BINARY_DIR}/psp2i.map)
     psp2i_package(psp2i "PSP2i Recomp" "Phantasy Star Portable 2 Infinity" 0xF5221 CTR-P-P2I3)
     message(STATUS "PSP2i 3DS: building the game from ${PSP2I_GEN_DIR}")
