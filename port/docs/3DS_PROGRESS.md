@@ -34,8 +34,12 @@ first script is already on Azahar's SD: CIRCLE/CROSS at 17-24 s, START at
    difference with `dumpframes` and the `c3d:` counters before fixing it in
    `c3d_ge.c` (CLAUDE.md: find the decision).
 
-**Open items:** saves (the PC save is encrypted; `savecrypt.c` needs a
-portable AES: T7), music (no ATRAC3plus decoder: T4), overlapping targets
+**Saves fixed (2026-10-25, see "Saves" below):** the PC save now loads
+in Azahar. Writing one isn't seen in the game yet: the title screen
+ignored the scripted START and Circle presses (27-54 s), so the game never
+got past it. That is the next thing to look at (the pad, not the saves).
+
+**Open items:** music (no ATRAC3plus decoder: T4), overlapping targets
 go through VRAM (gl_ge.c's GPU `rt_xfer` not ported), nothing measured on
 the console since T1 (its SD has the fonts, the DLC and an old build, not
 the ISO; the user wants Azahar until the game runs better).
@@ -223,9 +227,7 @@ Done:
 Found, not fixed:
 
 - **Saves:** the PC's save is encrypted (`savecrypt.c`, Windows AES only),
-  so it reads as garbage here and the game can't save over it. A portable
-  AES in `savecrypt.c` (T7) makes saves move between PC, PSP and 3DS. The
-  console copy leaves that save out.
+  so it read as garbage here. Fixed 2026-10-25 (section "Saves" below).
 - **Music:** ATRAC3plus has no decoder here ("playback is silent"), T4.
 - Firmware calls 0xA1336091 and 0x8218B4DD are unimplemented (also on PC).
 
@@ -282,3 +284,29 @@ Next in T3: play past the dialog (needs input) and check the title, the
 lobby and a field against the PC build; overlapping-target transfers on
 the GPU (gl_ge.c's rt_xfer) instead of through VRAM; first numbers on the
 console.
+
+## Saves (2026-10-25)
+
+**Cause:** the 3DS host set no savedata crypto provider, and `savecrypt.c`
+only had Windows' AES (BCrypt). The PC writes saves encrypted (mode 5, as
+a PSP does), so the 3DS passed them to the game still encrypted, and would
+have written its own saves plain.
+
+**Fix:** `savecrypt.c` has its own AES-128 where BCrypt isn't there (S-box
+built from its definition at first use, the 12 KIRK key slots expanded
+once); the IV seed comes from the clock there. `3ds_main.c` sets the
+provider as `main.c` does, and the 3DS build links `savecrypt.c`. The
+Windows build is unchanged (BCrypt); `SAVECRYPT_OWN_AES` selects our AES on
+Windows too, for the test below.
+
+**Checked:**
+
+- On the PC, our AES against BCrypt (a test program built from
+  `savecrypt.c` twice): encrypt with one, decrypt with the other, both
+  ways, modes 1, 3 and 5, lengths 1 to 301,352 bytes, all equal; the
+  PARAM.SFO hashes are byte for byte the same.
+- In Azahar: the PC's `SAVEDATA.BIN` loads: `savedata ... decrypted (mode
+  5, 301368 -> 301352 bytes)`, no hash mismatch, and the game reaches the
+  title screen.
+- Not checked: a save written by the 3DS (the title screen didn't take
+  the scripted presses), and nothing on the console.

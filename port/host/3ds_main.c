@@ -36,6 +36,7 @@
 
 #include "c3d_ge.h"
 #include "camera.h"
+#include "savecrypt.h"
 
 #define BASE "sdmc:/psp2i"
 #define SCREEN_W 480
@@ -419,6 +420,9 @@ int main(void)
     mkdir(BASE "/GameData", 0777);
     psp_hle_init();
     psp_io_set_root(BASE "/GameData");
+    /* PSP savedata encryption: saves interchangeable with the PC, a PSP and PPSSPP */
+    static const psp_savedata_crypto SAVE_CRYPTO = { savecrypt_decrypt, savecrypt_encrypt, savecrypt_sfo_hash };
+    psp_savedata_set_crypto(&SAVE_CRYPTO);
     psp_sysmem_set_heap(mi.load_hi, USER_PARTITION_TOP);
     psp_recomp_register();
     camera_init(1.0f);

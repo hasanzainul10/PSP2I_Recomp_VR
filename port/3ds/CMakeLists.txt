@@ -103,7 +103,8 @@ if(EXISTS ${PSP2I_GEN_DIR}/recomp_funcs.c)
     ctr_add_shader_library(c3d_ge_shader ${PORT}/host/c3d_ge.v.pica OUTPUT c3d_ge.shbin)
     dkp_add_embedded_binary_library(c3d_ge_shader_bin c3d_ge_shader)
 
-    add_executable(psp2i ${PORT}/host/3ds_main.c ${PORT}/host/c3d_ge.c ${PORT}/host/camera.c)
+    add_executable(psp2i ${PORT}/host/3ds_main.c ${PORT}/host/c3d_ge.c ${PORT}/host/camera.c
+                         ${PORT}/host/savecrypt.c)
     target_compile_options(psp2i PRIVATE -O2 -Wall -Wno-format)
     target_compile_definitions(psp2i PRIVATE PSP2I_3DS)
     target_include_directories(psp2i PRIVATE ${PORT}/host)

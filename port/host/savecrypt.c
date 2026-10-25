@@ -11,15 +11,19 @@
  * 4 and 7): the save modes a game can use without a console-unique key
  * (1, 3 and 5; PSP2i uses 5). The console-unique ("fuse") commands are not
  * available, exactly as in PPSSPP: hashes that need them come out as the
- * 0x01 fill PPSSPP writes. AES itself is Windows' (BCrypt); the IV seed
- * comes from the system random generator instead of KIRK command 14. */
+ * 0x01 fill PPSSPP writes. AES itself is Windows' (BCrypt) on Windows and
+ * our own elsewhere (the 3DS); the IV seed comes from the system random
+ * generator (the clock elsewhere) instead of KIRK command 14. */
 
 #include "savecrypt.h"
 
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
-#ifdef _WIN32
+/* SAVECRYPT_OWN_AES: our AES on Windows too (the test compares the two) */
+#if defined(_WIN32) && !defined(SAVECRYPT_OWN_AES)
+#define SAVECRYPT_BCRYPT
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <bcrypt.h>
@@ -47,7 +51,7 @@ static const struct { int seed; uint8_t key[16]; } KEYS[] = {
 enum { KIRK_CMD_ENCRYPT_IV_0 = 4, KIRK_CMD_ENCRYPT_IV_FUSE = 5, KIRK_CMD_DECRYPT_IV_0 = 7, KIRK_CMD_DECRYPT_IV_FUSE = 8 };
 enum { KIRK_MODE_ENCRYPT_CBC = 4, KIRK_MODE_DECRYPT_CBC = 5 };
 
-#ifdef _WIN32
+#ifdef SAVECRYPT_BCRYPT
 static BCRYPT_ALG_HANDLE g_alg;
 static BCRYPT_KEY_HANDLE g_key[NKEYS];
 static CRITICAL_SECTION g_cs;
@@ -74,6 +78,96 @@ static int aes_block(int k, int enc, const uint8_t in[16], uint8_t out[16]) {
 }
 
 static void random_bytes(uint8_t *p, ULONG n) { BCryptGenRandom(NULL, p, n, BCRYPT_USE_SYSTEM_PREFERRED_RNG); }
+#else
+/* Elsewhere (the 3DS) a small AES-128 of our own. The PSP's threads run as
+ * fibers on one host thread there, so no lock is needed. */
+static uint8_t g_sbox[256], g_isbox[256];
+static uint8_t g_rk[NKEYS][176];              /* the 11 round keys of each slot */
+static int g_ready;
+
+static uint8_t xt(uint8_t a) { return (uint8_t)((a << 1) ^ (a & 0x80 ? 0x1B : 0)); }
+static uint8_t gmul(uint8_t a, uint8_t b) {
+    uint8_t r = 0;
+    while (b) { if (b & 1) r ^= a; a = xt(a); b >>= 1; }
+    return r;
+}
+static uint8_t rotl8(uint8_t x, int s) { return (uint8_t)((x << s) | (x >> (8 - s))); }
+
+static void init_aes(void) {
+    if (g_ready) return;
+    /* the S-box from its definition: p walks GF(2^8)* by x3 and q by /3, so
+     * q = 1/p; then the affine transform */
+    uint8_t p = 1, q = 1;
+    do {
+        p = (uint8_t)(p ^ xt(p));
+        q ^= (uint8_t)(q << 1); q ^= (uint8_t)(q << 2); q ^= (uint8_t)(q << 4);
+        if (q & 0x80) q ^= 0x09;
+        g_sbox[p] = (uint8_t)(q ^ rotl8(q, 1) ^ rotl8(q, 2) ^ rotl8(q, 3) ^ rotl8(q, 4) ^ 0x63);
+    } while (p != 1);
+    g_sbox[0] = 0x63;
+    for (int i = 0; i < 256; i++) g_isbox[g_sbox[i]] = (uint8_t)i;
+    for (int k = 0; k < NKEYS; k++) {
+        uint8_t *w = g_rk[k], rcon = 1;
+        memcpy(w, KEYS[k].key, 16);
+        for (int i = 16; i < 176; i += 4) {
+            uint8_t t[4] = { w[i - 4], w[i - 3], w[i - 2], w[i - 1] };
+            if (i % 16 == 0) {
+                const uint8_t t0 = t[0];
+                t[0] = (uint8_t)(g_sbox[t[1]] ^ rcon); t[1] = g_sbox[t[2]]; t[2] = g_sbox[t[3]]; t[3] = g_sbox[t0];
+                rcon = xt(rcon);
+            }
+            for (int j = 0; j < 4; j++) w[i + j] = (uint8_t)(w[i - 16 + j] ^ t[j]);
+        }
+    }
+    g_ready = 1;
+}
+
+/* One AES block with key slot `k`; the state is column-major, s[c*4 + r]. */
+static int aes_block(int k, int enc, const uint8_t in[16], uint8_t out[16]) {
+    const uint8_t *rk = g_rk[k];
+    uint8_t s[16], t[16];
+    for (int i = 0; i < 16; i++) s[i] = (uint8_t)(in[i] ^ rk[enc ? i : 160 + i]);
+    for (int r = 1; r <= 10; r++) {
+        const uint8_t *key = rk + 16 * (enc ? r : 10 - r);
+        if (enc) {
+            for (int c = 0; c < 4; c++)                       /* SubBytes + ShiftRows */
+                for (int j = 0; j < 4; j++) t[c * 4 + j] = g_sbox[s[((c + j) & 3) * 4 + j]];
+            if (r < 10)
+                for (int c = 0; c < 4; c++) {                 /* MixColumns */
+                    uint8_t *a = t + c * 4;
+                    const uint8_t a0 = a[0], a1 = a[1], a2 = a[2], a3 = a[3], x = (uint8_t)(a0 ^ a1 ^ a2 ^ a3);
+                    a[0] ^= (uint8_t)(x ^ xt((uint8_t)(a0 ^ a1)));
+                    a[1] ^= (uint8_t)(x ^ xt((uint8_t)(a1 ^ a2)));
+                    a[2] ^= (uint8_t)(x ^ xt((uint8_t)(a2 ^ a3)));
+                    a[3] ^= (uint8_t)(x ^ xt((uint8_t)(a3 ^ a0)));
+                }
+            for (int i = 0; i < 16; i++) s[i] = (uint8_t)(t[i] ^ key[i]);
+        } else {
+            for (int c = 0; c < 4; c++)                       /* InvShiftRows + InvSubBytes */
+                for (int j = 0; j < 4; j++) t[((c + j) & 3) * 4 + j] = g_isbox[s[c * 4 + j]];
+            for (int i = 0; i < 16; i++) t[i] ^= key[i];
+            if (r < 10)
+                for (int c = 0; c < 4; c++) {                 /* InvMixColumns */
+                    uint8_t *a = t + c * 4;
+                    const uint8_t a0 = a[0], a1 = a[1], a2 = a[2], a3 = a[3];
+                    a[0] = (uint8_t)(gmul(a0, 14) ^ gmul(a1, 11) ^ gmul(a2, 13) ^ gmul(a3, 9));
+                    a[1] = (uint8_t)(gmul(a0, 9) ^ gmul(a1, 14) ^ gmul(a2, 11) ^ gmul(a3, 13));
+                    a[2] = (uint8_t)(gmul(a0, 13) ^ gmul(a1, 9) ^ gmul(a2, 14) ^ gmul(a3, 11));
+                    a[3] = (uint8_t)(gmul(a0, 11) ^ gmul(a1, 13) ^ gmul(a2, 9) ^ gmul(a3, 14));
+                }
+            memcpy(s, t, 16);
+        }
+    }
+    memcpy(out, s, 16);
+    return 0;
+}
+
+/* The IV seed only has to differ between saves: the clock through xorshift. */
+static void random_bytes(uint8_t *p, unsigned n) {
+    static uint64_t x;
+    x ^= (uint64_t)time(NULL) * 0x9E3779B97F4A7C15ull ^ (uint64_t)clock() ^ 0xD1B54A32D192ED03ull;
+    while (n--) { x ^= x << 13; x ^= x >> 7; x ^= x << 17; *p++ = (uint8_t)(x >> 32); }
+}
 #endif
 
 static int key_index(int seed) {
@@ -89,15 +183,19 @@ static void wr32(uint8_t *p, int32_t v) { memcpy(p, &v, 4); }
  * the header); command 7 decrypts it to the start of the buffer. The fuse
  * commands (5, 8) need the console's key and fail, as in PPSSPP. */
 static int kirk_cbc(uint8_t *buf, int cmd) {
-#ifdef _WIN32
     if (cmd != KIRK_CMD_ENCRYPT_IV_0 && cmd != KIRK_CMD_DECRYPT_IV_0) return -1;
     const int mode = rd32(buf), seed = rd32(buf + 12), size = rd32(buf + 16);
     if (cmd == KIRK_CMD_ENCRYPT_IV_0 && mode != KIRK_MODE_ENCRYPT_CBC) return -1;
     if (cmd == KIRK_CMD_DECRYPT_IV_0 && mode != KIRK_MODE_DECRYPT_CBC) return -1;
     if (size <= 0 || (size & 15)) return -1;
-    InitOnceExecuteOnce(&g_once, init_once, NULL, NULL);
     const int k = key_index(seed);
+#ifdef SAVECRYPT_BCRYPT
+    InitOnceExecuteOnce(&g_once, init_once, NULL, NULL);
     if (!g_alg || k < 0 || !g_key[k]) return -1;
+#else
+    init_aes();
+    if (k < 0) return -1;
+#endif
     uint8_t iv[16] = { 0 }, blk[16];
     uint8_t *d = buf + 20;
     if (cmd == KIRK_CMD_ENCRYPT_IV_0) {
@@ -116,10 +214,6 @@ static int kirk_cbc(uint8_t *buf, int cmd) {
         }
     }
     return 0;
-#else
-    (void)buf; (void)cmd;
-    return -1;
-#endif
 }
 
 /* ---- chnnlsv (sceSd*) ----------------------------------------------------------------- */
@@ -305,9 +399,7 @@ static int sceSdCipherInit(cipher_ctx *ctx2, int mode, int uknw, uint8_t *data, 
     if (uknw == 1) {
         uint8_t kirkHeader[37];
         uint8_t *kirkData = kirkHeader + 20;
-#ifdef _WIN32
         random_bytes(kirkHeader, 20);              /* KIRK command 14 (random) in the firmware */
-#endif
         memcpy(kirkHeader + 20, kirkHeader, 16);
         memset(kirkHeader + 32, 0, 4);
         const int type = typeFromMode(mode);
@@ -355,13 +447,13 @@ static int sceSdCipherFinal(cipher_ctx *ctx) {
 static uint32_t align16(uint32_t n) { return (n + 15) & ~15u; }
 
 static void lock(void) {
-#ifdef _WIN32
+#ifdef SAVECRYPT_BCRYPT
     InitOnceExecuteOnce(&g_once, init_once, NULL, NULL);
     EnterCriticalSection(&g_cs);
 #endif
 }
 static void unlock(void) {
-#ifdef _WIN32
+#ifdef SAVECRYPT_BCRYPT
     LeaveCriticalSection(&g_cs);
 #endif
 }
