@@ -340,7 +340,10 @@ read its VRAM); uploads `new`, `rows`, `changed` (VRAM changed under it).
   and 40,800 uploads in the run.
 - **Fix:** a target is as tall as its rows (the next power of two, 64 at
   least): 256x128 now takes 128 KB. A target asked for more rows than its
-  texture has is made again from VRAM. Field not checked yet.
+  texture has is made again from VRAM. **Checked in game (the user's run,
+  2026-10-25): 1 eviction in the whole run instead of 5,119 per target.**
+  The frame rate didn't change in Azahar (still 2 fps): the time is
+  elsewhere (next point).
 - **A scene after the title (the `.3dsx`, scripted, with the fix):** 587
   draws per frame at 2 fps, **0 evictions**. In ms per second: ge
   450-500, game 240-330, upload 70-90, readback 50-130, draw 50-60,
@@ -348,5 +351,26 @@ read its VRAM); uploads `new`, `rows`, `changed` (VRAM changed under it).
   biggest part there, then the game. (This scene's lines came from the
   build without `idle`; the game part may include some idle time.)
 - **Loading screen:** 1 fps with 990 of 1000 ms in the game's code.
+- **In game, the user's run with the fix (town and field, 350-500 draws
+  per frame, 2 fps), ms per second:**
+
+  | game | ge | upload | readback | draw | texture | wait | present | idle |
+  |---|---|---|---|---|---|---|---|---|
+  | 400-470 | 250-320 | 90-115 | 55-70 | 55-60 | 15 | 13 | 2 | 0-10 |
+
+  So about 750 ms of every second is CPU work in the game's code and the
+  runtime's vertex work: about 375 ms a frame, where 30 fps needs 33.
+  Target traffic is 4.5 read-backs and 4 uploads a frame, **all of it
+  `overlap`**: the 256-wide passes at VRAM+0x000000 / 0x022000 / 0x044000 /
+  0x066000 sit inside the two displayed buffers' bytes, so every frame
+  they go through emulated VRAM (gl_ge.c's GPU `rt_xfer` would copy them on
+  the GPU instead: about 160 ms/s here). The scene (VRAM+0x0CC000) has 564
+  `cpu` read-backs in the run: the game reads it now and then.
+- **Azahar's CPU speed is not the console's.** Azahar emulates the ARM11
+  with its own cycle count and runs this build at "Speed 90-100%", but how
+  that compares with the console's 804 MHz with L2 isn't known. The CPU
+  part (game + ge) has to be measured on the console before deciding
+  between CPU work (an `-O2` build of the hot code, the GE's vertex work on
+  core 2) and the rest.
 - Azahar measures correctness, not speed. These numbers say where the
   time goes in Azahar; only the console says how fast it is.
