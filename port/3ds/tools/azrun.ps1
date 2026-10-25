@@ -6,7 +6,7 @@ param([int]$Wait = 40, [string]$Shot = "shot", [switch]$NoRestart)
 $ErrorActionPreference = "Continue"
 $az = 'D:\Tools\azahar\azahar-windows-msvc-2126.2\azahar.exe'
 $game = 'D:\work\PSP2I_Recomp_3DS\port\3ds\build\psp2i.3dsx'
-$dir = Join-Path $PSScriptRoot "..buildshots"; New-Item -ItemType Directory -Force $dir | Out-Null
+$dir = Join-Path $PSScriptRoot '..\build\shots'; New-Item -ItemType Directory -Force $dir | Out-Null
 if (-not $NoRestart) {
     Get-Process azahar -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep 1
