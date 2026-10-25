@@ -89,9 +89,9 @@ if(EXISTS ${PSP2I_GEN_DIR}/recomp_funcs.c)
     set(SPLIT_DIR ${CMAKE_BINARY_DIR}/gen_split)
     # the functions the game spends its time in (hot_functions.txt) go to
     # recomp_hot_*.c, built for speed below
-    # OFF by default: the first try PANICs after ~80 s in town (3DS_PROGRESS.md
-    # handoff); configure with -DPSP2I_HOT_LIST=${CMAKE_CURRENT_SOURCE_DIR}/hot_functions.txt
-    set(PSP2I_HOT_LIST "" CACHE FILEPATH
+    # (on by default since the stack fix, 3DS_PROGRESS.md T4; -DPSP2I_HOT_LIST=
+    # with nothing after it builds all of the game's code at -Os again)
+    set(PSP2I_HOT_LIST ${CMAKE_CURRENT_SOURCE_DIR}/hot_functions.txt CACHE FILEPATH
         "game functions built at -O2 with inline memory access (empty: none)")
     execute_process(COMMAND ${Python3_EXECUTABLE} ${PORT}/android/split_gen.py
                             ${PSP2I_GEN_DIR}/recomp_funcs.c ${SPLIT_DIR} ${PSP2I_GEN_PARTS} ${PSP2I_HOT_LIST}

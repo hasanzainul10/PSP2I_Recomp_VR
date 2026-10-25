@@ -11,8 +11,8 @@ played into town, no drawing errors; saves load). **T4 (speed):** town went
 from 2 to 5.4 fps in Azahar (target thrashing fixed, overlapping targets on
 the GPU, runtime at -O2; section "T4"). The work in progress is the next
 step, hot game functions at -O2 with inline memory access: it reached
-**6-7 fps in town and then PANICked after about 80 s**. It's committed but
-**off by default**.
+**6-7 fps in town and then PANICked after about 80 s**. Fixed (below);
+**the hot list is on by default** since then.
 
 **The PANIC is found and fixed (2026-10-25, second session), confirmed in
 Azahar: the user played the hot build into town (2+ minutes, 78 s of them
@@ -35,8 +35,8 @@ Azahar, the hot build: `user_main` peaks at 4 KB through the title and the
 save load (was 1,136 KB there), and in town as above. `.text` 29.68 MB
 (+0.39: more cycle wrappers). Town in that run: 6 fps at first, 3-4 later
 with `ge` at 600+ ms/s (the GE vertex work, not the game's code), 4.1 on
-average. **Next:** turn the hot list on by default, then measure on the
-console, then the GE vertex work on core 2.
+average. The hot list is now on by default (`port/3ds/CMakeLists.txt`).
+**Next:** measure on the console, then the GE vertex work on core 2.
 
 **Was: the hot-function build's PANIC** (kept for its details):
 
@@ -46,11 +46,10 @@ console, then the GE vertex work on core 2.
   main-RAM loads and stores inline, the rest through `psp_read32` & co.;
   `psp_mem_fast_rd/_wr`, kept by `mem.c`'s `fast_update`). `.text` 29.29 MB
   (+0.9). Inline memory in all the game's code: 52 MB, doesn't fit.
-- Turn it on: configure with
-  `-DPSP2I_HOT_LIST=<worktree>/port/3ds/hot_functions.txt` (the default is
-  now empty). **Note:** the existing `port/3ds/build` cache may still hold
-  the hot list from the session; check `PSP2I_HOT_LIST` in its
-  CMakeCache.txt before trusting a build.
+- On by default (`PSP2I_HOT_LIST` = `port/3ds/hot_functions.txt`); configure
+  with `-DPSP2I_HOT_LIST=` to build all of the game's code at -Os. It's a
+  cache variable: an existing build directory keeps what it was configured
+  with, so check `PSP2I_HOT_LIST` in its CMakeCache.txt.
 - The crash: the `.cia` in Azahar, town, ~81 s: Azahar's log says
   `Emulated program broke execution! Reason: PANIC` (svcBreak). The last
   `time:` lines before it: 982 and then 2,106 draws a frame with 73 and 19
