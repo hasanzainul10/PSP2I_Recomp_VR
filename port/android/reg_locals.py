@@ -16,8 +16,14 @@ In each chosen psp_body_XXXXXXXX:
     the callee reads and writes psp_cpu, and may switch PSP threads;
   - a return, and the end of the body, write them back.
 The helpers the body calls otherwise (psp_sll, psp_lwl, memory access, the
-FPU and VFPU ones) take values or touch only hi, lo, f[] and v[], which stay
-in psp_cpu.
+FPU and VFPU ones) take values or touch only hi, lo, f[] and v[].
+
+With vregs (split_gen.py's `vlocals`), the vector registers the body names
+(psp_cpu.v[N], always a constant N: the recompiler resolves the lanes)
+become float locals xv_N the same way. They
+are written back and reloaded around the calls above and around each VFPU
+runtime call that is left (psp_v*, psp_lv_* / psp_sv_*: these read and write
+psp_cpu.v; after the recompiler's prefix proof most are dead fallbacks).
 
   python reg_locals.py <in.c> <out.c> <list>    (out may be in)
 transforms the bodies of the functions in <list> (one PSP address per line,
@@ -35,6 +41,8 @@ REG_RE = re.compile(r'\br_(' + '|'.join(REGS) + r')\b')
 CALL_RE = re.compile(r'\b(psp_(?:func|at|import)_[0-9A-F]{8}|psp_dispatch|psp_syscall|'
                      r'psp_hle_call|psp_unimplemented|psp_park_thread)\(')
 RET_RE = re.compile(r'\breturn;')
+VCALL_RE = re.compile(r'\b(psp_v(?!fpu_set_prefix\b)\w+|psp_[ls]v_[sq])\(')
+VREG_RE = re.compile(r'\bpsp_cpu\.v\[(\d+)\]')
 BODY_RE = re.compile(r'^(?:static )?void psp_body_([0-9A-F]{8})\(uint32_t _entry\) \{$')
 
 
@@ -47,11 +55,21 @@ def load_list(path):
     return out
 
 
-def wrap_calls(line):
-    """Each call statement in the line as { FL_ call; RL_ }."""
+def next_call(line, i, vregs):
+    """The next game / HLE call (True) or VFPU runtime call (False, only with
+    vregs) from i."""
+    a, b = CALL_RE.search(line, i), VCALL_RE.search(line, i) if vregs else None
+    if a and (not b or a.start() <= b.start()):
+        return a, True
+    return b, False
+
+
+def wrap_calls(line, vregs):
+    """Each call statement in the line as { FL_ FLV_ call; RL_ RLV_ } (a game
+    or HLE call), or { FLV_ call; RLV_ } (a VFPU runtime call)."""
     out, i = [], 0
     while True:
-        m = CALL_RE.search(line, i)
+        m, game = next_call(line, i, vregs)
         if not m:
             out.append(line[i:])
             return ''.join(out)
@@ -70,39 +88,52 @@ def wrap_calls(line):
         if j >= len(line) or k >= len(line) or line[k] != ';':
             raise SystemExit('reg_locals: a call that is not a statement: ' + line.strip())
         out.append(line[i:m.start()])
-        out.append('{ FL_ ' + line[m.start():k + 1] + ' RL_ }')
+        if game:
+            out.append('{ FL_ FLV_ ' + line[m.start():k + 1] + ' RL_ RLV_ }')
+        else:
+            out.append('{ FLV_ ' + line[m.start():k + 1] + ' RLV_ }')
         i = k + 1
 
 
-def transform_body(lines):
+def transform_body(lines, vregs=False):
     """lines: the body from its opening line to its closing '}' (inclusive).
     Returns the new lines, with the FL_ / RL_ macros defined around it."""
-    used = set()
+    used, vused = set(), set()
     for line in lines[1:]:
         used.update(REG_RE.findall(line))
+        if vregs:
+            vused.update(int(n) for n in VREG_RE.findall(line))
     regs = [r for r in REGS if r in used and r != 'zero']
+    vregs = sorted(vused)
     body = []
     for line in lines[1:-1]:
         line = REG_RE.sub(lambda m: 'x_' + m.group(1), line)
-        line = wrap_calls(line)
-        line = RET_RE.sub('{ FL_ return; }', line)
+        if vregs:
+            line = VREG_RE.sub(lambda m: 'xv_' + m.group(1), line)
+        line = wrap_calls(line, vregs)
+        line = RET_RE.sub('{ FL_ FLV_ return; }', line)
         body.append(line)
     idx = {r: REGS.index(r) for r in regs}
     fl = ' '.join('psp_cpu.r[%d] = x_%s;' % (idx[r], r) for r in regs)
     rl = ' '.join('x_%s = psp_cpu.r[%d];' % (r, idx[r]) for r in regs)
-    out = ['#define FL_ ' + (fl or '(void)0;'), '#define RL_ ' + (rl or '(void)0;'), lines[0]]
+    flv = ' '.join('psp_cpu.v[%d] = xv_%d;' % (v, v) for v in vregs)
+    rlv = ' '.join('xv_%d = psp_cpu.v[%d];' % (v, v) for v in vregs)
+    out = ['#define FL_ ' + (fl or '(void)0;'), '#define RL_ ' + (rl or '(void)0;'),
+           '#define FLV_ ' + (flv or '(void)0;'), '#define RLV_ ' + (rlv or '(void)0;'), lines[0]]
     if regs:
         out.append('    uint32_t ' + ', '.join('x_%s = psp_cpu.r[%d]' % (r, idx[r]) for r in regs) + ';')
+    if vregs:
+        out.append('    float ' + ', '.join('xv_%d = psp_cpu.v[%d]' % (v, v) for v in vregs) + ';')
     if 'zero' in used:
         out.append('    const uint32_t x_zero = 0u;')
     out += body
-    out.append('    FL_')
+    out.append('    FL_ FLV_')
     out.append(lines[-1])
-    out += ['#undef FL_', '#undef RL_']
+    out += ['#undef FL_', '#undef RL_', '#undef FLV_', '#undef RLV_']
     return out
 
 
-def transform_lines(lines, chosen):
+def transform_lines(lines, chosen, vregs=False):
     """All of a file's lines, the chosen functions' bodies transformed."""
     out, i, n = [], 0, 0
     while i < len(lines):
@@ -114,7 +145,7 @@ def transform_lines(lines, chosen):
         j = i + 1
         while lines[j].rstrip('\r') != '}':
             j += 1
-        out += transform_body(lines[i:j + 1])
+        out += transform_body(lines[i:j + 1], vregs)
         n += 1
         i = j + 1
     return out, n

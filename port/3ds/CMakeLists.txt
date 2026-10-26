@@ -101,8 +101,12 @@ if(EXISTS ${PSP2I_GEN_DIR}/recomp_funcs.c)
     # their MIPS registers in C locals (reg_locals.py; 3DS_PLAN.md "T4 speed", O3);
     # on the console, ~8% less game time on the field for 232 KiB of code
     option(PSP2I_HOT_LOCALS "hot functions keep the MIPS registers in C locals" ON)
+    # and their VFPU registers too (reg_locals.py vregs; 3DS_PROGRESS.md T4)
+    option(PSP2I_HOT_VLOCALS "hot functions also keep the VFPU registers in C locals" ON)
     set(SPLIT_LOCALS "")
-    if(PSP2I_HOT_LOCALS)
+    if(PSP2I_HOT_LOCALS AND PSP2I_HOT_VLOCALS)
+        set(SPLIT_LOCALS vlocals)
+    elseif(PSP2I_HOT_LOCALS)
         set(SPLIT_LOCALS locals)
     endif()
     execute_process(COMMAND ${Python3_EXECUTABLE} ${PORT}/android/split_gen.py
@@ -121,6 +125,9 @@ if(EXISTS ${PSP2I_GEN_DIR}/recomp_funcs.c)
     add_library(psp2i_game STATIC ${GEN_PARTS} ${GEN_HOT} ${PSP2I_GEN_DIR}/recomp_imports.c)
     target_include_directories(psp2i_game PRIVATE ${PSP2I_GEN_DIR} ${SPLIT_DIR})
     target_compile_options(psp2i_game PRIVATE -Os -g0 -w)
+    # inline VFPU operations without the pending-prefix check when the
+    # recompiler proved none can be pending (gen/recomp_vfpu.h; 3DS_PROGRESS.md T4)
+    target_compile_definitions(psp2i_game PRIVATE PSPRECOMP_VFPU_UNGUARDED)
     # The hot functions: -O2, and main-RAM loads and stores inline (psprecomp
     # mem.h; otherwise each is a call that spills and reloads the MIPS
     # registers kept in psp_cpu). Not everywhere: inline memory in all the

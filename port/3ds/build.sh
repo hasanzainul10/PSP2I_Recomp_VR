@@ -1,14 +1,22 @@
 #!/bin/bash
 # Build the 3DS targets with devkitPro inside MSYS2. From Windows:
-#   D:\msys64\usr\bin\bash.exe -l port/3ds/build.sh [Release|Debug] [target...]
+#   D:\msys64\usr\bin\bash.exe -l port/3ds/build.sh [Release|Debug] [target...] [-Dopt=value...]
 # From Git Bash, the same path works: /d/msys64/usr/bin/bash.exe -l ...
 # Output: port/3ds/build/*.3dsx and *.cia, plus a .text size line per ELF.
 set -e
 here="$(cd "$(dirname "$0")" && pwd)"
 type="${1:-Release}"
 shift || true
+# -D... arguments are configure options (e.g. -DPSP2I_HOT_VLOCALS=OFF), kept in
+# the build's cache until changed again; the rest are targets
 targets=()
-for t in "$@"; do targets+=(--target "$t"); done
+cmake_args=()
+for t in "$@"; do
+    case "$t" in
+    -D*) cmake_args+=("$t") ;;
+    *)   targets+=(--target "$t") ;;
+    esac
+done
 # the game's ~260 parts: a dozen GCCs at once fit in 32 GB (PSP2I_JOBS to change)
 jobs="${PSP2I_JOBS:-12}"
 : "${DEVKITPRO:=/opt/devkitpro}"
@@ -28,7 +36,7 @@ fi
 
 cmake -S "$here" -B "$here/build" -G Ninja -DCMAKE_BUILD_TYPE="$type" \
       -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/3DS.cmake" \
-      -DPython3_EXECUTABLE="$PSP2I_PYTHON"
+      -DPython3_EXECUTABLE="$PSP2I_PYTHON" "${cmake_args[@]}"
 cmake --build "$here/build" -j "$jobs" "${targets[@]}"
 
 # the code-size budget line (CLAUDE.md, 3DS rules)

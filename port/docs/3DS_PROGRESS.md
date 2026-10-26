@@ -158,10 +158,44 @@ transforms (vtfm4 x 8, called from 08D92F50, 08D93464, 08D93560,
 operation reads and writes `psp_cpu.v[]` in memory behind a run-time
 prefix check (`psp_vfpu_pfx_any`), and mtv / mfv / vi2f / vconv are calls.
 
-**Next:** the recompiler's VFPU code (allegrexrecomp): the prefix state
-known at each instruction at compile time (the prefixes are instructions
-just before it), VFPU registers in C locals in hot functions as O3 does for
-the MIPS ones, mtv / mfv / vi2f / vconv inline. The previous Next: the game code (more hot
+**Faster VFPU code (2026-10-26; builds, PC and Azahar checked, console A/B
+pending).** Three changes:
+
+1. *The prefix check, proven away at recompile time* (allegrexrecomp
+   `emit.c` `check_pfx_site`): every prefix that isn't part of an inlined
+   group must be followed, in straight-line code, by an operation the
+   runtime implements with `consume()`. For PSP2i that holds for every
+   prefix (one more sits before an undecodable word: data). The guard is now
+   `PSP_VFPU_NOPFX` from the generated `gen/recomp_vfpu.h`: `1` when proven
+   and built with `-DPSPRECOMP_VFPU_UNGUARDED` (the 3DS's `psp2i_game`),
+   else `!psp_vfpu_pfx_any` as before (PC, Android, macOS:
+   `PSP2I_VFPU_NOINLINE` still works there).
+2. *mtv / mfv (vector registers), vi2f, vconv, vcst and vmmov inline*, the
+   runtime's arithmetic exactly; a prefix right before one keeps the
+   runtime call. None of their 1,365 calls in the game remain outside dead
+   fallbacks.
+3. *VFPU registers in C locals in the hot functions* (`reg_locals.py`
+   vregs, `PSP2I_HOT_VLOCALS`, on): `psp_cpu.v[N]` becomes `xv_N`, written
+   back and reloaded around game / HLE calls and the VFPU runtime calls
+   left (dead fallbacks after 1).
+
+Checks: `port/3ds/tools/vfpu_diff.py` pairs each of the 1,968 distinct VFPU
+statements of the old and new code, runs the old one forced through the
+runtime (prefixes and all) and the new one inline on 1,000 random register
+files: 0 mismatches (NaN payloads differ in ~1% of runs of the arithmetic
+that was already inline: x64 propagates whichever NaN operand the compiler
+put first; the 155 moves and bit operations are compared bit for bit); a
+planted bug is caught. psprecomp's 15 tests pass. PC headless town replay
+(new code, unguarded): town drawn, no VFPU traps; the replay isn't
+frame-deterministic (two runs of the old exe differ as much as old vs new),
+so that's a smoke test, not a comparison. Azahar: boots to the lobby
+cutscene, drawn right. `.text` 29.48 MB (1+2), 29.57 MB (1-3).
+`port/3ds/build.sh` takes `-Dopt=value` (kept in the cache):
+`-DPSP2I_HOT_VLOCALS=OFF` rebuilds only the four hot files.
+
+**Next:** the console A/B on the field: `psp2i_t4_vfpu12.cia` (1+2) and
+`psp2i_t4_vfpu.cia` (1-3) against the merged build's numbers above, then
+a profile. The previous Next: the game code (more hot
 functions, O3 on more of them), the sound mixer, the GE commands it still
 waits for; then the console baseline route (spawn stand-still 30 s, busy
 spots). The user's Azahar save is on the console's SD
