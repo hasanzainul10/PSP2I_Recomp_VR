@@ -252,8 +252,26 @@ wrong pictures reported. The first run of this build left no log:
 menu left the previous log byte for byte, so the log is now reopened
 every 10 s (47039c7).
 
-**Next:** the game's thread again (the three VFPU functions that didn't
-speed up: 08D8BA7C, 08D921F8, 08D920A0), then `raw_pack` further and the
+**The three VFPU functions that didn't speed up (08D8BA7C, 08D921F8,
+08D920A0).** Short straight-line VFPU code: 08D8BA7C is 151 MIPS
+instructions, 2,336 ARM ones, with 232 float compare + `vmrs` pairs (vmin /
+vmax / vsge / vslt) and 684 float loads and stores (~250 of them the VFPU
+locals' entry loads and exit stores, the rest spills) against ~140 float
+add / multiply; their memory access is inline (the `bl`s are the slow
+paths). Console benchmark (`sdmc:/psp2i/bench`, 3ds_bench.c, 2290099):
+the FPU runs **flush-to-zero** (FPSCR 0x23000010), so an integer-key
+compare must treat denormals as zero to match it (then 0 of 1,764 special
+value pairs differ; 80 otherwise); but it is **slower**: min 38.2 ns a lane
+as float, 41.9 as integers, 64.6 from float registers; set-if-ge 38.7 vs
+52.7. So the compares stay floats. One call of 08D8BA7C: **5.88 us** (~4,700
+cycles), so its 6.8% of the game's thread is ~10,000 calls a second. What's
+left there: the locals' entry loads for registers written before read, the
+reload and second write-back around a tail call, no write-back around
+callees that never touch the VFPU; ~1-2% of the game's thread together.
+
+**Next:** the game's thread's broad cost (spread over ~1,000 functions):
+the generated code's general shape (e.g. every inline memory access reloads
+`psp_mem_fast_rd` after a guest store), then `raw_pack` further and the
 submit (7 us); then the
 three VFPU functions above, which need a closer look at what they spend on
 (memory reads?). The previous Next: the game code (more hot
