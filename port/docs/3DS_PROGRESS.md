@@ -69,9 +69,22 @@ idle) and the thunks put the caller back. Every build's log also gets a
 `gelist:` line (lists = prims + callbacks + commands, ms/s): the non-PRIM
 commands were counted in "game" until now.
 
-**Next:** the corrected profile on the field, then fix what it shows; the
-sound mixer (bit-exact, `psprecomp/tests/test_sas.c` holds its output);
-then the console baseline route (spawn stand-still 30 s, busy spots), the
+**The corrected profile (console, field, 350-560 draws):** GE prims 31%,
+present 12.4% (it ran at every vblank, ~2 ms each, while the game draws ~6
+frames a second), sceSasCore 7-9%, GE list commands 5% (~50 ms/s, the
+`gelist:` line agrees), idle 3%, scheduler work and thread switches
+negligible, game code ~30% with no function over 1.4%. **Present only new
+frames (0b7f64d):** a present when the game flipped, and every 6th vblank
+at least (`sdmc:/psp2i/present_every_vblank`: the old way). A/B, same build:
+fps 6.09 -> 6.43 / 5.76 -> 5.82 / 4.94 -> 5.09 at 350/400/450 draws, game
+ms per frame 107 -> 87 / 112 -> 91 / 123 -> 107. "wait" fell from ~130 to
+~5 ms/s but "ge" (prims minus the backend's timed parts) rose ~110 -> ~300:
+the GPU wait moved somewhere untimed. The mixer now goes through host
+pointers, bit-exact (psprecomp 6f5fd3d, `tests/test_sas.c`).
+
+**Next:** find where the prims' ~300 ms/s of "ge" goes now (time the
+citro3d calls inside a draw; probably the GPU's own speed showing), then
+the console baseline route (spawn stand-still 30 s, busy spots), the
 present wait and O4b (GE on core 2). The user's Azahar save is on the console's SD
 (`GameData/ms/PSP/SAVEDATA/NPJH50332`, `NPJH50332SC`); the save the console
 made on 2026-10-26 is backed up off the console.
