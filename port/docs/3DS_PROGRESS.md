@@ -138,12 +138,18 @@ and measure again. Not checked: in Azahar three of the four mode-select
 labels drew as dark bars; whether the synchronous build does the same
 wasn't compared.
 
-**Merged (both of the above):** measure the merged build on the console's
-field first; then, where core 2 is still busy, its parts: the backend's
-draw cost (`D_*` in `c3d_draw_on`, and the same for `c3d_draw_raw`; ~210 of
-the field's ~260 ms/s of draws before the merge), the list commands; then
-the console baseline route (spawn stand-still 30 s, busy spots) and the
-present wait. The user's Azahar save is on the console's SD
+**Merged (652adc0, psprecomp 4d0e936), console, field (117 s), fps by
+draws a frame:** 300-349 14.8, 350-399 14.3, 400-449 13.1, 450-499 11.8,
+500-549 12.0, 550-599 11.7 (skinning alone: 11.4 / 11.0 / - / 8.0 / 7.5;
+core 2 alone: 14.3 / 11.8 / 8.9-9.2 at 450-549). Picture checked by the
+user. Core 2 is busy ~460-520 ms/s and the game waits for it ~20-30 ms/s:
+**the game's own thread is the limit now** (~55-75 ms a frame).
+
+**Next:** the game's thread: profile it again (PSP2I_PROFILE; the GE's
+share is off it now) and cut what it shows: the game code (more hot
+functions, O3 on more of them), the sound mixer, the GE commands it still
+waits for; then the console baseline route (spawn stand-still 30 s, busy
+spots). The user's Azahar save is on the console's SD
 (`GameData/ms/PSP/SAVEDATA/NPJH50332`, `NPJH50332SC`); the save the console
 made on 2026-10-26 is backed up off the console.
 
