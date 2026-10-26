@@ -87,10 +87,22 @@ fps):** vertices (the CPU's transform) ~42 ms a frame, the backend
 (citro3d draws and waits) ~20, the triangles' assembly (CPU clip, cull,
 collect) ~12, setup and state ~1.5, nothing else (the log's `prims:` line).
 
-**Next:** move the vertex transform to the PICA's vertex shader for the
-common draws (unskinned, unlit: ~42,000 vertices a frame), which also lets
-the PICA clip and cull in place of the assembly pass (~54 ms a frame
-together); then GE on core 2 (O4b) and the console baseline route (spawn stand-still 30 s, busy spots), the
+**The PICA's vertex shader for the common draws (f15f9a6, psprecomp
+23f7192):** unskinned, unlit triangles, strips and fans go to
+`c3d_draw_raw` with the game's vertex bytes; `c3d_ge_raw.v.pica` applies one
+matrix per draw and the PICA clips and culls. Console, field: 350-399 draws
+7.8 -> 10.4 fps, 400-449 5.7 -> 8.9, 450-499 5.8 -> 7.0 (33 field seconds);
+picture checked on the console. **Hardware lesson:** an attribute buffer per
+attribute over the game's bytes (1- and 2-byte offsets, stride larger than
+the attribute) drew in Azahar and hung the console's GPU on the first draw;
+packed as one buffer of whole 4-byte words with the stride their sum, it
+runs. The diag self-test (steps 6a-6g) draws each format through it.
+Switches: `sdmc:/psp2i/vs_cpu` (the CPU's transform), `cull_flip`.
+
+**Next:** what's left on the CPU's vertex path is the skinned, lit
+characters (`vtx:` w4 l2, ~100-150 ms/s in busy scenes): skinning and
+lighting on the PICA next; then GE on core 2 (O4b) and the console baseline
+route (spawn stand-still 30 s, busy spots), the
 present wait and O4b (GE on core 2). The user's Azahar save is on the console's SD
 (`GameData/ms/PSP/SAVEDATA/NPJH50332`, `NPJH50332SC`); the save the console
 made on 2026-10-26 is backed up off the console.
