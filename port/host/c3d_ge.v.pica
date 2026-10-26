@@ -1,44 +1,347 @@
-; The GE's vertices on the PICA200 (c3d_ge.c). The runtime (psprecomp gpu.c)
-; already did the vertex work: positions arrive in the target's pixels with
-; the PSP's 16-bit depth and 1/w, texture coordinates in texels, colours in
-; 0..255. This only maps them to the PICA's clip space, as gl_ge.c's vertex
-; shader does for OpenGL.
+; The GE's vertices on the PICA200 (c3d_ge.c): one program for every draw,
+; the kind chosen by boolean uniforms, so changing kinds uploads no shader.
+;
+; screen (b_raw off): the runtime (psprecomp gpu.c) already did the vertex
+;   work: positions arrive in the target's pixels with the PSP's 16-bit depth
+;   and 1/w, texture coordinates in texels, colours in 0..255. This only maps
+;   them to the PICA's clip space, as gl_ge.c's vertex shader does for OpenGL.
+; raw (b_raw on, c3d_draw_raw): the game's vertices as stored, one matrix per
+;   draw to the PICA's clip space (the GE's world, view, projection and
+;   viewport, the target's pixels and depth mapped as above); with b_skin the
+;   8 bone matrices first, with b_light the GE's lighting -- psprecomp
+;   ge_vertex.c psp_ge_light_fast, term for term.
+;
+; Every output register is written whole (mask xyzw), once, from
+; temporaries: a shader that wrote only outuv.xy locked up the console's GPU
+; on its first draw, Rosalina included; Azahar doesn't mind (3DS_PROGRESS.md,
+; T4).
 
-.fvec vp                ; 2 / target width, 2 / target height, 1 / texture width, 1 / texture height
+.fvec vp                ; screen: 2 / target width, 2 / target height, 1 / texture width, 1 / texture height
+.fvec m[4]              ; raw: rows of the matrix from the (skinned) model position to the PICA's clip space
+.fvec uvk               ; raw: texture coordinates to 0..1: scale u, v, offset u, v
+.fvec uvfix             ; raw: 65536 where unsigned 16-bit coordinates were read as signed, else 0
+.fvec pscale            ; raw: x position scale as stored, y weight scale, z weight fix (65536 for 16-bit), w normal sign
+.fvec world[3]          ; lit: rows of the GE's world matrix
+.fvec bone[24]          ; skinned: rows of the 8 bone matrices, 3 each (zero past the vertex's weights)
+.fvec emis              ; lit: material emissive (w 0)
+.fvec ambg              ; lit: global ambient plus the directional lights' ambient, global ambient alpha (w)
+.fvec matamb            ; lit: material ambient colour and alpha (0..1)
+.fvec mflag             ; lit: 1 where ambient (x), diffuse (y), specular (z) come from the vertex colour; w shininess
+.fvec L[28]             ; lit: 4 lights x 7 (see .proc light)
+
+.bool b_raw, b_skin, b_light, b_l0, b_l1, b_l2, b_l3
 
 .constf k(1.0, 0.0000152590219, 0.00392156863, 0.0)    ; 1, 1/65535, 1/255, 0
+.constf k2(0.0, 7.0, 14.0, 21.0)                       ; the lights' first registers in L
+.constf k3(0.0, 0.0, 1.0, 1.0e-10)                     ; the GE's viewer (+z), a tiny positive
 .alias one  k.xxxx
 .alias zero k.wwww
+.alias tiny k3.wwww
 
 .out outpos position
 .out outuv  texcoord0
 .out outclr color
 
-.alias inpos v0         ; x, y (pixels), z (0..65535), 1/w
-.alias inuv  v1         ; u, v (texels)
+.alias inpos v0         ; screen: x, y (pixels), z (0..65535), 1/w. raw: x, y, z as stored (w set to 1)
+.alias inuv  v1         ; screen: u, v (texels). raw: u, v as stored
 .alias inclr v2         ; r, g, b, a (0..255)
+.alias innrm v3         ; raw, lit: the normal as stored
+.alias inw0  v4         ; raw, skinned: weights 0-3 as stored
+.alias inw1  v5         ; weights 4-7
 
-; Every output register is written whole (mask xyzw), from temporaries. On
-; the console, a shader that wrote only outuv.xy -- leaving o1.zw, which the
-; output map doesn't use, unwritten -- locked up the GPU on its first draw,
-; Rosalina included; Azahar doesn't mind (3DS_PROGRESS.md, T4).
 .proc main
-    rcp r1, inpos.w             ; w
-
-    mul r0.xy, vp.xy, inpos.xy  ; pixels to NDC: x * 2 / width - 1, y * 2 / height - 1
-    add r0.xy, -one, r0.xy      ; (row y lands in the target's row y, where the CPU puts it)
-
-    mul r0.z, k.y, inpos.z      ; depth 0..1, clamped
-    max r0.z, zero, r0.z
-    min r0.z, one, r0.z
-    mov r0.z, -r0.z             ; the PICA clips z to 0..-w (C3D_DepthMap -1, 0 maps it back)
-    mov r0.w, one
-
-    mul r2, r1, r0              ; times w: perspective-correct interpolation (w: 1 * w)
-    mov outpos, r2
-
-    mul r3, vp.zwzw, inuv       ; texels to 0..1 (z, w: unused)
-    mov outuv, r3
-    mul outclr, k.zzzz, inclr
+    ifu b_raw
+        call raw
+    .else
+        call screen
+    .end
+    mov outpos, r0
+    mov outuv, r1
+    mov outclr, r2
     end
+.end
+
+; r0 position, r1 texture coordinates, r2 colour
+.proc screen
+    rcp r3, inpos.w             ; w
+
+    mul r4.xy, vp.xy, inpos.xy  ; pixels to NDC: x * 2 / width - 1, y * 2 / height - 1
+    add r4.xy, -one, r4.xy      ; (row y lands in the target's row y, where the CPU puts it)
+
+    mul r4.z, k.y, inpos.z      ; depth 0..1, clamped
+    max r4.z, zero, r4.z
+    min r4.z, one, r4.z
+    mov r4.z, -r4.z             ; the PICA clips z to 0..-w (C3D_DepthMap -1, 0 maps it back)
+    mov r4.w, one
+
+    mul r0, r3, r4              ; times w: perspective-correct interpolation (w: 1 * w)
+    mul r1, vp.zwzw, inuv       ; texels to 0..1 (z, w: unused)
+    mul r2, k.zzzz, inclr
+.end
+
+; r4 position (w 1), r5 normal; then r0, r1, r2 as screen's
+.proc raw
+    mul r4, pscale.xxxx, inpos
+    mov r4.w, one
+    mov r5, innrm
+    mov r5.w, zero
+    ifu b_skin
+        call skin
+    .end
+
+    mul r2, k.zzzz, inclr       ; the vertex colour (or the material's), 0..1
+    ifu b_light
+        call lit
+    .end
+
+    dp4 r0.x, m[0], r4
+    dp4 r0.y, m[1], r4
+    dp4 r0.z, m[2], r4
+    dp4 r0.w, m[3], r4
+
+    slt r1, inuv, zero          ; 1 where negative (a 16-bit coordinate over 32767)
+    mul r1, uvfix, r1
+    add r1, inuv, r1
+    mul r6, uvk.xyxy, r1
+    add r1, uvk.zwzw, r6
+    mov r1.zw, zero
+.end
+
+; psp_ge_skin: position and normal as the weighted sum of the bones' (r4, r5)
+.proc skin
+    slt r6, inw0, zero          ; 16-bit weights read as signed: + 65536 where negative
+    mul r6, pscale.zzzz, r6
+    add r6, inw0, r6
+    mul r6, pscale.yyyy, r6     ; weights 0-3
+    slt r7, inw1, zero
+    mul r7, pscale.zzzz, r7
+    add r7, inw1, r7
+    mul r7, pscale.yyyy, r7     ; weights 4-7
+    mov r8, zero                ; position
+    mov r9, zero                ; normal
+
+    dp4 r10.x, bone[0], r4
+    dp4 r10.y, bone[1], r4
+    dp4 r10.z, bone[2], r4
+    dp3 r11.x, bone[0], r5
+    dp3 r11.y, bone[1], r5
+    dp3 r11.z, bone[2], r5
+    mul r10, r6.xxxx, r10
+    mul r11, r6.xxxx, r11
+    add r8, r8, r10
+    add r9, r9, r11
+
+    dp4 r10.x, bone[3], r4
+    dp4 r10.y, bone[4], r4
+    dp4 r10.z, bone[5], r4
+    dp3 r11.x, bone[3], r5
+    dp3 r11.y, bone[4], r5
+    dp3 r11.z, bone[5], r5
+    mul r10, r6.yyyy, r10
+    mul r11, r6.yyyy, r11
+    add r8, r8, r10
+    add r9, r9, r11
+
+    dp4 r10.x, bone[6], r4
+    dp4 r10.y, bone[7], r4
+    dp4 r10.z, bone[8], r4
+    dp3 r11.x, bone[6], r5
+    dp3 r11.y, bone[7], r5
+    dp3 r11.z, bone[8], r5
+    mul r10, r6.zzzz, r10
+    mul r11, r6.zzzz, r11
+    add r8, r8, r10
+    add r9, r9, r11
+
+    dp4 r10.x, bone[9], r4
+    dp4 r10.y, bone[10], r4
+    dp4 r10.z, bone[11], r4
+    dp3 r11.x, bone[9], r5
+    dp3 r11.y, bone[10], r5
+    dp3 r11.z, bone[11], r5
+    mul r10, r6.wwww, r10
+    mul r11, r6.wwww, r11
+    add r8, r8, r10
+    add r9, r9, r11
+
+    dp4 r10.x, bone[12], r4
+    dp4 r10.y, bone[13], r4
+    dp4 r10.z, bone[14], r4
+    dp3 r11.x, bone[12], r5
+    dp3 r11.y, bone[13], r5
+    dp3 r11.z, bone[14], r5
+    mul r10, r7.xxxx, r10
+    mul r11, r7.xxxx, r11
+    add r8, r8, r10
+    add r9, r9, r11
+
+    dp4 r10.x, bone[15], r4
+    dp4 r10.y, bone[16], r4
+    dp4 r10.z, bone[17], r4
+    dp3 r11.x, bone[15], r5
+    dp3 r11.y, bone[16], r5
+    dp3 r11.z, bone[17], r5
+    mul r10, r7.yyyy, r10
+    mul r11, r7.yyyy, r11
+    add r8, r8, r10
+    add r9, r9, r11
+
+    dp4 r10.x, bone[18], r4
+    dp4 r10.y, bone[19], r4
+    dp4 r10.z, bone[20], r4
+    dp3 r11.x, bone[18], r5
+    dp3 r11.y, bone[19], r5
+    dp3 r11.z, bone[20], r5
+    mul r10, r7.zzzz, r10
+    mul r11, r7.zzzz, r11
+    add r8, r8, r10
+    add r9, r9, r11
+
+    dp4 r10.x, bone[21], r4
+    dp4 r10.y, bone[22], r4
+    dp4 r10.z, bone[23], r4
+    dp3 r11.x, bone[21], r5
+    dp3 r11.y, bone[22], r5
+    dp3 r11.z, bone[23], r5
+    mul r10, r7.wwww, r10
+    mul r11, r7.wwww, r11
+    add r8, r8, r10
+    add r9, r9, r11
+
+    mov r4.xyz, r8
+    mov r5.xyz, r9
+.end
+
+; The lit colour into r2 (r2 holds the unlit colour, 0..1). r12 world
+; position, r13 unit world normal, r14 / r0 / r1 the ambient / diffuse /
+; specular multipliers (the vertex colour where the material comes from it,
+; else 1; the material is in the lights' colours), r3 the specular sum.
+.proc lit
+    dp4 r12.x, world[0], r4
+    dp4 r12.y, world[1], r4
+    dp4 r12.z, world[2], r4
+    mov r12.w, zero
+    mul r6, pscale.wwww, r5     ; reversed normals
+    dp3 r13.x, world[0], r6
+    dp3 r13.y, world[1], r6
+    dp3 r13.z, world[2], r6
+    mov r13.w, zero
+    dp3 r6.x, r13, r13
+    max r6.x, tiny, r6.x
+    rsq r6.x, r6.x
+    mul r13, r6.xxxx, r13
+
+    add r6, -one, r2            ; colour - 1
+    mul r7, mflag.xxxx, r6
+    add r14, one, r7            ; ambient multiplier
+    mul r7, mflag.yyyy, r6
+    add r0, one, r7             ; diffuse multiplier
+    mul r7, mflag.zzzz, r6
+    add r1, one, r7             ; specular multiplier
+
+    add r6, -matamb, r2         ; the ambient source: the vertex colour or the material's
+    mul r6, mflag.xxxx, r6
+    add r6, matamb, r6
+    mul r7, ambg, r6            ; emissive + global ambient x source; alpha from this term alone
+    add r2, emis, r7
+    mov r3, zero
+
+    mova a0.x, k2.x
+    callu b_l0, light
+    mova a0.x, k2.y
+    callu b_l1, light
+    mova a0.x, k2.z
+    callu b_l2, light
+    mova a0.x, k2.w
+    callu b_l3, light
+
+    mov r3.w, zero
+    add r2, r2, r3
+    max r2, zero, r2
+    min r2, one, r2
+.end
+
+; One light, its 7 registers at L[a0.x]:
+;   +0 position (w 1), or unit direction (w 0) for a directional light
+;   +1 spot direction, unit (w 1 for a spot light)
+;   +2 attenuation constant, linear, quadratic (1, 0, 0 directional); w spot cut-off
+;   +3 x spot exponent, y 1 for powered diffuse
+;   +4 ambient x material (0 directional: it's in ambg), +5 diffuse, +6 specular (0 where off)
+.proc light
+    mov r6, L[a0.x+0]
+    mul r7, r12, r6.wwww
+    add r6, r6, -r7             ; to the light
+    mov r6.w, zero
+    dp3 r7.x, r6, r6            ; dist^2
+    max r7.x, tiny, r7.x
+    rsq r7.y, r7.x
+    mul r7.z, r7.x, r7.y        ; dist
+    mul r6, r7.yyyy, r6         ; unit
+
+    mov r11, L[a0.x+2]          ; attenuation: scale = a > 0 ? clamp(1 / a) : 1
+    mov r8.x, one
+    mov r8.y, r7.z
+    mov r8.z, r7.x
+    mov r8.w, zero
+    dp3 r9.x, r11, r8
+    rcp r9.y, r9.x
+    max r9.y, zero, r9.y
+    min r9.y, one, r9.y
+    slt r9.z, zero, r9.x
+    add r9.y, -one, r9.y
+    mul r9.y, r9.z, r9.y
+    add r9.y, one, r9.y
+
+    mov r10, L[a0.x+1]          ; spot: ang >= cut ? pow(ang, exponent) : 0, else 1
+    dp3 r8.x, r10, r6
+    sge r8.y, r8.x, r11.wwww
+    max r8.z, tiny, r8.x
+    lg2 r8.z, r8.z
+    mov r11, L[a0.x+3]
+    mul r8.z, r11.x, r8.z
+    ex2 r8.z, r8.z
+    mul r8.z, r8.y, r8.z
+    add r8.z, -one, r8.z
+    mul r8.z, r10.w, r8.z
+    add r8.z, one, r8.z
+    mul r9.y, r8.z, r9.y        ; scale
+
+    dp3 r8.x, r6, r13           ; diffuse: max(dot, 0), powered where so
+    max r8.x, zero, r8.x
+    max r8.y, tiny, r8.x
+    lg2 r8.y, r8.y
+    mul r8.y, mflag.w, r8.y
+    ex2 r8.y, r8.y
+    add r8.y, -r8.x, r8.y
+    mul r8.y, r11.y, r8.y
+    add r8.x, r8.x, r8.y
+    mul r8.x, r8.x, r9.y        ; d x scale
+
+    mov r10, L[a0.x+4]          ; ambient
+    mul r10, r14, r10
+    mul r10, r9.yyyy, r10
+    add r2, r2, r10
+    mov r10, L[a0.x+5]          ; diffuse
+    mul r10, r0, r10
+    mul r10, r8.xxxx, r10
+    add r2, r2, r10
+
+    add r10, k3, r6             ; specular: the half vector with the GE's viewer at +z
+    mov r10.w, zero
+    dp3 r8.x, r10, r10
+    max r8.x, tiny, r8.x
+    rsq r8.x, r8.x
+    mul r10, r8.xxxx, r10
+    dp3 r8.x, r10, r13
+    slt r8.y, zero, r8.x
+    max r8.z, tiny, r8.x
+    lg2 r8.z, r8.z
+    mul r8.z, mflag.w, r8.z
+    ex2 r8.z, r8.z
+    mul r8.z, r8.y, r8.z
+    mul r8.z, r9.y, r8.z
+    mov r10, L[a0.x+6]
+    mul r10, r1, r10
+    mul r10, r8.zzzz, r10
+    add r3, r3, r10
 .end

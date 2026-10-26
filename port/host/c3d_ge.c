@@ -78,8 +78,9 @@ static uint32_t g_ring_pos;
 /* The untransformed draws (c3d_draw_raw): their own program, layout and
  * buffers; the vertices as the game stored them, colours and indices in a
  * byte ring of their own, reset with the vertex ring. */
-static shaderProgram_s g_prog_raw;
-static int u_m, u_uvk, u_uvfix;
+static int u_m, u_uvk, u_uvfix, u_pscale, u_world, u_bone, u_emis, u_ambg, u_matamb, u_mflag, u_L;
+static int ub_raw, ub_skin, ub_light, ub_l[4];   /* c3d_ge.v.pica's booleans */
+static int g_vs_noskin, g_vs_nolight;            /* sdmc:/psp2i/vs_noskin, vs_nolight: those draws on the CPU */
 static C3D_AttrInfo g_attr_cpu;                  /* the transformed vertices' layout (g_ring) */
 static C3D_BufInfo g_buf_cpu;
 static int g_raw_mode;                           /* the raw program and buffers are bound */
@@ -932,17 +933,17 @@ static void cs_cull(GPU_CULLMODE m) {
     C3D_CullFace(m);
     g_cs.cull = m;
 }
-/* Back to the transformed vertices' program, layout and buffers after an
- * untransformed draw; every draw that isn't c3d_draw_raw calls it first. The
- * programs share the uniform registers, so vp is set again. */
+/* Back to the transformed vertices' layout and buffers (and the shader's
+ * screen path) after an untransformed draw; every draw that isn't
+ * c3d_draw_raw calls it first. One program serves both (c3d_ge.v.pica), so
+ * nothing is uploaded. */
 static void use_cpu_path(void) {
     if (!g_raw_mode) return;
-    C3D_BindProgram(&g_prog);
     C3D_SetAttrInfo(&g_attr_cpu);
     C3D_SetBufInfo(&g_buf_cpu);
+    C3D_BoolUnifSet(GPU_VERTEX_SHADER, ub_raw, false);
     C3D_CullFace(GPU_CULL_NONE);
     g_cs.cull = GPU_CULL_NONE;
-    g_cs.vp[0] = -1.0f;
     g_raw_mode = 0;
 }
 static void cs_vp(float a, float b, float c, float d) {
@@ -1337,16 +1338,20 @@ static GPU_CULLMODE pica_cull(int cull) {
 
 /* The vertices into the raw ring in a layout the console's attribute loader
  * takes: one buffer, each attribute a whole number of 4-byte words on a
- * 4-byte boundary, the stride exactly their sum -- position as stored, padded
- * to 4 components below float (the shader sets w to 1), u and v as stored (8
- * bits padded to 4), colour as 4 bytes. Each attribute as its own buffer over
- * the game's bytes (stride the game's, offsets 1 or 2 bytes apart) drew in
- * Azahar and hung the console's GPU on the first such draw. */
-static uint32_t raw_layout(const psp_gpu_raw_draw *d, uint32_t *pos_b, uint32_t *uv_b) {
-    static const uint32_t PB[4] = { 12, 4, 8, 12 }, UB[4] = { 4, 4, 4, 8 };
-    *pos_b = PB[d->pos_fmt & 3];
-    *uv_b = d->t_off >= 0 ? UB[d->tex_fmt & 3] : 4;
-    return *pos_b + *uv_b + 4;
+ * 4-byte boundary, the stride exactly their sum. Position and normal as
+ * stored, padded to 4 components below float (the shader sets w); u and v as
+ * stored (8 bits padded to 4); colour as 4 bytes; the 8 weights as stored,
+ * zero past the vertex's own. Each attribute as its own buffer over the
+ * game's bytes (stride the game's, offsets 1 or 2 bytes apart) drew in Azahar
+ * and hung the console's GPU on the first such draw. */
+typedef struct { uint32_t pos, uv, nrm, wts, stride; } raw_lay;
+static void raw_layout(const psp_gpu_raw_draw *d, raw_lay *l) {
+    static const uint32_t PB[4] = { 12, 4, 8, 12 }, UB[4] = { 4, 4, 4, 8 }, WB[4] = { 0, 8, 16, 32 };
+    l->pos = PB[d->pos_fmt & 3];
+    l->uv = d->t_off >= 0 ? UB[d->tex_fmt & 3] : 4;
+    l->nrm = d->light ? PB[d->normal_fmt & 3] : 0;
+    l->wts = d->bones ? WB[d->weight_fmt & 3] : 0;
+    l->stride = l->pos + l->uv + 4 + l->nrm + l->wts;
 }
 
 static uint8_t *raw_alloc(uint32_t bytes) {
@@ -1356,68 +1361,116 @@ static uint8_t *raw_alloc(uint32_t bytes) {
     return p;
 }
 
-static void raw_pack(const psp_gpu_raw_draw *d, uint8_t *out, uint32_t pos_b, uint32_t uv_b) {
+static void raw_pack(const psp_gpu_raw_draw *d, const raw_lay *l, uint8_t *out) {
     static const int CS[4] = { 0, 1, 2, 4 };
-    const uint32_t stride = pos_b + uv_b + 4, pn = 3u * (uint32_t)CS[d->pos_fmt & 3],
-                   un = d->t_off >= 0 ? 2u * (uint32_t)CS[d->tex_fmt & 3] : 0;
+    const uint32_t pn = 3u * (uint32_t)CS[d->pos_fmt & 3], un = d->t_off >= 0 ? 2u * (uint32_t)CS[d->tex_fmt & 3] : 0,
+                   nn = l->nrm ? 3u * (uint32_t)CS[d->normal_fmt & 3] : 0,
+                   wn = l->wts ? (uint32_t)d->nweights * (uint32_t)CS[d->weight_fmt & 3] : 0;
+    const uint32_t oc = l->pos + l->uv, on = oc + 4, ow = on + l->nrm;
     const uint32_t mat = d->material;
-    for (uint32_t i = 0; i < d->nvbuf; i++, out += stride) {
+    for (uint32_t i = 0; i < d->nvbuf; i++, out += l->stride) {
         const uint8_t *a = d->verts + i * d->stride;
-        memset(out, 0, stride);
+        memset(out, 0, l->stride);
         memcpy(out, a + d->p_off, pn);
-        if (un) memcpy(out + pos_b, a + d->t_off, un);
-        uint8_t *c = out + pos_b + uv_b;
-        if (d->colors) memcpy(c, &d->colors[i], 4);
-        else if (d->c_off >= 0) memcpy(c, a + d->c_off, 4);
-        else memcpy(c, &mat, 4);
+        if (un) memcpy(out + l->pos, a + d->t_off, un);
+        if (d->colors) memcpy(out + oc, &d->colors[i], 4);
+        else if (d->c_off >= 0) memcpy(out + oc, a + d->c_off, 4);
+        else memcpy(out + oc, &mat, 4);
+        if (nn) memcpy(out + on, a + d->n_off, nn);
+        if (wn) memcpy(out + ow, a + d->w_off, wn);
+    }
+}
+
+/* A 4x3 matrix (column-major, as the GE loads it) as three rows for dp4. */
+static void unif_rows43(int at, const float *mtx) {
+    for (int r = 0; r < 3; r++) C3D_FVUnifSet(GPU_VERTEX_SHADER, at + r, mtx[r], mtx[3 + r], mtx[6 + r], mtx[9 + r]);
+}
+
+/* psp_ge_light_prep into the shader's emis, ambg, matamb, mflag and L (see
+ * c3d_ge.v.pica .proc light), and the lights' booleans */
+static void unif_lights(const psp_ge_light_prep *P) {
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, u_emis, P->emissive[0], P->emissive[1], P->emissive[2], 0);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, u_ambg, P->amb_all[0], P->amb_all[1], P->amb_all[2], P->amb_alpha);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, u_matamb, P->mat_amb[0], P->mat_amb[1], P->mat_amb[2], P->mat_amb[3]);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, u_mflag, (P->mat_update & 1) ? 1.0f : 0.0f, (P->mat_update & 2) ? 1.0f : 0.0f,
+                  (P->mat_update & 4) ? 1.0f : 0.0f, P->shininess);
+    for (int i = 0; i < 4; i++) {
+        C3D_BoolUnifSet(GPU_VERTEX_SHADER, ub_l[i], i < P->n);
+        if (i >= P->n) continue;
+        const psp_ge_light_one *q = &P->l[i];
+        const int at = u_L + i * 7, dir = q->type == 0;
+        if (dir) C3D_FVUnifSet(GPU_VERTEX_SHADER, at, q->to_ok ? q->to[0] : 0, q->to_ok ? q->to[1] : 0, q->to_ok ? q->to[2] : 0, 0);
+        else C3D_FVUnifSet(GPU_VERTEX_SHADER, at, q->pos[0], q->pos[1], q->pos[2], 1);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, at + 1, q->dir[0], q->dir[1], q->dir[2], !dir && q->type >= 2 ? 1.0f : 0.0f);
+        if (dir) C3D_FVUnifSet(GPU_VERTEX_SHADER, at + 2, 1, 0, 0, 0);
+        else C3D_FVUnifSet(GPU_VERTEX_SHADER, at + 2, q->att[0], q->att[1], q->att[2], q->spot_cut);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, at + 3, q->spot_exp, q->comp == 2 ? 1.0f : 0.0f, 0, 0);
+        if (dir) C3D_FVUnifSet(GPU_VERTEX_SHADER, at + 4, 0, 0, 0, 0);
+        else C3D_FVUnifSet(GPU_VERTEX_SHADER, at + 4, q->amb[0], q->amb[1], q->amb[2], 0);
+        if (q->dif_on) C3D_FVUnifSet(GPU_VERTEX_SHADER, at + 5, q->dif[0], q->dif[1], q->dif[2], 0);
+        else C3D_FVUnifSet(GPU_VERTEX_SHADER, at + 5, 0, 0, 0, 0);
+        if (q->spec_on) C3D_FVUnifSet(GPU_VERTEX_SHADER, at + 6, q->spc[0], q->spc[1], q->spc[2], 0);
+        else C3D_FVUnifSet(GPU_VERTEX_SHADER, at + 6, 0, 0, 0, 0);
     }
 }
 
 /* The draw itself, on the target and state already set: the vertices packed,
- * the raw program and layout bound, the matrix for a tw x th target. */
+ * the raw layout bound, the uniforms for a tw x th target. */
 static int raw_submit(const psp_gpu_raw_draw *d, float tw, float th, const float uvs[2]) {
-    uint32_t pos_b, uv_b;
-    const uint32_t stride = raw_layout(d, &pos_b, &uv_b);
-    const uint32_t vbytes = d->nvbuf * stride, ibytes = d->index ? d->count * (uint32_t)d->index_size : 0;
+    raw_lay l;
+    raw_layout(d, &l);
+    const uint32_t vbytes = d->nvbuf * l.stride, ibytes = d->index ? d->count * (uint32_t)d->index_size : 0;
     if (vbytes + ibytes + 32 > RAW_BYTES) { n_raw_refused++; return 1; }
     if (g_raw_pos + vbytes + ibytes + 32 > RAW_BYTES) gpu_finish();
     uint8_t *vb = raw_alloc(vbytes);
-    raw_pack(d, vb, pos_b, uv_b);
+    raw_pack(d, &l, vb);
     void *ib = NULL;
     if (d->index) { ib = raw_alloc(ibytes); memcpy(ib, d->index, ibytes); }
 
+    /* in register order, so attribute i is v_i (v3 left out when unlit) */
     static const GPU_FORMATS PF[4] = { GPU_FLOAT, GPU_BYTE, GPU_SHORT, GPU_FLOAT };
     static const int PN[4] = { 3, 4, 4, 3 };
     static const GPU_FORMATS TF[4] = { GPU_FLOAT, GPU_UNSIGNED_BYTE, GPU_SHORT, GPU_FLOAT };
     static const int TN[4] = { 2, 4, 2, 2 };
+    static const GPU_FORMATS WF[4] = { GPU_FLOAT, GPU_UNSIGNED_BYTE, GPU_SHORT, GPU_FLOAT };
     C3D_AttrInfo ai;
     AttrInfo_Init(&ai);
     AttrInfo_AddLoader(&ai, 0, PF[d->pos_fmt & 3], PN[d->pos_fmt & 3]);
     if (d->t_off >= 0) AttrInfo_AddLoader(&ai, 1, TF[d->tex_fmt & 3], TN[d->tex_fmt & 3]);
     else AttrInfo_AddLoader(&ai, 1, GPU_UNSIGNED_BYTE, 4);
     AttrInfo_AddLoader(&ai, 2, GPU_UNSIGNED_BYTE, 4);
+    u64 perm = 0x210;
+    int na = 3;
+    if (l.nrm) { AttrInfo_AddLoader(&ai, 3, PF[d->normal_fmt & 3], PN[d->normal_fmt & 3]); perm |= (u64)na << (na * 4); na++; }
+    if (l.wts) {
+        AttrInfo_AddLoader(&ai, 4, WF[d->weight_fmt & 3], 4);
+        perm |= (u64)na << (na * 4); na++;
+        AttrInfo_AddLoader(&ai, 5, WF[d->weight_fmt & 3], 4);
+        perm |= (u64)na << (na * 4); na++;
+    }
     C3D_BufInfo bi;
     BufInfo_Init(&bi);
     bi.base_paddr = osConvertVirtToPhys(g_raw);
-    BufInfo_Add(&bi, vb, stride, 3, 0x210);
-    C3D_BindProgram(&g_prog_raw);
+    BufInfo_Add(&bi, vb, l.stride, na, perm);
     C3D_SetAttrInfo(&ai);
     C3D_SetBufInfo(&bi);
+    C3D_BoolUnifSet(GPU_VERTEX_SHADER, ub_raw, true);
+    C3D_BoolUnifSet(GPU_VERTEX_SHADER, ub_skin, d->bones != NULL);
+    C3D_BoolUnifSet(GPU_VERTEX_SHADER, ub_light, d->light != NULL);
     g_raw_mode = 1;
-    g_cs.vp[0] = -1.0f;                          /* the shared uniform registers: m overwrote vp */
     cs_cull(pica_cull(d->cull));
 
-    /* The matrix: the GE's clip space (mvp x position, the position scaled
-     * as stored) to the PICA's, as c3d_ge.v.pica maps the runtime's screen
-     * vertices: x' = x_px * 2 / width - 1, y' likewise, z' = -depth / 65535,
-     * all times w (x_px = x / w * sx + ox; linear in the clip coordinates). */
-    const float ps = d->pos_fmt == 1 ? 1.0f / 128.0f : d->pos_fmt == 2 ? 1.0f / 32768.0f : 1.0f;
+    /* The matrix: the GE's clip space (mvp x the skinned position) to the
+     * PICA's, as the screen path maps the runtime's screen vertices:
+     * x' = x_px * 2 / width - 1, y' likewise, z' = -depth / 65535, all times w
+     * (x_px = x / w * sx + ox; linear in the clip coordinates). The position's
+     * own scale (as stored) is the shader's pscale.x, before the bones. */
     const float ax = d->vscale[0] * 2.0f / tw, bx = d->voff[0] * 2.0f / tw - 1.0f;
     const float ay = d->vscale[1] * 2.0f / th, by = d->voff[1] * 2.0f / th - 1.0f;
     const float az = -d->vscale[2] / 65535.0f, bz = -d->voff[2] / 65535.0f;
-    float ms[4][4];                              /* mvp x scale, [row][column] */
+    float ms[4][4];                              /* [row][column] */
     for (int c = 0; c < 4; c++)
-        for (int r = 0; r < 4; r++) ms[r][c] = d->mvp[c * 4 + r] * (c < 3 ? ps : 1.0f);
+        for (int r = 0; r < 4; r++) ms[r][c] = d->mvp[c * 4 + r];
     for (int c = 0; c < 4; c++) {
         const float x = ax * ms[0][c] + bx * ms[3][c], y = ay * ms[1][c] + by * ms[3][c];
         const float z = az * ms[2][c] + bz * ms[3][c];
@@ -1428,12 +1481,26 @@ static int raw_submit(const psp_gpu_raw_draw *d, float tw, float th, const float
                   d->uv_off[0] * uvs[0], d->uv_off[1] * uvs[1]);
     const float fix = d->t_off >= 0 && d->tex_fmt == 2 ? 65536.0f : 0.0f;
     C3D_FVUnifSet(GPU_VERTEX_SHADER, u_uvfix, fix, fix, fix, fix);
+    static const float NORM[4] = { 1.0f, 1.0f / 128.0f, 1.0f / 32768.0f, 1.0f };
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, u_pscale, NORM[d->pos_fmt & 3], NORM[d->weight_fmt & 3],
+                  d->weight_fmt == 2 ? 65536.0f : 0.0f, d->reverse_normals ? -1.0f : 1.0f);
+    if (d->bones) {
+        for (int b = 0; b < 8; b++) {
+            if (b < d->nweights) unif_rows43(u_bone + b * 3, d->bones + 12 * b);
+            else for (int r = 0; r < 3; r++) C3D_FVUnifSet(GPU_VERTEX_SHADER, u_bone + b * 3 + r, 0, 0, 0, 0);
+        }
+    }
+    if (d->light) {
+        unif_rows43(u_world, d->world);
+        unif_lights(d->light);
+    }
 
     static const GPU_Primitive_t PRIM[3] = { GPU_TRIANGLES, GPU_TRIANGLE_STRIP, GPU_TRIANGLE_FAN };
     const GPU_Primitive_t prim = PRIM[d->prim - 3];
-    DIAG("c3d: raw draw %lu of %lu vertices, prim %d, stride %lu (pos %d tex %d colour %d), %s",
-         (unsigned long)d->count, (unsigned long)d->nvbuf, d->prim, (unsigned long)stride, d->pos_fmt,
-         d->t_off >= 0 ? d->tex_fmt : 0, d->c_off >= 0 ? (d->colors ? 16 : 32) : 0,
+    DIAG("c3d: raw draw %lu of %lu vertices, prim %d, stride %lu (pos %d tex %d colour %d normal %d weights %d x %d), %s",
+         (unsigned long)d->count, (unsigned long)d->nvbuf, d->prim, (unsigned long)l.stride, d->pos_fmt,
+         d->t_off >= 0 ? d->tex_fmt : 0, d->c_off >= 0 ? (d->colors ? 16 : 32) : 0, l.nrm ? d->normal_fmt : 0,
+         l.wts ? d->nweights : 0, l.wts ? d->weight_fmt : 0,
          ib ? (d->index_size == 1 ? "8-bit indices" : "16-bit indices") : "no indices");
     if (ib) C3D_DrawElements(prim, (int)d->count, d->index_size == 1 ? C3D_UNSIGNED_BYTE : C3D_UNSIGNED_SHORT, ib);
     else C3D_DrawArrays(prim, 0, (int)d->count);
@@ -1454,8 +1521,9 @@ static int c3d_draw_raw_on(const psp_gpu_state *st, const psp_gpu_raw_draw *d) {
         if (!tex) { n_fail++; return 1; }
     }
     {   /* room in the ring first: making it ends the frame (gpu_finish), and the target is bound after */
-        uint32_t pb, ub;
-        const uint32_t need = d->nvbuf * raw_layout(d, &pb, &ub) + (d->index ? d->count * (uint32_t)d->index_size : 0) + 32;
+        raw_lay l;
+        raw_layout(d, &l);
+        const uint32_t need = d->nvbuf * l.stride + (d->index ? d->count * (uint32_t)d->index_size : 0) + 32;
         if (need > RAW_BYTES) { n_raw_refused++; return 1; }
         if (g_raw_pos + need > RAW_BYTES) gpu_finish();
     }
@@ -1488,6 +1556,7 @@ static int c3d_draw_raw_on(const psp_gpu_state *st, const psp_gpu_raw_draw *d) {
 
 static int c3d_draw_raw(const psp_gpu_state *st, const psp_gpu_raw_draw *d) {
     if (d->prim < 3 || d->prim > 5) return 1;
+    if ((d->bones && (g_vs_noskin || d->nweights > 8)) || (d->light && g_vs_nolight)) return 1;
     const int pb = prof(P_DRAW);
     const int r = c3d_draw_raw_on(st, d);
     prof(pb);
@@ -1954,6 +2023,86 @@ static void gpu_selftest(void) {
             raw_submit(&d, (float)TOP_H, (float)TOP_W, uvs);
             ST_STEP(RV[k].name);
         }
+        /* 6h-6m: skinned (each weight format) and lit (directional with
+         * specular, point, spot), and both: a float quad, identity bones */
+        static const struct { const char *name; int wfmt, lights; } SV[6] = {
+            { "6h raw: skinned, 8-bit weights", 1, 0 }, { "6i raw: skinned, 16-bit weights", 2, 0 },
+            { "6j raw: skinned, float weights", 3, 0 }, { "6k raw: lit, directional with specular", 0, 1 },
+            { "6l raw: lit, point and spot", 0, 2 }, { "6m raw: skinned and lit, 16-bit normals", 2, 3 } };
+        static float bones[8 * 12];
+        for (int b = 0; b < 8; b++) {
+            memset(bones + b * 12, 0, 12 * sizeof(float));
+            bones[b * 12 + 0] = bones[b * 12 + 4] = bones[b * 12 + 8] = 1.0f;
+        }
+        static const float world[12] = { 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0 };
+        for (int k = 0; k < 6; k++) {
+            uint8_t vb[4 * 64];                  /* uv 0, colour 8, position 12, normal 24, weights 40 */
+            memset(vb, 0, sizeof vb);
+            const int nfmt = k == 5 ? 2 : 3;
+            for (int i = 0; i < 4; i++) {
+                uint8_t *v = vb + i * 64;
+                const float u = QX[i] + 0.5f, w = QY[i] + 0.5f, p3[3] = { QX[i], QY[i], 0 };
+                memcpy(v, &u, 4); memcpy(v + 4, &w, 4);
+                const uint32_t c = 0xFF0080FFu;
+                memcpy(v + 8, &c, 4);
+                memcpy(v + 12, p3, 12);
+                if (nfmt == 3) { const float n3[3] = { 0, 0, 1 }; memcpy(v + 24, n3, 12); }
+                else { const int16_t n3[3] = { 0, 0, 32767 }; memcpy(v + 24, n3, 6); }
+                if (SV[k].wfmt == 1) { v[40] = 128; v[41] = 0; }
+                else if (SV[k].wfmt == 2) { const uint16_t ws[2] = { 32768, 0 }; memcpy(v + 40, ws, 4); }
+                else if (SV[k].wfmt == 3) { const float ws[2] = { 1, 0 }; memcpy(v + 40, ws, 8); }
+            }
+            psp_ge_light_prep lp;
+            memset(&lp, 0, sizeof lp);
+            lp.amb_all[0] = lp.amb_all[1] = lp.amb_all[2] = 0.2f;
+            lp.amb_alpha = 1;
+            lp.mat_amb[0] = lp.mat_amb[1] = lp.mat_amb[2] = lp.mat_amb[3] = 1;
+            lp.shininess = 4;
+            lp.mat_update = 2;
+            if (SV[k].lights & 1) {
+                psp_ge_light_one *q = &lp.l[lp.n++];
+                q->type = 0; q->comp = 1; q->dif_on = 1; q->spec_on = 1;
+                q->to[2] = 1; q->to_ok = 1;
+                q->dif[0] = q->dif[1] = q->dif[2] = 0.8f;
+                q->spc[0] = q->spc[1] = q->spc[2] = 0.5f;
+            }
+            if (SV[k].lights & 2) {
+                for (int t = 1; t <= 2; t++) {
+                    psp_ge_light_one *q = &lp.l[lp.n++];
+                    q->type = t; q->comp = t == 2 ? 2 : 0; q->dif_on = 1;
+                    q->pos[2] = 5; q->att[0] = 1; q->att[1] = 0.1f;
+                    q->dir[2] = -1; q->spot_cut = 0.5f; q->spot_exp = 2;
+                    q->amb[0] = q->amb[1] = q->amb[2] = 0.1f;
+                    q->dif[0] = q->dif[1] = q->dif[2] = 0.6f;
+                }
+            }
+            psp_gpu_raw_draw d;
+            memset(&d, 0, sizeof d);
+            d.prim = 5;
+            d.verts = vb; d.nvbuf = 4; d.stride = 64;
+            d.t_off = 0; d.c_off = 8; d.p_off = 12;
+            d.tex_fmt = 3; d.pos_fmt = 3;
+            d.count = 4;
+            static const uint8_t FANQ[4] = { 0, 1, 3, 2 };
+            uint16_t ix[4];
+            for (int i = 0; i < 4; i++) ix[i] = FANQ[i];
+            d.index = ix; d.index_size = 2;
+            for (int i = 0; i < 16; i++) d.mvp[i] = (i % 5) == 0 ? 1.0f : 0.0f;
+            d.vscale[0] = 64; d.vscale[1] = 64; d.vscale[2] = 32767;
+            d.voff[0] = 120; d.voff[1] = 200; d.voff[2] = 32768;
+            d.uv_scale[0] = d.uv_scale[1] = 1;
+            if (SV[k].wfmt) { d.w_off = 40; d.weight_fmt = SV[k].wfmt; d.nweights = 2; d.bones = bones; }
+            else d.w_off = -1;
+            if (SV[k].lights) { d.n_off = 24; d.normal_fmt = nfmt; d.world = world; d.light = &lp; }
+            else d.n_off = -1;
+            const float uvs[2] = { 1, 1 };
+            C3D_FrameDrawOn(g_top);
+            C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+            C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+            st_untextured();
+            raw_submit(&d, (float)TOP_H, (float)TOP_W, uvs);
+            ST_STEP(SV[k].name);
+        }
         use_cpu_path();
     }
     if (g_in_frame) {                            /* citro3d panics on a target deleted inside a frame */
@@ -2033,18 +2182,37 @@ int c3d_ge_init(void) {
     C3D_RenderTargetSetOutput(g_top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
 
     int raw = 0;
-    if (g_dvlb->numDVLE >= 2 && access("sdmc:/psp2i/vs_cpu", F_OK) != 0) {
-        shaderProgramInit(&g_prog_raw);
-        shaderProgramSetVsh(&g_prog_raw, &g_dvlb->DVLE[1]);
-        u_m = shaderInstanceGetUniformLocation(g_prog_raw.vertexShader, "m");
-        u_uvk = shaderInstanceGetUniformLocation(g_prog_raw.vertexShader, "uvk");
-        u_uvfix = shaderInstanceGetUniformLocation(g_prog_raw.vertexShader, "uvfix");
-        g_raw = (uint8_t *)linearAlloc(RAW_BYTES);
-        raw = g_raw && u_m >= 0 && u_uvk >= 0 && u_uvfix >= 0;
+    {
+        shaderInstance_s *vs = g_prog.vertexShader;
+        u_m = shaderInstanceGetUniformLocation(vs, "m");
+        u_uvk = shaderInstanceGetUniformLocation(vs, "uvk");
+        u_uvfix = shaderInstanceGetUniformLocation(vs, "uvfix");
+        u_pscale = shaderInstanceGetUniformLocation(vs, "pscale");
+        u_world = shaderInstanceGetUniformLocation(vs, "world");
+        u_bone = shaderInstanceGetUniformLocation(vs, "bone");
+        u_emis = shaderInstanceGetUniformLocation(vs, "emis");
+        u_ambg = shaderInstanceGetUniformLocation(vs, "ambg");
+        u_matamb = shaderInstanceGetUniformLocation(vs, "matamb");
+        u_mflag = shaderInstanceGetUniformLocation(vs, "mflag");
+        u_L = shaderInstanceGetUniformLocation(vs, "L");
+        ub_raw = shaderInstanceGetUniformLocation(vs, "b_raw");
+        ub_skin = shaderInstanceGetUniformLocation(vs, "b_skin");
+        ub_light = shaderInstanceGetUniformLocation(vs, "b_light");
+        static const char *const BL[4] = { "b_l0", "b_l1", "b_l2", "b_l3" };
+        int ok = u_m >= 0 && u_uvk >= 0 && u_uvfix >= 0 && u_pscale >= 0 && u_world >= 0 && u_bone >= 0 && u_emis >= 0 &&
+                 u_ambg >= 0 && u_matamb >= 0 && u_mflag >= 0 && u_L >= 0 && ub_raw >= 0 && ub_skin >= 0 && ub_light >= 0;
+        for (int i = 0; i < 4; i++) { ub_l[i] = shaderInstanceGetUniformLocation(vs, BL[i]); ok &= ub_l[i] >= 0; }
+        if (ok && access("sdmc:/psp2i/vs_cpu", F_OK) != 0) {
+            g_raw = (uint8_t *)linearAlloc(RAW_BYTES);
+            raw = g_raw != NULL;
+        }
+        if (!ok) fprintf(stderr, "c3d: c3d_ge.v.pica lacks a raw uniform: the CPU transforms every draw\n");
     }
     g_cull_flip = access("sdmc:/psp2i/cull_flip", F_OK) == 0;
-    fprintf(stderr, "c3d: common draws transformed by %s (uniforms m %d uvk %d uvfix %d)%s\n",
-            raw ? "the PICA's vertex shader" : "the CPU", u_m, u_uvk, u_uvfix, g_cull_flip ? "; cull_flip" : "");
+    g_vs_noskin = access("sdmc:/psp2i/vs_noskin", F_OK) == 0;
+    g_vs_nolight = access("sdmc:/psp2i/vs_nolight", F_OK) == 0;
+    fprintf(stderr, "c3d: common draws transformed by %s%s%s%s\n", raw ? "the PICA's vertex shader" : "the CPU",
+            raw && !g_vs_noskin ? ", skinned" : "", raw && !g_vs_nolight ? ", lit" : "", g_cull_flip ? "; cull_flip" : "");
 
     g_ok = 1;
     psp_gpu_set_backend(raw ? &C3D_BACKEND_RAW : &C3D_BACKEND);

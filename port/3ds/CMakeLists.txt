@@ -140,7 +140,7 @@ if(EXISTS ${PSP2I_GEN_DIR}/recomp_funcs.c)
     endif()
 
     # the GE backend's vertex shader, assembled by picasso and linked in
-    ctr_add_shader_library(c3d_ge_shader ${PORT}/host/c3d_ge.v.pica ${PORT}/host/c3d_ge_raw.v.pica OUTPUT c3d_ge.shbin)
+    ctr_add_shader_library(c3d_ge_shader ${PORT}/host/c3d_ge.v.pica OUTPUT c3d_ge.shbin)
     dkp_add_embedded_binary_library(c3d_ge_shader_bin c3d_ge_shader)
     ctr_add_shader_library(c3d_test_shader ${PORT}/host/c3d_test.v.pica ${PORT}/host/c3d_test_t1.v.pica
         ${PORT}/host/c3d_test_t2.v.pica ${PORT}/host/c3d_test_t3.v.pica ${PORT}/host/c3d_test_t4.v.pica
