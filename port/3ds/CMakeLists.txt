@@ -93,8 +93,9 @@ if(EXISTS ${PSP2I_GEN_DIR}/recomp_funcs.c)
     # with nothing after it builds all of the game's code at -Os again)
     set(PSP2I_HOT_LIST ${CMAKE_CURRENT_SOURCE_DIR}/hot_functions.txt CACHE FILEPATH
         "game functions built at -O2 with inline memory access (empty: none)")
-    # their MIPS registers in C locals (reg_locals.py; 3DS_PLAN.md "T4 speed", O3)
-    option(PSP2I_HOT_LOCALS "hot functions keep the MIPS registers in C locals" OFF)
+    # their MIPS registers in C locals (reg_locals.py; 3DS_PLAN.md "T4 speed", O3);
+    # on the console, ~8% less game time on the field for 232 KiB of code
+    option(PSP2I_HOT_LOCALS "hot functions keep the MIPS registers in C locals" ON)
     set(SPLIT_LOCALS "")
     if(PSP2I_HOT_LOCALS)
         set(SPLIT_LOCALS locals)

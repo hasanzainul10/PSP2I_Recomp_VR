@@ -38,9 +38,19 @@ from 70 to 6 us a draw and GPU finishes from 3 a frame to 0; `wait` from
 150-200 to 115-155 ms/s. Field still ~6 fps (340-730 draws a frame in that
 run): **game code is now 600-690 ms/s**, the bottleneck on the console.
 
-**Next:** the console
-baseline route (spawn stand-still 30 s, busy spots), then the present wait
-and O4b (GE on core 2). The user's Azahar save is on the console's SD
+**O3 on by default (2026-10-26, console):** `PSP2I_HOT_LOCALS` (hot
+functions keep the MIPS registers in C locals) measured on the field against
+the run above, compared at the same draws per frame: game ms per frame
+300-349 draws 106 -> 95, 350-399 110 -> 97, 400-449 123 -> 115, 450-499
+127 -> 124 (250-299: 76 -> 82; 6-41 samples a bucket, one run each). About
+8% less game time; fps 5-7 on the field, so still ~100 ms of game code a
+frame. Cost: 232 KiB of code (heap after the code 62132 -> 61900 KiB); peak
+heap unchanged (45 MB). PC and Azahar showed no gain; only the console does.
+
+**Next:** game code is the problem. Find where those ~100 ms a frame go on
+the console (per-function time for the hot list and beyond), then the
+console baseline route (spawn stand-still 30 s, busy spots), the present
+wait and O4b (GE on core 2). The user's Azahar save is on the console's SD
 (`GameData/ms/PSP/SAVEDATA/NPJH50332`, `NPJH50332SC`); the save the console
 made on 2026-10-26 is backed up off the console.
 
