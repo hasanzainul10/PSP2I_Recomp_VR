@@ -107,12 +107,43 @@ field: 350-399 draws 10.4 -> 11.4 fps, 400-449 8.9 -> 11.0, 500-549 5.0 ->
 ms/s; characters checked on the console. Switches: `vs_noskin`,
 `vs_nolight`.
 
-**Next:** of the ~260 ms/s the draws cost on the field, ~210 is now the
-backend (citro3d calls and the raw vertices' packing): time its parts
-(`D_*` in `c3d_draw_on`, and the same for `c3d_draw_raw`); GE on core 2
-(O4b) is being built in its own session (branch `3ds-ge-core2`); then the
-console baseline route (spawn stand-still 30 s, busy spots), the
-present wait and O4b (GE on core 2). The user's Azahar save is on the console's SD
+**O4b, GE lists on core 2 (branch claude/3ds-ge-core2-188db8, psprecomp
+12e82bc, port 97bd2bf; built on f3fb601, without the PICA skinning).**
+`sceGeListEnQueue` / `UpdateStallAddr` queue jobs (the list and the stall
+address given) that a thread on core 2 runs in order (`psp_ge_async_start`,
+ge.c "the worker"); ListSync, DrawSync, DeQueue, the callback setters and
+the game's VRAM accesses (the backend's hook, wrapped) wait for it; finish /
+signal callbacks are queued and called on the game's thread at its next
+preemption point; the present and the reports are posted to it
+(`psp_ge_post`); an APT hook drains it before HOME / sleep / exit.
+`sdmc:/psp2i/ge_sync` keeps lists in the game's calls. The log's `core2:`
+line: the worker's busy ms/s and the game's waits by reason. Console, same
+build, same route, 135 s each (A/B by the switch), fps by draws a frame:
+
+| draws/f | in the game's calls | on core 2 |
+|---|---|---|
+| 350-399 | 11.7 | 14.3 |
+| 400-449 | 8.6 | 11.8 |
+| 450-549 | 4.7-5.5 | 8.9-9.2 |
+| 650-799 | 5.3-5.7 | 8.7-10.5 |
+| 1,200-2,450 | 3.0-4.0 | 6.0-9.0 |
+
+The game waits for core 2 once a frame, at its DrawSync (0-300 ms/s);
+callbacks 40-60 a second, none dropped; no hang or wrong picture reported
+in either run. **Core 2 is now the bottleneck** above ~450 draws: busy
+850-1,050 ms/s while the game's thread idles or waits. So the GE's own work
+(list commands, the remaining CPU vertex work, citro3d submission) is what
+to cut next; the PICA skinning (28b8ff9) lowers exactly that, so merge both
+and measure again. Not checked: in Azahar three of the four mode-select
+labels drew as dark bars; whether the synchronous build does the same
+wasn't compared.
+
+**Merged (both of the above):** measure the merged build on the console's
+field first; then, where core 2 is still busy, its parts: the backend's
+draw cost (`D_*` in `c3d_draw_on`, and the same for `c3d_draw_raw`; ~210 of
+the field's ~260 ms/s of draws before the merge), the list commands; then
+the console baseline route (spawn stand-still 30 s, busy spots) and the
+present wait. The user's Azahar save is on the console's SD
 (`GameData/ms/PSP/SAVEDATA/NPJH50332`, `NPJH50332SC`); the save the console
 made on 2026-10-26 is backed up off the console.
 
