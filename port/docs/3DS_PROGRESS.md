@@ -99,10 +99,19 @@ packed as one buffer of whole 4-byte words with the stride their sum, it
 runs. The diag self-test (steps 6a-6g) draws each format through it.
 Switches: `sdmc:/psp2i/vs_cpu` (the CPU's transform), `cull_flip`.
 
-**Next:** what's left on the CPU's vertex path is the skinned, lit
-characters (`vtx:` w4 l2, ~100-150 ms/s in busy scenes): skinning and
-lighting on the PICA next; then GE on core 2 (O4b) and the console baseline
-route (spawn stand-still 30 s, busy spots), the
+**Skinning and lighting on the PICA (28b8ff9, psprecomp 62b66e3):** one
+vertex program for every draw (booleans choose the screen path, raw, skin,
+light), the GE's lighting as `psp_ge_light_fast` term for term. Console,
+field: 350-399 draws 10.4 -> 11.4 fps, 400-449 8.9 -> 11.0, 500-549 5.0 ->
+8.0 (60 field seconds, few above 400); the runtime's vertex loop ~95 -> ~2
+ms/s; characters checked on the console. Switches: `vs_noskin`,
+`vs_nolight`.
+
+**Next:** of the ~260 ms/s the draws cost on the field, ~210 is now the
+backend (citro3d calls and the raw vertices' packing): time its parts
+(`D_*` in `c3d_draw_on`, and the same for `c3d_draw_raw`); GE on core 2
+(O4b) is being built in its own session (branch `3ds-ge-core2`); then the
+console baseline route (spawn stand-still 30 s, busy spots), the
 present wait and O4b (GE on core 2). The user's Azahar save is on the console's SD
 (`GameData/ms/PSP/SAVEDATA/NPJH50332`, `NPJH50332SC`); the save the console
 made on 2026-10-26 is backed up off the console.
