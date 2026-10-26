@@ -330,7 +330,8 @@ static uint8_t g_pg_dirty[NPG], g_pg_armed[NPG];
 static void pages_set(uint8_t *map, uint32_t a0, uint32_t a1) {
     if (a1 > VRAM_SIZE) a1 = VRAM_SIZE;
     if (a0 >= a1) return;
-    for (uint32_t p = a0 >> PG_SHIFT; p <= (a1 - 1) >> PG_SHIFT; p++) map[p] = 1;
+    const uint32_t p0 = a0 >> PG_SHIFT, p1 = (a1 - 1) >> PG_SHIFT;
+    memset(map + p0, 1, p1 - p0 + 1);
 }
 
 static uint32_t row_addr(const rt_entry *t, uint32_t y) { return t->off + y * t->stride * (uint32_t)bpp_of(t->fmt); }
@@ -339,7 +340,12 @@ static int row_dirty(const rt_entry *t, uint32_t y) { return y < 512 && ((t->dro
 static void rows_mark(rt_entry *t, uint32_t y0, uint32_t y1) {
     if (y1 > 512) y1 = 512;
     if (y0 >= y1) return;
-    for (uint32_t y = y0; y < y1; y++) t->drow[y >> 6] |= 1ull << (y & 63);
+    /* by whole 64-row words: every draw marks its scissor's rows (~272), and
+     * one bit at a time was 7 us a draw on the console (3DS_PROGRESS.md T4) */
+    for (uint32_t w = y0 >> 6; w <= (y1 - 1) >> 6; w++) {
+        const uint32_t lo = w << 6, a = y0 > lo ? y0 - lo : 0, b = y1 < lo + 64 ? y1 - lo : 64;
+        t->drow[w] |= (b - a == 64 ? ~0ull : ((1ull << (b - a)) - 1)) << a;
+    }
     if (!t->dirty) { t->dy0 = y0; t->dy1 = y1; }
     else { if (y0 < t->dy0) t->dy0 = y0; if (y1 > t->dy1) t->dy1 = y1; }
     t->dirty = 1;
@@ -620,8 +626,15 @@ static void *depth_get(uint32_t off) {
 
 /* ---- textures ----------------------------------------------------------------------------- */
 
+/* A direct-mapped index in front of the scan of all 256 slots, which every
+ * textured draw did (part of 5.7 us a draw on the console's field). A slot
+ * found there is checked again (in use, same key), so a stale one only costs
+ * the scan. */
+static tex_entry *g_tex_idx[512];
 static tex_entry *tex_find(uint64_t key) {
-    for (int i = 0; i < MAX_TEX; i++) if (g_tex[i].used && g_tex[i].key == key) return &g_tex[i];
+    tex_entry **c = &g_tex_idx[(key ^ (key >> 21) ^ (key >> 42)) & 511];
+    if (*c && (*c)->used && (*c)->key == key) return *c;
+    for (int i = 0; i < MAX_TEX; i++) if (g_tex[i].used && g_tex[i].key == key) return *c = &g_tex[i];
     return NULL;
 }
 
@@ -1369,23 +1382,42 @@ static uint8_t *raw_alloc(uint32_t bytes) {
     return p;
 }
 
+/* n bytes of src into room bytes at o (4-byte aligned, room a multiple of
+ * 4), zero past them: what memset then memcpy gave, by words. src may be
+ * unaligned and is read only inside its n bytes. */
+static inline uint32_t *put_field(uint32_t *o, const uint8_t *src, uint32_t n, uint32_t room) {
+    uint32_t k = 0;
+    for (; k + 4 <= n; k += 4) { uint32_t w; memcpy(&w, src + k, 4); *o++ = w; }
+    switch (n - k) {
+    case 1: *o++ = src[k]; k += 4; break;
+    case 2: *o++ = (uint32_t)src[k] | (uint32_t)src[k + 1] << 8; k += 4; break;
+    case 3: *o++ = (uint32_t)src[k] | (uint32_t)src[k + 1] << 8 | (uint32_t)src[k + 2] << 16; k += 4; break;
+    default: break;
+    }
+    for (; k < room; k += 4) *o++ = 0;
+    return o;
+}
+
+/* Per vertex: position, uv, colour, normal, weights, each padded to its
+ * slot (raw_layout). A memset and five memcpys a vertex were 11 us a draw on
+ * the console's field, 30 in skinned scenes (3DS_PROGRESS.md T4). */
 static void raw_pack(const psp_gpu_raw_draw *d, const raw_lay *l, uint8_t *out) {
     static const int CS[4] = { 0, 1, 2, 4 };
     const uint32_t pn = 3u * (uint32_t)CS[d->pos_fmt & 3], un = d->t_off >= 0 ? 2u * (uint32_t)CS[d->tex_fmt & 3] : 0,
                    nn = l->nrm ? 3u * (uint32_t)CS[d->normal_fmt & 3] : 0,
                    wn = l->wts ? (uint32_t)d->nweights * (uint32_t)CS[d->weight_fmt & 3] : 0;
-    const uint32_t oc = l->pos + l->uv, on = oc + 4, ow = on + l->nrm;
     const uint32_t mat = d->material;
-    for (uint32_t i = 0; i < d->nvbuf; i++, out += l->stride) {
+    const int csrc = d->colors ? 0 : d->c_off >= 0 ? 1 : 2;
+    uint32_t *o = (uint32_t *)out;
+    for (uint32_t i = 0; i < d->nvbuf; i++) {
         const uint8_t *a = d->verts + i * d->stride;
-        memset(out, 0, l->stride);
-        memcpy(out, a + d->p_off, pn);
-        if (un) memcpy(out + l->pos, a + d->t_off, un);
-        if (d->colors) memcpy(out + oc, &d->colors[i], 4);
-        else if (d->c_off >= 0) memcpy(out + oc, a + d->c_off, 4);
-        else memcpy(out + oc, &mat, 4);
-        if (nn) memcpy(out + on, a + d->n_off, nn);
-        if (wn) memcpy(out + ow, a + d->w_off, wn);
+        o = put_field(o, a + d->p_off, pn, l->pos);
+        o = put_field(o, un ? a + d->t_off : a, un, l->uv);
+        if (csrc == 0) *o++ = d->colors[i];
+        else if (csrc == 1) { uint32_t c; memcpy(&c, a + d->c_off, 4); *o++ = c; }
+        else *o++ = mat;
+        if (l->nrm) o = put_field(o, a + d->n_off, nn, l->nrm);
+        if (l->wts) o = put_field(o, a + d->w_off, wn, l->wts);
     }
 }
 
