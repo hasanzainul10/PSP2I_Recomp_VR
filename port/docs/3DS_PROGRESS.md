@@ -220,8 +220,22 @@ ms/s. So the game's thread now mostly waits for core 2 at DrawSync: **the
 GE work on core 2 is the limit again.** (`profile.txt` is appended to at
 each run: this run's windows start at its last `window 0`.)
 
-**Next:** cut core 2's GE work (list commands, the CPU vertex work left,
-citro3d submission; its `prims:` / `gelist:` lines say where), then the
+**Core 2 on the field, broken down (full VFPU build, console).** From the
+1 s lines: the citro3d backend is ~70% of core 2's busy time (223-532
+ms/s, 32-63 us a draw), the GE command interpreter ~20% (65-103 ms/s,
+10-14 us a draw), the rest of the draw ~7 us. The PICA path timed in parts
+(`psp2i_t4_rawtime`, b3aaa0e; 871,000 field draws, 9-37% skinned / lit;
+us a draw): **pack 11.2** (6-30, with the skinned share), **rows 7.3**
+(`rows_mark` sets the scissor's rows one by one), **submit 7.1**,
+depth+texture 5.7, target 4.3, state 2.0, layout 1.6, uniforms 1.3: 40.5
+in all. So caching uniforms or the layout would save ~3 us at most. The GE
+lists: 27.8 commands a PRIM, most of them matrix data (2B bones, 3B world,
+up to 12 each per PRIM), each a full trip through the interpreter.
+
+**Next:** cut core 2's GE work: a faster `raw_pack` (per-layout copy
+without the memset), `rows_mark` by whole words, the last target and
+texture lookups reused while nothing changed them, matrix-data runs (2B,
+3B, ...) read in one go by `ge.c`; then the
 three VFPU functions above, which need a closer look at what they spend on
 (memory reads?). The previous Next: the game code (more hot
 functions, O3 on more of them), the sound mixer, the GE commands it still
