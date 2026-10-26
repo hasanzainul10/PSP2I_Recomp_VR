@@ -39,6 +39,8 @@
 #include "camera.h"
 #include "savecrypt.h"
 
+void psp2i_bench(FILE *out);                     /* 3ds_bench.c */
+
 #define BASE "sdmc:/psp2i"
 #define SCREEN_W 480
 #define SCREEN_H 272
@@ -670,6 +672,9 @@ int main(void)
     psp_savedata_set_crypto(&SAVE_CRYPTO);
     psp_sysmem_set_heap(mi.load_hi, USER_PARTITION_TOP);
     psp_recomp_register();
+    /* sdmc:/psp2i/bench: the compare forms and one hot game function timed
+     * (3ds_bench.c), before the game starts */
+    if (stat(BASE "/bench", &st) == 0) psp2i_bench(stderr);
     camera_init(1.0f);
     psp_gpu_set_clock(ticks_now);                         /* the GE's share of time_report */
     psp_sched_set_vblank_hook(on_vblank);
