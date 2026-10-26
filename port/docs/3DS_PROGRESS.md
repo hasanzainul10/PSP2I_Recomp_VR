@@ -99,6 +99,37 @@ packed as one buffer of whole 4-byte words with the stride their sum, it
 runs. The diag self-test (steps 6a-6g) draws each format through it.
 Switches: `sdmc:/psp2i/vs_cpu` (the CPU's transform), `cull_flip`.
 
+**O4b, GE lists on core 2 (branch claude/3ds-ge-core2-188db8, psprecomp
+12e82bc, port 97bd2bf; built on f3fb601, without the PICA skinning).**
+`sceGeListEnQueue` / `UpdateStallAddr` queue jobs (the list and the stall
+address given) that a thread on core 2 runs in order (`psp_ge_async_start`,
+ge.c "the worker"); ListSync, DrawSync, DeQueue, the callback setters and
+the game's VRAM accesses (the backend's hook, wrapped) wait for it; finish /
+signal callbacks are queued and called on the game's thread at its next
+preemption point; the present and the reports are posted to it
+(`psp_ge_post`); an APT hook drains it before HOME / sleep / exit.
+`sdmc:/psp2i/ge_sync` keeps lists in the game's calls. The log's `core2:`
+line: the worker's busy ms/s and the game's waits by reason. Console, same
+build, same route, 135 s each (A/B by the switch), fps by draws a frame:
+
+| draws/f | in the game's calls | on core 2 |
+|---|---|---|
+| 350-399 | 11.7 | 14.3 |
+| 400-449 | 8.6 | 11.8 |
+| 450-549 | 4.7-5.5 | 8.9-9.2 |
+| 650-799 | 5.3-5.7 | 8.7-10.5 |
+| 1,200-2,450 | 3.0-4.0 | 6.0-9.0 |
+
+The game waits for core 2 once a frame, at its DrawSync (0-300 ms/s);
+callbacks 40-60 a second, none dropped; no hang or wrong picture reported
+in either run. **Core 2 is now the bottleneck** above ~450 draws: busy
+850-1,050 ms/s while the game's thread idles or waits. So the GE's own work
+(list commands, the remaining CPU vertex work, citro3d submission) is what
+to cut next; the PICA skinning (28b8ff9) lowers exactly that, so merge both
+and measure again. Not checked: in Azahar three of the four mode-select
+labels drew as dark bars; whether the synchronous build does the same
+wasn't compared.
+
 **Next:** what's left on the CPU's vertex path is the skinned, lit
 characters (`vtx:` w4 l2, ~100-150 ms/s in busy scenes): skinning and
 lighting on the PICA next; then GE on core 2 (O4b) and the console baseline
