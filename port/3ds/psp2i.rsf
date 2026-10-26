@@ -6,7 +6,8 @@
 # host title has. 178 MB (Dev1) is left out on purpose: it takes memory from
 # the system and the HOME menu.
 #
-# Values come in from makerom -D: APP_TITLE, APP_PRODUCT_CODE, APP_UNIQUE_ID.
+# Values come in from makerom -D: APP_TITLE, APP_PRODUCT_CODE, APP_UNIQUE_ID,
+# APP_COMPRESS (CMakeLists.txt: false when the code passes 32 MiB).
 
 BasicInfo:
   Title                   : $(APP_TITLE)
@@ -22,7 +23,7 @@ Option:
   FreeProductCode         : true
   MediaFootPadding        : false
   EnableCrypt             : false
-  EnableCompress          : true
+  EnableCompress          : $(APP_COMPRESS)
 
 AccessControlInfo:
   CoreVersion                   : 2

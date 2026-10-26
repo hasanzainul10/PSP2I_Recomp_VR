@@ -42,8 +42,9 @@ port/implemented.txt
 # ---- builds and third-party binaries -----------------------------------------
 FinalBuild/
 port/build/
-port/build-*/
-build/
+port/build-*/build/
+port/3ds/build*/
+
 *.exe
 *.dll
 *.pdb

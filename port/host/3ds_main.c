@@ -34,6 +34,7 @@
 #include "psprecomp/mem.h"
 #include "psprecomp/render.h"
 
+#include "3ds_prof.h"
 #include "c3d_ge.h"
 #include "camera.h"
 #include "savecrypt.h"
@@ -371,6 +372,9 @@ static void time_report(double secs, uint64_t frames) {
     psp2i_diag("time: %llu frames; game %.0f ge %.0f draw %.0f wait %.0f idle %.0f; io %llu KB, ge cmds %llu",
                (unsigned long long)frames, game, ge, draw, wait, idle,
                (unsigned long long)(psp_io_bytes_read() >> 10), (unsigned long long)psp_ge_command_count());
+#ifdef PSP2I_PROFILE
+    psp2i_prof_second(game, frames, (double)(s.draws - was.draws) / f);
+#endif
     was = s;
     prim_was = prim;
     idle_was = idle_us;
@@ -490,6 +494,9 @@ int main(void)
         else say("citro3d could not start: drawing in software");
     }
     say("drawing: %s", g_gpu ? "PICA200 (citro3d)" : "software");
+#ifdef PSP2I_PROFILE
+    psp2i_prof_start();
+#endif
     g_boot_tick = svcGetSystemTick();
     script_load();
     for (int x = 0; x < TOP_W; x++) g_sx[x] = (uint16_t)(x * SCREEN_W / TOP_W);

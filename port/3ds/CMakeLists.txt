@@ -27,6 +27,11 @@ add_custom_command(
     DEPENDS ${ASSETS}/banner.png ${ASSETS}/banner.wav
     VERBATIM)
 
+# makerom's code compression corrupts code over 32 MiB: the profiling
+# build's 34.25 MB .text started with garbage on the console and in Azahar
+# (3DS_PROGRESS.md T4). Builds that big go uncompressed.
+set(PSP2I_CIA_COMPRESS true)
+
 # A .3dsx and a .cia for `target`. The .cia carries the exheader from
 # psp2i.rsf (124 MB mode, core 2); unique_id must differ per app.
 function(psp2i_package target title description unique_id product_code)
@@ -42,7 +47,7 @@ function(psp2i_package target title description unique_id product_code)
                 -icon ${CMAKE_CURRENT_BINARY_DIR}/${target}.smdh
                 -banner ${ASSETS}/banner.bnr
                 "-DAPP_TITLE=${title}" -DAPP_PRODUCT_CODE=${product_code}
-                -DAPP_UNIQUE_ID=${unique_id}
+                -DAPP_UNIQUE_ID=${unique_id} -DAPP_COMPRESS=${PSP2I_CIA_COMPRESS}
         DEPENDS ${target} ${PSP2I_RSF} ${CMAKE_CURRENT_BINARY_DIR}/${target}.smdh ${ASSETS}/banner.bnr
         VERBATIM)
     add_custom_target(${target}_cia ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/${target}.cia)
@@ -125,6 +130,12 @@ if(EXISTS ${PSP2I_GEN_DIR}/recomp_funcs.c)
             COMPILE_OPTIONS "-O2" COMPILE_DEFINITIONS PSPRECOMP_INLINE_MEM)
     endif()
     target_link_libraries(psp2i_game PRIVATE psprecomp)
+    # the on-console profiler (port/host/3ds_prof.c): which game functions the
+    # time goes to, in sdmc:/psp2i/profile.txt. A store per call and return.
+    option(PSP2I_PROFILE "sample the game's current function at 1 kHz on core 2" OFF)
+    if(PSP2I_PROFILE)
+        target_compile_options(psp2i_game PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/prof_game.h)
+    endif()
 
     # the GE backend's vertex shader, assembled by picasso and linked in
     ctr_add_shader_library(c3d_ge_shader ${PORT}/host/c3d_ge.v.pica OUTPUT c3d_ge.shbin)
@@ -137,12 +148,15 @@ if(EXISTS ${PSP2I_GEN_DIR}/recomp_funcs.c)
     dkp_add_embedded_binary_library(c3d_test_shader_bin c3d_test_shader)
 
     add_executable(psp2i ${PORT}/host/3ds_main.c ${PORT}/host/c3d_ge.c ${PORT}/host/camera.c
-                         ${PORT}/host/savecrypt.c)
+                         ${PORT}/host/savecrypt.c ${PORT}/host/3ds_prof.c)
     target_compile_options(psp2i PRIVATE -O2 -Wall -Wno-format)
-    target_compile_definitions(psp2i PRIVATE PSP2I_3DS)
+    target_compile_definitions(psp2i PRIVATE PSP2I_3DS $<$<BOOL:${PSP2I_PROFILE}>:PSP2I_PROFILE>)
     target_include_directories(psp2i PRIVATE ${PORT}/host)
     target_link_libraries(psp2i PRIVATE c3d_ge_shader_bin c3d_test_shader_bin psp2i_game psprecomp citro3d ctru m)
     target_link_options(psp2i PRIVATE -Wl,--gc-sections -Wl,-Map=${CMAKE_CURRENT_BINARY_DIR}/psp2i.map)
+    if(PSP2I_PROFILE)
+        set(PSP2I_CIA_COMPRESS false)
+    endif()
     psp2i_package(psp2i "PSP2i Recomp" "Phantasy Star Portable 2 Infinity" 0xF5221 CTR-P-P2I3)
     message(STATUS "PSP2i 3DS: building the game from ${PSP2I_GEN_DIR}")
 else()
