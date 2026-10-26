@@ -1,0 +1,46 @@
+; The GE's vertices untransformed on the PICA200 (c3d_ge.c c3d_draw_raw,
+; psprecomp's psp_gpu_raw_draw): the position as stored (8/16-bit or float)
+; times one matrix per draw -- the GE's world, view and projection, its
+; viewport, and the target's pixels and depth mapped as c3d_ge.v.pica maps
+; them -- so the CPU neither transforms nor clips these vertices.
+
+.fvec m[4]              ; rows of the position matrix
+.fvec uvk               ; texture coordinates to 0..1: scale u, v, offset u, v
+.fvec uvfix             ; 65536 where unsigned 16-bit coordinates were read as signed, else 0
+
+.constf k(0.0, 0.00392156863, 1.0, 0.0)                 ; 0, 1/255, 1
+.alias zero k.xxxx
+.alias one  k.zzzz
+
+.out outpos position
+.out outuv  texcoord0
+.out outclr color
+
+.alias inpos v0         ; x, y, z as stored (8/16-bit: a fourth, padding component; w is set to 1)
+.alias inuv  v1         ; u, v as stored
+.alias inclr v2         ; r, g, b, a (0..255)
+
+; Every output register is written whole (mask xyzw), from temporaries: a
+; partly written output locked up the console's GPU (c3d_ge.v.pica).
+.entry main_raw
+.proc main_raw
+    mov r4, inpos
+    mov r4.w, one
+    dp4 r0.x, m[0], r4
+    dp4 r0.y, m[1], r4
+    dp4 r0.z, m[2], r4
+    dp4 r0.w, m[3], r4
+    mov outpos, r0
+
+    slt r1, inuv, zero          ; 1 where negative (a 16-bit coordinate over 32767)
+    mul r1, uvfix, r1
+    add r1, inuv, r1
+    mul r2, uvk.xyxy, r1
+    add r2, uvk.zwzw, r2
+    mov r2.zw, zero
+    mov outuv, r2
+
+    mul r3, k.yyyy, inclr
+    mov outclr, r3
+    end
+.end
