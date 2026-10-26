@@ -113,9 +113,7 @@ static const char *const UP_NAMES[3] = { "new", "rows", "changed" };
 typedef struct {
     int used;
     uint32_t off;
-    void *buf[2];                                /* RT_W x RT_H, 16-bit depth like the PSP's: the copy
-                                                    in VRAM bank A, in bank B (made when a draw needs it) */
-    int cur;                                     /* the copy with the latest values; -1: none yet */
+    void *buf;                                   /* RT_W x RT_H, 16-bit depth like the PSP's */
     uint64_t last_use;
 } depth_entry;
 
@@ -567,20 +565,7 @@ static void rt_check(rt_entry *t) {
 
 /* ---- depth buffers ---------------------------------------------------------------------- */
 
-/* The depth buffer for a draw into a target whose colour buffer is in VRAM
- * bank colour_b (0 A, 1 B). The PICA200 locks up -- the whole console, Rosalina
- * included -- drawing with its colour and depth buffers in the same VRAM bank:
- * the game's first draw (a clear with depth) froze the console every time,
- * and citro3d's own C3D_RenderTargetCreate puts depth in the opposite bank
- * (3DS_PROGRESS.md, T4). Azahar doesn't mind. So the depth buffer has a copy
- * in each bank, made when a draw first needs it; switching banks copies the
- * latest values over on the GPU. Targets that share one depth buffer usually
- * sit in the same bank, which needs no copy. */
-static uint64_t n_depth_copies;
-
-static void *depth_get(uint32_t off, int colour_b) {
-    const int want = !colour_b;
-    const uint32_t size = RT_W * RT_H * 2;
+static void *depth_get(uint32_t off) {
     depth_entry *d = NULL;
     for (int i = 0; i < MAX_DEPTH; i++) if (g_depth[i].used && g_depth[i].off == off) d = &g_depth[i];
     if (!d) {
@@ -589,37 +574,23 @@ static void *depth_get(uint32_t off, int colour_b) {
             d = &g_depth[0];
             for (int i = 1; i < MAX_DEPTH; i++) if (g_depth[i].last_use < d->last_use) d = &g_depth[i];
             gpu_finish();                        /* a queued draw may still use it */
-            for (int i = 0; i < MAX_RT; i++)
-                if (g_rt[i].used && g_rt[i].depth && (g_rt[i].depth == d->buf[0] || g_rt[i].depth == d->buf[1]))
-                    g_rt[i].depth = NULL;
+            for (int i = 0; i < MAX_RT; i++) if (g_rt[i].used && g_rt[i].depth == d->buf) g_rt[i].depth = NULL;
+        } else {
+            d->buf = vramAlloc(RT_W * RT_H * 2);
+            if (!d->buf) {
+                fprintf(stderr, "c3d: no VRAM for a depth buffer (%lu KB free)\n", (unsigned long)(vramSpaceFree() >> 10));
+                return NULL;
+            }
         }
-        d->off = off; d->used = 1; d->cur = -1;  /* its values: cleared below */
-    }
-    if (!d->buf[want]) {
-        d->buf[want] = vramAllocAt(size, want ? VRAM_ALLOC_B : VRAM_ALLOC_A);
-        if (!d->buf[want]) {
-            fprintf(stderr, "c3d: no VRAM in bank %c for a depth buffer (%lu KB free)\n", want ? 'B' : 'A',
-                    (unsigned long)(vramSpaceFree() >> 10));
-            return NULL;
-        }
-    }
-    if (d->cur < 0) {
         /* cleared to 0, as gl_ge.c does a new one: by the GPU's fill engine,
          * since the CPU's view of VRAM isn't kept in step (see staging_from) */
         before_cpu_write(g_seg);
-        C3D_SyncMemoryFill((u32 *)d->buf[want], 0, (u32 *)((uint8_t *)d->buf[want] + size),
+        C3D_SyncMemoryFill((u32 *)d->buf, 0, (u32 *)((uint8_t *)d->buf + RT_W * RT_H * 2),
                            GX_FILL_TRIGGER | GX_FILL_16BIT_DEPTH, NULL, 0, NULL, 0);
-        d->cur = want;
-    } else if (d->cur != want) {
-        gpu_finish();                            /* the draws on the other copy first */
-        const int pb = prof(P_WAIT);
-        C3D_SyncTextureCopy((u32 *)d->buf[d->cur], 0, (u32 *)d->buf[want], 0, size, GX_TRANSFER_RAW_COPY(1));
-        prof(pb);
-        d->cur = want;
-        n_depth_copies++;
+        d->off = off; d->used = 1;
     }
     d->last_use = ++g_use;
-    return d->buf[want];
+    return d->buf;
 }
 
 /* ---- textures ----------------------------------------------------------------------------- */
@@ -1252,7 +1223,7 @@ static int c3d_draw_on(const psp_gpu_state *st, const psp_gpu_vertex *v, int nve
 
     DPART(D_TARGET);
     void *depth = NULL;
-    if (st->zb_stride && (st->ztest || (st->clear && (st->clear_which & 4)))) depth = depth_get(vram_off(st->zb_addr), vram_bank(t->tex.data) == 'B');
+    if (st->zb_stride && (st->ztest || (st->clear && (st->clear_which & 4)))) depth = depth_get(vram_off(st->zb_addr));
 
     C3D_Tex *tex = NULL;
     float uvs[2] = { 1, 1 };
@@ -1802,7 +1773,6 @@ void c3d_ge_report(FILE *out) {
             (unsigned long long)n_readbacks, (unsigned long long)n_tex_decodes, texs, (unsigned long)(g_tex_bytes >> 10),
             (unsigned long long)n_rt_tex, (unsigned long long)n_approx, (unsigned long long)n_fail,
             (unsigned long long)n_evict, (unsigned long long)n_xfer, (unsigned long long)n_skip, rts, depths, (unsigned long)(linearSpaceFree() >> 10), (unsigned long)(vramSpaceFree() >> 10));
-    fprintf(out, "c3d: depth copies between VRAM banks %llu\n", (unsigned long long)n_depth_copies);
     {   /* where a draw's time goes, since the last report (nested waits and decodes included) */
         static uint64_t was[D_N], draws_was;
         const double nd = n_draws > draws_was ? (double)(n_draws - draws_was) : 1.0, us = 1e6 / SYSCLOCK_ARM11 / nd;

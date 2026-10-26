@@ -33,7 +33,12 @@ vertex data, the shbin's layout and operand descriptor count. One trap in
 the self-test itself: `C3D_BindProgram` ignores the program already bound,
 so variants sharing one `shaderProgram_s` all ran the first one.
 
-**Next:** take out the depth-bank copies (same-bank works), then the console
+**Depth-bank copies taken out (2026-10-26, console):** `depth+texture` went
+from 70 to 6 us a draw and GPU finishes from 3 a frame to 0; `wait` from
+150-200 to 115-155 ms/s. Field still ~6 fps (340-730 draws a frame in that
+run): **game code is now 600-690 ms/s**, the bottleneck on the console.
+
+**Next:** the console
 baseline route (spawn stand-still 30 s, busy spots), then the present wait
 and O4b (GE on core 2). The user's Azahar save is on the console's SD
 (`GameData/ms/PSP/SAVEDATA/NPJH50332`, `NPJH50332SC`); the save the console
