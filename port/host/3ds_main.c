@@ -331,7 +331,7 @@ static void read_pad(void) {
 /* ---- once per vblank, on the scheduler's clock --------------------------------- */
 
 static u64 g_stat_tick;
-static u64 g_hook_ticks;                  /* on_vblank's own time, for time_report */
+static u64 g_hook_ticks, g_hook_was;      /* on_vblank's own time, for time_report */
 static uint64_t g_stat_flips;
 
 static uint64_t ticks_now(void) { return svcGetSystemTick(); }
@@ -340,7 +340,7 @@ static uint64_t ticks_now(void) { return svcGetSystemTick(); }
  * target traffic per frame: the bottom screen's lines 2-4 and the log. */
 static void time_report(double secs, uint64_t frames) {
     static c3d_ge_stats was;
-    static uint64_t prim_was, idle_was, list_was, lprim_was, cb_was, hook_was, ph_was[3];
+    static uint64_t prim_was, idle_was, list_was, lprim_was, cb_was, ph_was[3];
     c3d_ge_stats s;
     c3d_ge_stats_get(&s);
     const uint64_t prim = psp_gpu_prim_ticks(), idle_us = psp_sched_idle_us();
@@ -355,6 +355,18 @@ static void time_report(double secs, uint64_t frames) {
     /* idle: no PSP thread runnable (waiting for the next vblank) */
     const double idle = (double)(idle_us - idle_was) / 1000.0 / secs;
     double game = 1000.0 - idle - ge - backend - pres;
+    /* With the GE on core 2 (psp_ge_async_start) ge, the backend and the
+     * present ran there: the game's thread lost only its waits for the worker
+     * (and the vblank hook) */
+    static psp_ge_async_stats as_was;
+    psp_ge_async_stats as;
+    psp_ge_async_stats_get(&as);
+    double waited = 0, waited_n = 0;
+    for (int k = 0; k < PSP_GE_WAIT_N; k++) {
+        waited += (double)(as.wait_us[k] - as_was.wait_us[k]) / 1000.0 / secs;
+        waited_n += (double)(as.waits[k] - as_was.waits[k]);
+    }
+    if (psp_ge_async_on()) game = 1000.0 - idle - waited - (double)(g_hook_ticks - g_hook_was) * ms;
     if (game < 0) game = 0;
     /* 40 columns: ms/s on two lines, then per frame */
     printf("game %3.0f ge %3.0f draw %3.0f wait %3.0f  \n"
@@ -382,12 +394,29 @@ static void time_report(double secs, uint64_t frames) {
                      p = (double)(lprim - lprim_was) * us, c = (double)(cb - cb_was) * us;
         /* and the vblank hook (this function's caller: present, the pad, this report) */
         fprintf(stderr, "gelist: ms/s lists %.0f = prims %.0f + callbacks %.0f + commands %.0f; vblank hook %.0f\n",
-                l, p, c, l - p - c, (double)(g_hook_ticks - hook_was) * ms);
-        hook_was = g_hook_ticks;
+                l, p, c, l - p - c, (double)(g_hook_ticks - g_hook_was) * ms);
+        g_hook_was = g_hook_ticks;
         list_was = list;
         lprim_was = lprim;
         cb_was = cb;
     }
+    /* the worker on core 2: its busy time (lists and posted host work) and the
+     * game thread's waits for it, by reason (ms/s, and how many) */
+    if (psp_ge_async_on()) {
+        static const char *const WHY[PSP_GE_WAIT_N] = { "sync", "vram", "full", "slot", "host", "other" };
+        char line[256];
+        int at = snprintf(line, sizeof line, "core2: busy %.0f ms/s, %.0f jobs/f; game waited %.0f ms/s (%.0f/f):",
+                          (double)(as.worker_us - as_was.worker_us) / 1000.0 / secs,
+                          (double)(as.jobs - as_was.jobs) / f, waited, waited_n / f);
+        for (int k = 0; k < PSP_GE_WAIT_N && at < (int)sizeof line - 32; k++)
+            if (as.waits[k] != as_was.waits[k])
+                at += snprintf(line + at, sizeof line - (size_t)at, " %s %.0f (%llu)", WHY[k],
+                               (double)(as.wait_us[k] - as_was.wait_us[k]) / 1000.0 / secs,
+                               (unsigned long long)(as.waits[k] - as_was.waits[k]));
+        fprintf(stderr, "%s; callbacks %llu%s\n", line, (unsigned long long)(as.callbacks - as_was.callbacks),
+                as.cb_dropped ? " (some dropped)" : "");
+    }
+    as_was = as;
 #ifdef PSP2I_PROFILE
     psp2i_prof_second(game, frames, (double)(s.draws - was.draws) / f);
 #endif
@@ -427,6 +456,30 @@ static void time_report(double secs, uint64_t frames) {
     for (int k = 0; k < 3; k++) ph_was[k] = ph[k];
 }
 
+/* The parts of the vblank hook that use the GE's backend, as jobs for the GE
+ * worker (psp_ge_post: in order with the lists; without the worker, now). */
+static void present_job(const void *p) {
+    const uint32_t *a = (const uint32_t *)p;              /* addr, stride, fmt, vblank no */
+    if (a[3] <= 10) psp2i_diag("present %lu: fb %08lX stride %lu fmt %lu", (unsigned long)a[3],
+                               (unsigned long)a[0], (unsigned long)a[1], (unsigned long)a[2]);
+    c3d_ge_present(a[0], a[1], (int)a[2]);
+    if (a[3] <= 10) psp2i_diag("present %lu done", (unsigned long)a[3]);
+}
+
+typedef struct { double secs, fps; uint64_t frames; } second_args;
+static void second_job(const void *p) {
+    const second_args *a = (const second_args *)p;
+    consoleSelect(&g_bottom);
+    /* lines 1-4, the cursor kept where the log is */
+    printf("\x1b[s\x1b[1;1H%.1f fps  heap %lu KiB used   \n", a->fps, used_kib());
+    if (g_gpu) time_report(a->secs, a->frames);
+    printf("\x1b[u");
+    gfxFlushBuffers();                        /* the bottom screen's text */
+    fflush(stderr);
+}
+
+static void report_job(const void *p) { (void)p; c3d_ge_report(stderr); }
+
 static void on_vblank_on(void);
 static void on_vblank(void) {
     const u64 t0 = svcGetSystemTick();
@@ -459,23 +512,19 @@ static void on_vblank_on(void) {
     const int show = every || flip != shown || ++since >= 6;
     if (show) { shown = flip; since = 0; }
     if (show && g_gpu) {
-        uint32_t addr, stride, fmt;
-        psp_display_get(&addr, &stride, &fmt);
-        if (nv <= 10) psp2i_diag("present %d: fb %08lX stride %lu fmt %lu", nv, (unsigned long)addr,
-                                 (unsigned long)stride, (unsigned long)fmt);
-        c3d_ge_present(addr, stride, (int)fmt);
-        if (nv <= 10) psp2i_diag("present %d done", nv);
+        uint32_t a[4];
+        psp_display_get(&a[0], &a[1], &a[2]);
+        a[3] = (uint32_t)nv;
+        psp_ge_post(present_job, a, sizeof a);
     } else if (show) present();
     const u64 now = svcGetSystemTick();
     if (now - g_stat_tick >= SYSCLOCK_ARM11) {            /* once a second */
         PSP2I_PROF_MARK(0x38);
         const uint64_t flips = psp_display_flips();
-        consoleSelect(&g_bottom);
-        /* lines 1-4, the cursor kept where the log is */
-        printf("\x1b[s\x1b[1;1H%.1f fps  heap %lu KiB used   \n",
-               (double)(flips - g_stat_flips) * SYSCLOCK_ARM11 / (double)(now - g_stat_tick), used_kib());
-        if (g_gpu) time_report((double)(now - g_stat_tick) / SYSCLOCK_ARM11, flips - g_stat_flips);
-        printf("\x1b[u");
+        const second_args sa = { (double)(now - g_stat_tick) / SYSCLOCK_ARM11,
+                                 (double)(flips - g_stat_flips) * SYSCLOCK_ARM11 / (double)(now - g_stat_tick),
+                                 flips - g_stat_flips };
+        psp_ge_post(second_job, &sa, sizeof sa);
         g_stat_flips = flips;
         g_stat_tick = now;
         /* sdmc:/psp2i/dumpframes holds seconds ("6 9 12"): every draw of the
@@ -490,6 +539,7 @@ static void on_vblank_on(void) {
         int dump_now = 0;
         for (int k = 0; k < ndump; k++) dump_now |= dump_at[k] == secs;
         if (dump_now) {
+            psp_ge_drain(PSP_GE_WAIT_HOST);
             char path[64];
             snprintf(path, sizeof path, BASE "/dump_%02d.txt", secs);
             psp_gpu_dump_next_frame(path);
@@ -508,18 +558,25 @@ static void on_vblank_on(void) {
                 psp_display_get(&addr, &stride, &fmt);
                 char path[64];
                 snprintf(path, sizeof path, BASE "/shot_%03d.ppm", secs);
+                psp_ge_drain(PSP_GE_WAIT_HOST);
                 if (g_gpu) c3d_ge_capture(addr, stride, (int)fmt, path);
             }
         if (secs % 10 == 0) {
             psp_sched_stack_report(stderr);   /* each thread's peak, to size the stacks */
-            if (g_gpu) c3d_ge_report(stderr);
+            if (g_gpu) psp_ge_post(report_job, NULL, 0);
         }
-        gfxFlushBuffers();                    /* the bottom screen's text */
-        fflush(stderr);
     }
 }
 
 /* ---- start-up ------------------------------------------------------------------- */
+
+/* HOME menu, sleep, close: the GE worker finishes its jobs before the app
+ * gives up the GPU (aptMainLoop calls this on the game's thread first). */
+static aptHookCookie g_apt_cookie;
+static void apt_hook(APT_HookType hook, void *param) {
+    (void)param;
+    if (hook == APTHOOK_ONSUSPEND || hook == APTHOOK_ONSLEEP || hook == APTHOOK_ONEXIT) psp_ge_drain(PSP_GE_WAIT_HOST);
+}
 
 int main(void)
 {
@@ -584,6 +641,14 @@ int main(void)
     camera_init(1.0f);
     psp_gpu_set_clock(ticks_now);                         /* the GE's share of time_report */
     psp_sched_set_vblank_hook(on_vblank);
+    /* The GE's lists on core 2 (O4b, 3DS_PROGRESS.md T4), beside the game as
+     * on the PSP; sdmc:/psp2i/ge_sync: inside the game's calls, as before */
+    if (g_gpu && stat(BASE "/ge_sync", &st) != 0) {
+        if (psp_ge_async_start(2) == 0) {
+            aptHook(&g_apt_cookie, apt_hook, NULL);
+            say("GE lists on core 2");
+        } else say("GE worker could not start: lists in the game's calls");
+    } else say("GE lists in the game's calls");
     say("ready: heap %lu KiB used of %lu", used_kib(), (unsigned long)(__ctru_heap_size >> 10));
 
     static const char boot_path[] = "disc0:/PSP_GAME/SYSDIR/EBOOT.BIN";
@@ -593,6 +658,7 @@ int main(void)
     psp2i_diag("psp_sched_run");
     const int rc = psp_sched_run(mi.entry, (uint32_t)sizeof boot_path, argp, 0x20, 0x40000, mi.gp);
 
+    psp_ge_async_stop();
     say("the game ended (%d); heap %lu KiB used", rc, used_kib());
     if (g_report) psp_sched_stack_report(g_report);
     psp_sched_stack_report(stderr);
