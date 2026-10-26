@@ -210,9 +210,20 @@ both ways and hold few seconds each, so the VFPU locals' own gain is within
 the run-to-run noise here (heaps after the code 62,320 / 62,232 KiB: the
 locals cost 88 KiB). Picture not reported wrong in either run.
 
-**Next:** a profile of the full build on the field (does the VFPU
-culling still lead?), then a longer same-route A/B if the locals' share
-matters. The previous Next: the game code (more hot
+**The game's thread, profiled on the full VFPU build (`psp2i_t4_profile6`,
+console, field, 10 windows at 300-2,583 draws; against the merged build's 8
+windows):** 08D8B864 10.9% -> **2.2%**; 08D8BA7C 6.1 -> 6.8%, 08D921F8
+3.7 -> 4.2%, 08D920A0 3.2 -> 3.7% (about unchanged: their time isn't in
+the prefix check or the helpers); idle 7.9 -> 7.7%; **sceGeDrawSync 4.9 ->
+17.6%**. Core 2 on the field: busy 726 ms/s, the game waited for it 312
+ms/s. So the game's thread now mostly waits for core 2 at DrawSync: **the
+GE work on core 2 is the limit again.** (`profile.txt` is appended to at
+each run: this run's windows start at its last `window 0`.)
+
+**Next:** cut core 2's GE work (list commands, the CPU vertex work left,
+citro3d submission; its `prims:` / `gelist:` lines say where), then the
+three VFPU functions above, which need a closer look at what they spend on
+(memory reads?). The previous Next: the game code (more hot
 functions, O3 on more of them), the sound mixer, the GE commands it still
 waits for; then the console baseline route (spawn stand-still 30 s, busy
 spots). The user's Azahar save is on the console's SD
