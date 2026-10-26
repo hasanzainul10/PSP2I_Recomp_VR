@@ -193,9 +193,26 @@ cutscene, drawn right. `.text` 29.48 MB (1+2), 29.57 MB (1-3).
 `port/3ds/build.sh` takes `-Dopt=value` (kept in the cache):
 `-DPSP2I_HOT_VLOCALS=OFF` rebuilds only the four hot files.
 
-**Next:** the console A/B on the field: `psp2i_t4_vfpu12.cia` (1+2) and
-`psp2i_t4_vfpu.cia` (1-3) against the merged build's numbers above, then
-a profile. The previous Next: the game code (more hot
+**Console, field, fps by draws a frame (seconds in the bucket):**
+
+| draws | merged | 1+2 (`vfpu12`, 80 s) | 1-3 (`vfpu`, 59 s) |
+|---|---|---|---|
+| 300-349 | 14.8 | 16.5 (2) | 19.8 (4) |
+| 350-399 | 14.3 | 16.4 (5) | 19.3 (8) |
+| 400-449 | 13.1 | 19.3 (17) | 15.1 (7) |
+| 450-499 | 11.8 | 13.6 (12) | 13.6 (5) |
+| 500-549 | 12.0 | - | 15.0 (2) |
+| 550-599 | 11.7 | 13.5 (4) | 12.8 (4) |
+
+Game time 42-63 ms a frame (1+2) and 42-70 ms (1-3), from ~55-75. Both
+builds are clearly faster than the merged one; between them the buckets go
+both ways and hold few seconds each, so the VFPU locals' own gain is within
+the run-to-run noise here (heaps after the code 62,320 / 62,232 KiB: the
+locals cost 88 KiB). Picture not reported wrong in either run.
+
+**Next:** a profile of the full build on the field (does the VFPU
+culling still lead?), then a longer same-route A/B if the locals' share
+matters. The previous Next: the game code (more hot
 functions, O3 on more of them), the sound mixer, the GE commands it still
 waits for; then the console baseline route (spawn stand-still 30 s, busy
 spots). The user's Azahar save is on the console's SD
