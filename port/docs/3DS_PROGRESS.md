@@ -145,8 +145,23 @@ core 2 alone: 14.3 / 11.8 / 8.9-9.2 at 450-549). Picture checked by the
 user. Core 2 is busy ~460-520 ms/s and the game waits for it ~20-30 ms/s:
 **the game's own thread is the limit now** (~55-75 ms a frame).
 
-**Next:** the game's thread: profile it again (PSP2I_PROFILE; the GE's
-share is off it now) and cut what it shows: the game code (more hot
+**The game's thread, profiled on the merged build (console, field, 8
+windows at 316-1,446 draws):** game function 08D8B864 10.9%, 08D8BA7C 6.1%,
+08D921F8 3.7%, 08D920A0 3.2% (~24% together, all hot-listed), idle 7.9%,
+sceGeDrawSync 4.9% (waiting for core 2), the sound mixer 0.9%, the rest
+spread thin. All four are the game's own VFPU culling and vertex
+transforms: 08D8B864 loads 16-bit positions (lh), vtfm4, compares them with
+the view volume (vsge / vslt, vmin / vmax out-codes) and writes indices;
+08D8BA7C tests bounding boxes (vscl, vmin / vmax, vsge / vslt); 08D920A0
+transforms (vtfm4 x 8, called from 08D92F50, 08D93464, 08D93560,
+08D935D4); 08D921F8 is another such test. In the generated C every VFPU
+operation reads and writes `psp_cpu.v[]` in memory behind a run-time
+prefix check (`psp_vfpu_pfx_any`), and mtv / mfv / vi2f / vconv are calls.
+
+**Next:** the recompiler's VFPU code (allegrexrecomp): the prefix state
+known at each instruction at compile time (the prefixes are instructions
+just before it), VFPU registers in C locals in hot functions as O3 does for
+the MIPS ones, mtv / mfv / vi2f / vconv inline. The previous Next: the game code (more hot
 functions, O3 on more of them), the sound mixer, the GE commands it still
 waits for; then the console baseline route (spawn stand-still 30 s, busy
 spots). The user's Azahar save is on the console's SD
