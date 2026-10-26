@@ -82,9 +82,15 @@ ms per frame 107 -> 87 / 112 -> 91 / 123 -> 107. "wait" fell from ~130 to
 the GPU wait moved somewhere untimed. The mixer now goes through host
 pointers, bit-exact (psprecomp 6f5fd3d, `tests/test_sas.c`).
 
-**Next:** find where the prims' ~300 ms/s of "ge" goes now (time the
-citro3d calls inside a draw; probably the GPU's own speed showing), then
-the console baseline route (spawn stand-still 30 s, busy spots), the
+**The draw path, split (2b6ae54, console, field, 400-499 draws, 5.8
+fps):** vertices (the CPU's transform) ~42 ms a frame, the backend
+(citro3d draws and waits) ~20, the triangles' assembly (CPU clip, cull,
+collect) ~12, setup and state ~1.5, nothing else (the log's `prims:` line).
+
+**Next:** move the vertex transform to the PICA's vertex shader for the
+common draws (unskinned, unlit: ~42,000 vertices a frame), which also lets
+the PICA clip and cull in place of the assembly pass (~54 ms a frame
+together); then GE on core 2 (O4b) and the console baseline route (spawn stand-still 30 s, busy spots), the
 present wait and O4b (GE on core 2). The user's Azahar save is on the console's SD
 (`GameData/ms/PSP/SAVEDATA/NPJH50332`, `NPJH50332SC`); the save the console
 made on 2026-10-26 is backed up off the console.
