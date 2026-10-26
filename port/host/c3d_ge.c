@@ -154,6 +154,14 @@ static uint64_t    g_draw_seq;
 /* c3d_draw_on's parts, ticks (D_* below; the c3d report gives us per draw) */
 enum { D_TARGET, D_TEXTURE, D_RING, D_STATE, D_SUBMIT, D_ROWS, D_N };
 static uint64_t g_dt[D_N];
+/* c3d_draw_raw_on's parts, ticks (R_* below; the c3d report gives us per
+ * draw): the target, depth and texture lookups, ring room and the citro3d
+ * state, the vertex packing, the attribute layout and booleans, the uniforms,
+ * the submit, the rows */
+enum { R_TARGET, R_TEXTURE, R_STATE, R_PACK, R_LAYOUT, R_UNIF, R_SUBMIT, R_ROWS, R_N };
+static uint64_t g_rdt[R_N], g_rtk;
+static uint64_t n_raw_skin, n_raw_lit;
+#define RPART(p) do { const uint64_t tn_ = svcGetSystemTick(); g_rdt[p] += tn_ - g_rtk; g_rtk = tn_; } while (0)
 static uint64_t g_hash_ticks, g_hash_n, g_hash_bytes, g_fill_ticks, g_tex_evictions, g_hash_skip;   /* tex_get's checks */
 
 static uint64_t n_draws, n_tris, n_uploads, n_readbacks, n_tex_decodes, n_rt_tex, n_approx,
@@ -1426,6 +1434,7 @@ static int raw_submit(const psp_gpu_raw_draw *d, float tw, float th, const float
     raw_pack(d, &l, vb);
     void *ib = NULL;
     if (d->index) { ib = raw_alloc(ibytes); memcpy(ib, d->index, ibytes); }
+    RPART(R_PACK);
 
     /* in register order, so attribute i is v_i (v3 left out when unlit) */
     static const GPU_FORMATS PF[4] = { GPU_FLOAT, GPU_BYTE, GPU_SHORT, GPU_FLOAT };
@@ -1459,6 +1468,7 @@ static int raw_submit(const psp_gpu_raw_draw *d, float tw, float th, const float
     C3D_BoolUnifSet(GPU_VERTEX_SHADER, ub_light, d->light != NULL);
     g_raw_mode = 1;
     cs_cull(pica_cull(d->cull));
+    RPART(R_LAYOUT);
 
     /* The matrix: the GE's clip space (mvp x the skinned position) to the
      * PICA's, as the screen path maps the runtime's screen vertices:
@@ -1495,6 +1505,9 @@ static int raw_submit(const psp_gpu_raw_draw *d, float tw, float th, const float
         unif_lights(d->light);
     }
 
+    if (d->bones) n_raw_skin++;
+    if (d->light) n_raw_lit++;
+    RPART(R_UNIF);
     static const GPU_Primitive_t PRIM[3] = { GPU_TRIANGLES, GPU_TRIANGLE_STRIP, GPU_TRIANGLE_FAN };
     const GPU_Primitive_t prim = PRIM[d->prim - 3];
     DIAG("c3d: raw draw %lu of %lu vertices, prim %d, stride %lu (pos %d tex %d colour %d normal %d weights %d x %d), %s",
@@ -1504,14 +1517,17 @@ static int raw_submit(const psp_gpu_raw_draw *d, float tw, float th, const float
          ib ? (d->index_size == 1 ? "8-bit indices" : "16-bit indices") : "no indices");
     if (ib) C3D_DrawElements(prim, (int)d->count, d->index_size == 1 ? C3D_UNSIGNED_BYTE : C3D_UNSIGNED_SHORT, ib);
     else C3D_DrawArrays(prim, 0, (int)d->count);
+    RPART(R_SUBMIT);
     return 0;
 }
 
 static int c3d_draw_raw_on(const psp_gpu_state *st, const psp_gpu_raw_draw *d) {
     if (!g_ok || st->clear || (st->fb_addr & 0x0F000000u) != 0x04000000u || !st->fb_stride || st->fb_stride > RT_W)
         return 1;
+    g_rtk = svcGetSystemTick();
     rt_entry *t = draw_target(st);
     if (!t) return 1;
+    RPART(R_TARGET);
     void *depth = NULL;
     if (st->zb_stride && st->ztest) depth = depth_get(vram_off(st->zb_addr));
     C3D_Tex *tex = NULL;
@@ -1520,6 +1536,7 @@ static int c3d_draw_raw_on(const psp_gpu_state *st, const psp_gpu_raw_draw *d) {
         tex = texture_view(st, t, uvs);
         if (!tex) { n_fail++; return 1; }
     }
+    RPART(R_TEXTURE);
     {   /* room in the ring first: making it ends the frame (gpu_finish), and the target is bound after */
         raw_lay l;
         raw_layout(d, &l);
@@ -1540,6 +1557,7 @@ static int c3d_draw_raw_on(const psp_gpu_state *st, const psp_gpu_raw_draw *d) {
         C3D_TexSetWrap(tex, st->tex_clamp_u ? GPU_CLAMP_TO_EDGE : GPU_REPEAT, st->tex_clamp_v ? GPU_CLAMP_TO_EDGE : GPU_REPEAT);
         cs_tex(tex);
     }
+    RPART(R_STATE);
     if (raw_submit(d, (float)t->w, (float)t->h, uvs) != 0) return 1;
 
     uint32_t y1 = (uint32_t)st->sy1 + 1;
@@ -1551,6 +1569,7 @@ static int c3d_draw_raw_on(const psp_gpu_state *st, const psp_gpu_raw_draw *d) {
     n_raw_draws++;
     n_raw_verts += d->count;
     n_tris += d->prim == 3 ? d->count / 3 : d->count > 2 ? d->count - 2 : 0;
+    RPART(R_ROWS);
     return 0;
 }
 
@@ -2246,14 +2265,25 @@ void c3d_ge_report(FILE *out) {
     fprintf(out, "c3d: on the PICA's vertex shader: %llu draws, %llu vertices; %llu too big for its ring\n",
             (unsigned long long)n_raw_draws, (unsigned long long)n_raw_verts, (unsigned long long)n_raw_refused);
     {   /* where a draw's time goes, since the last report (nested waits and decodes included) */
-        static uint64_t was[D_N], draws_was;
-        const double nd = n_draws > draws_was ? (double)(n_draws - draws_was) : 1.0, us = 1e6 / SYSCLOCK_ARM11 / nd;
-        fprintf(out, "c3d: us per draw: target %.1f, depth+texture %.1f, ring %.1f, state %.1f, submit %.1f, rows %.1f\n",
+        static uint64_t was[D_N], draws_was, rwas[R_N], raw_was, skin_was, lit_was;
+        const uint64_t cpu_draws = n_draws - n_raw_draws;     /* the CPU-transformed draws (c3d_draw_on) */
+        const double nd = cpu_draws > draws_was ? (double)(cpu_draws - draws_was) : 1.0, us = 1e6 / SYSCLOCK_ARM11 / nd;
+        const double nr = n_raw_draws > raw_was ? (double)(n_raw_draws - raw_was) : 1.0, rus = 1e6 / SYSCLOCK_ARM11 / nr;
+        fprintf(out, "c3d: us per PICA-path draw (%.0f, %.0f%% skinned, %.0f%% lit): target %.1f, depth+texture %.1f, state %.1f, "
+                     "pack %.1f, layout %.1f, uniforms %.1f, submit %.1f, rows %.1f\n",
+                nr, 100.0 * (double)(n_raw_skin - skin_was) / nr, 100.0 * (double)(n_raw_lit - lit_was) / nr,
+                (double)(g_rdt[R_TARGET] - rwas[R_TARGET]) * rus, (double)(g_rdt[R_TEXTURE] - rwas[R_TEXTURE]) * rus,
+                (double)(g_rdt[R_STATE] - rwas[R_STATE]) * rus, (double)(g_rdt[R_PACK] - rwas[R_PACK]) * rus,
+                (double)(g_rdt[R_LAYOUT] - rwas[R_LAYOUT]) * rus, (double)(g_rdt[R_UNIF] - rwas[R_UNIF]) * rus,
+                (double)(g_rdt[R_SUBMIT] - rwas[R_SUBMIT]) * rus, (double)(g_rdt[R_ROWS] - rwas[R_ROWS]) * rus);
+        memcpy(rwas, g_rdt, sizeof rwas);
+        raw_was = n_raw_draws; skin_was = n_raw_skin; lit_was = n_raw_lit;
+        fprintf(out, "c3d: us per CPU-path draw (%.0f): target %.1f, depth+texture %.1f, ring %.1f, state %.1f, submit %.1f, rows %.1f\n", nd,
                 (double)(g_dt[D_TARGET] - was[D_TARGET]) * us, (double)(g_dt[D_TEXTURE] - was[D_TEXTURE]) * us,
                 (double)(g_dt[D_RING] - was[D_RING]) * us, (double)(g_dt[D_STATE] - was[D_STATE]) * us,
                 (double)(g_dt[D_SUBMIT] - was[D_SUBMIT]) * us, (double)(g_dt[D_ROWS] - was[D_ROWS]) * us);
         memcpy(was, g_dt, sizeof was);
-        draws_was = n_draws;
+        draws_was = cpu_draws;
         static uint64_t hn_was, ht_was, hb_was, ft_was, fr_was;
         const uint64_t fr = frame_no();
         const double nf = fr > fr_was ? (double)(fr - fr_was) : 1.0;

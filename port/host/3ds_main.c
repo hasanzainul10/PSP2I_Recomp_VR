@@ -396,6 +396,28 @@ static void time_report(double secs, uint64_t frames) {
         fprintf(stderr, "gelist: ms/s lists %.0f = prims %.0f + callbacks %.0f + commands %.0f; vblank hook %.0f\n",
                 l, p, c, l - p - c, (double)(g_hook_ticks - g_hook_was) * ms);
         g_hook_was = g_hook_ticks;
+        /* every 10 s: the GE commands per PRIM, the most frequent opcodes first
+         * (ge.c counts them; a clock read per command would cost more than one) */
+        static uint64_t cmd_was[256];
+        static int cmd_tick;
+        if (++cmd_tick >= 10) {
+            cmd_tick = 0;
+            const uint64_t *cc = psp_ge_command_counts();
+            uint64_t d[256], all = 0;
+            for (int k = 0; k < 256; k++) { d[k] = cc[k] - cmd_was[k]; all += d[k]; cmd_was[k] = cc[k]; }
+            const double prims = d[0x04] ? (double)d[0x04] : 1.0;
+            char line[384];
+            int at = snprintf(line, sizeof line, "gecmd: %.1f commands per PRIM (%llu PRIMs); per PRIM:", (double)all / prims,
+                              (unsigned long long)d[0x04]);
+            for (int n = 0; n < 12 && at < (int)sizeof line - 24; n++) {
+                int best = -1;
+                for (int k = 0; k < 256; k++) if (d[k] && (best < 0 || d[k] > d[best])) best = k;
+                if (best < 0) break;
+                at += snprintf(line + at, sizeof line - (size_t)at, " %02X %.2f", best, (double)d[best] / prims);
+                d[best] = 0;
+            }
+            fprintf(stderr, "%s\n", line);
+        }
         list_was = list;
         lprim_was = lprim;
         cb_was = cb;
