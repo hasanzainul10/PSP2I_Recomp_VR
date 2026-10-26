@@ -498,6 +498,16 @@ static void second_job(const void *p) {
     printf("\x1b[u");
     gfxFlushBuffers();                        /* the bottom screen's text */
     fflush(stderr);
+    /* every 10 s the log is closed and opened again for appending: only a
+     * close commits a file on the SD, and a run ended from the HOME menu
+     * left the previous run's log there, byte for byte (3DS_PROGRESS.md T4) */
+    /* (newlib locks the stream around both; no setvbuf after it, which other
+     * threads' writes could precede: the default buffer, flushed each second) */
+    static int reopen;
+    if (++reopen >= 10) {
+        reopen = 0;
+        if (!freopen(BASE "/psp2i_log.txt", "a", stderr)) printf("log: could not reopen psp2i_log.txt\n");
+    }
 }
 
 static void report_job(const void *p) { (void)p; c3d_ge_report(stderr); }
