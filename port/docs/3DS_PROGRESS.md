@@ -232,10 +232,29 @@ in all. So caching uniforms or the layout would save ~3 us at most. The GE
 lists: 27.8 commands a PRIM, most of them matrix data (2B bones, 3B world,
 up to 12 each per PRIM), each a full trip through the interpreter.
 
-**Next:** cut core 2's GE work: a faster `raw_pack` (per-layout copy
-without the memset), `rows_mark` by whole words, the last target and
-texture lookups reused while nothing changed them, matrix-data runs (2B,
-3B, ...) read in one go by `ge.c`; then the
+**The cuts (86c1363, psprecomp 212b33b; console, field, `psp2i_t4_cuts2`,
+379,000 draws, 17% skinned):** `raw_pack` by words, `rows_mark` /
+`pages_set` by words, a direct-mapped index in front of `tex_find`, GE
+matrix-data runs in one call (the target lookup left alone: caching it
+needs every event that changes another target's dirty rows). Per PICA-path
+draw **40.5 -> 31.9 us**: rows 7.3 -> 1.0, target 4.3 -> 2.2 (the page
+map's memset), pack 11.2 -> 9.5, depth+texture 5.7 -> 6.4 (the index
+didn't help measurably), the rest unchanged. Core 2's backend per draw
+by draw count: 300-399 35.8 -> 23.5 us, 400-499 38.6 -> 30.0, 500-599
+71 -> 40, 600-699 89 -> 43; core 2 busy at 500-699 draws 700-890 ->
+550-650 ms/s, and the game now waits for it only 12-30 ms/s. The matrix
+runs' share isn't separable here (38 commands a PRIM in this run's scenes
+against 28). Fps 17.7 / 15.4 / 12.0 / 12.0 / 10.8 (300-399 ... 700+, 43
+field seconds) against 18.0 / 18.0 / 11.0 / 10.4 / 9.3: higher where core
+2 was the limit, not at the light end, where the game's thread is. No
+wrong pictures reported. The first run of this build left no log:
+**only a close commits a file on the SD**, and a run ended from the HOME
+menu left the previous log byte for byte, so the log is now reopened
+every 10 s (47039c7).
+
+**Next:** the game's thread again (the three VFPU functions that didn't
+speed up: 08D8BA7C, 08D921F8, 08D920A0), then `raw_pack` further and the
+submit (7 us); then the
 three VFPU functions above, which need a closer look at what they spend on
 (memory reads?). The previous Next: the game code (more hot
 functions, O3 on more of them), the sound mixer, the GE commands it still
