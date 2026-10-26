@@ -54,6 +54,22 @@ static FILE *g_report;
 static int g_gpu;                        /* c3d_ge.c draws (else the software rasterizer) */
 
 /* A line to the bottom screen, the log and the report. */
+int psp2i_diag_on;
+
+void psp2i_diag(const char *fmt, ...)
+{
+    if (!psp2i_diag_on) return;
+    FILE *f = fopen(BASE "/diag.txt", "a");
+    if (!f) return;
+    fprintf(f, "%10.3f ", (double)svcGetSystemTick() / SYSCLOCK_ARM11);
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fputc('\n', f);
+    fclose(f);
+}
+
 static void say(const char *fmt, ...)
 {
     char line[256];
@@ -65,6 +81,7 @@ static void say(const char *fmt, ...)
     printf("%s\n", line);
     fprintf(stderr, "3ds: %s\n", line);
     if (g_report) { fprintf(g_report, "%s\n", line); fflush(g_report); }
+    psp2i_diag("say: %s", line);
 }
 
 static unsigned long used_kib(void)
@@ -351,6 +368,9 @@ static void time_report(double secs, uint64_t frames) {
             (double)(s.draws - was.draws) / f, (double)(s.evictions - was.evictions) / f,
             (double)(s.readbacks - was.readbacks) / f, (double)(s.uploads - was.uploads) / f,
             (double)(s.finishes - was.finishes) / f);
+    psp2i_diag("time: %llu frames; game %.0f ge %.0f draw %.0f wait %.0f idle %.0f; io %llu KB, ge cmds %llu",
+               (unsigned long long)frames, game, ge, draw, wait, idle,
+               (unsigned long long)(psp_io_bytes_read() >> 10), (unsigned long long)psp_ge_command_count());
     was = s;
     prim_was = prim;
     idle_was = idle_us;
@@ -373,12 +393,21 @@ static void time_report(double secs, uint64_t frames) {
 }
 
 static void on_vblank(void) {
+    static int nv;
+    if (psp2i_diag_on && nv < 10)
+        psp2i_diag("vblank %d: vblanks %llu flips %llu io %llu KB ge cmds %llu", nv,
+                   (unsigned long long)psp_sched_vblank_count(), (unsigned long long)psp_display_flips(),
+                   (unsigned long long)(psp_io_bytes_read() >> 10), (unsigned long long)psp_ge_command_count());
+    nv++;
     if (!aptMainLoop()) { psp_request_exit(); return; }   /* HOME > Close */
     read_pad();
     if (g_gpu) {
         uint32_t addr, stride, fmt;
         psp_display_get(&addr, &stride, &fmt);
+        if (nv <= 10) psp2i_diag("present %d: fb %08lX stride %lu fmt %lu", nv, (unsigned long)addr,
+                                 (unsigned long)stride, (unsigned long)fmt);
         c3d_ge_present(addr, stride, (int)fmt);
+        if (nv <= 10) psp2i_diag("present %d done", nv);
     } else present();
     const u64 now = svcGetSystemTick();
     if (now - g_stat_tick >= SYSCLOCK_ARM11) {            /* once a second */
@@ -440,6 +469,11 @@ int main(void)
     consoleInit(GFX_BOTTOM, &g_bottom);
     osSetSpeedupEnable(true);
     mkdir(BASE, 0777);
+    {
+        struct stat ds;
+        psp2i_diag_on = stat(BASE "/diag", &ds) == 0;
+        psp2i_diag("diag: start");
+    }
     /* the log: buffered (the SD card is slow), flushed once a second */
     if (freopen(BASE "/psp2i_log.txt", "w", stderr)) setvbuf(stderr, NULL, _IOFBF, 64 * 1024);
     g_report = fopen(BASE "/report_game.txt", "w");
@@ -495,6 +529,7 @@ int main(void)
     const uint32_t argp = psp_sysmem_alloc(0x100, 1);
     psp_mem_write_block(argp, boot_path, (uint32_t)sizeof boot_path);
     g_stat_tick = svcGetSystemTick();
+    psp2i_diag("psp_sched_run");
     const int rc = psp_sched_run(mi.entry, (uint32_t)sizeof boot_path, argp, 0x20, 0x40000, mi.gp);
 
     say("the game ended (%d); heap %lu KiB used", rc, used_kib());

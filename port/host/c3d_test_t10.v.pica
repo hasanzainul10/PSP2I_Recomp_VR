@@ -1,0 +1,15 @@
+; Self-test variant 10: variant 8's multiply writing the whole output register
+; (variant 8 writes outuv.xy only, and hung the console's GPU).
+.out outpos position
+.out outuv  texcoord0
+.out outclr color
+.alias inpos v0
+.alias inuv  v1
+.alias inclr v2
+.entry main10
+.proc main10
+    mov outpos, inpos
+    mul outuv, inuv, inuv
+    mov outclr, inclr
+    end
+.end

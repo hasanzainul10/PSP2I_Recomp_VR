@@ -1,0 +1,14 @@
+; Self-test variant 8: variant 1 with one multiply of inputs, no uniform.
+.out outpos position
+.out outuv  texcoord0
+.out outclr color
+.alias inpos v0
+.alias inuv  v1
+.alias inclr v2
+.entry main8
+.proc main8
+    mov outpos, inpos
+    mul outuv.xy, inuv.xy, inuv.xy
+    mov outclr, inclr
+    end
+.end

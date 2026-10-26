@@ -1,0 +1,15 @@
+; Self-test variant 1 (c3d_ge.c gpu_selftest): c3d_ge.v.pica's inputs and
+; outputs, passed through.
+.out outpos position
+.out outuv  texcoord0
+.out outclr color
+.alias inpos v0
+.alias inuv  v1
+.alias inclr v2
+.entry main1
+.proc main1
+    mov outpos, inpos
+    mov outuv, inuv
+    mov outclr, inclr
+    end
+.end

@@ -1,0 +1,15 @@
+; Self-test variant 2: variant 1 plus the vp uniform.
+.fvec vp
+.out outpos position
+.out outuv  texcoord0
+.out outclr color
+.alias inpos v0
+.alias inuv  v1
+.alias inclr v2
+.entry main2
+.proc main2
+    mov outpos, inpos
+    mul outuv.xy, vp.zw, inuv.xy
+    mov outclr, inclr
+    end
+.end

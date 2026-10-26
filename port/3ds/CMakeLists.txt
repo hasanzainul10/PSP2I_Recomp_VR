@@ -93,13 +93,20 @@ if(EXISTS ${PSP2I_GEN_DIR}/recomp_funcs.c)
     # with nothing after it builds all of the game's code at -Os again)
     set(PSP2I_HOT_LIST ${CMAKE_CURRENT_SOURCE_DIR}/hot_functions.txt CACHE FILEPATH
         "game functions built at -O2 with inline memory access (empty: none)")
+    # their MIPS registers in C locals (reg_locals.py; 3DS_PLAN.md "T4 speed", O3)
+    option(PSP2I_HOT_LOCALS "hot functions keep the MIPS registers in C locals" OFF)
+    set(SPLIT_LOCALS "")
+    if(PSP2I_HOT_LOCALS)
+        set(SPLIT_LOCALS locals)
+    endif()
     execute_process(COMMAND ${Python3_EXECUTABLE} ${PORT}/android/split_gen.py
-                            ${PSP2I_GEN_DIR}/recomp_funcs.c ${SPLIT_DIR} ${PSP2I_GEN_PARTS} ${PSP2I_HOT_LIST}
+                            ${PSP2I_GEN_DIR}/recomp_funcs.c ${SPLIT_DIR} ${PSP2I_GEN_PARTS} "${PSP2I_HOT_LIST}" ${SPLIT_LOCALS}
                     RESULT_VARIABLE split_rc)
     if(NOT split_rc EQUAL 0)
         message(FATAL_ERROR "split_gen.py could not split ${PSP2I_GEN_DIR}/recomp_funcs.c")
     endif()
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${PSP2I_GEN_DIR}/recomp_funcs.c ${PSP2I_HOT_LIST})
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${PSP2I_GEN_DIR}/recomp_funcs.c ${PSP2I_HOT_LIST}
+                 ${PORT}/android/split_gen.py ${PORT}/android/reg_locals.py)
     file(GLOB GEN_PARTS ${SPLIT_DIR}/recomp_part_*.c)
     file(GLOB GEN_HOT ${SPLIT_DIR}/recomp_hot_*.c)
 
@@ -121,13 +128,19 @@ if(EXISTS ${PSP2I_GEN_DIR}/recomp_funcs.c)
     # the GE backend's vertex shader, assembled by picasso and linked in
     ctr_add_shader_library(c3d_ge_shader ${PORT}/host/c3d_ge.v.pica OUTPUT c3d_ge.shbin)
     dkp_add_embedded_binary_library(c3d_ge_shader_bin c3d_ge_shader)
+    ctr_add_shader_library(c3d_test_shader ${PORT}/host/c3d_test.v.pica ${PORT}/host/c3d_test_t1.v.pica
+        ${PORT}/host/c3d_test_t2.v.pica ${PORT}/host/c3d_test_t3.v.pica ${PORT}/host/c3d_test_t4.v.pica
+        ${PORT}/host/c3d_test_t5.v.pica ${PORT}/host/c3d_test_t6.v.pica ${PORT}/host/c3d_test_t7.v.pica
+        ${PORT}/host/c3d_test_t8.v.pica ${PORT}/host/c3d_test_t9.v.pica
+        ${PORT}/host/c3d_test_t10.v.pica OUTPUT c3d_test.shbin)
+    dkp_add_embedded_binary_library(c3d_test_shader_bin c3d_test_shader)
 
     add_executable(psp2i ${PORT}/host/3ds_main.c ${PORT}/host/c3d_ge.c ${PORT}/host/camera.c
                          ${PORT}/host/savecrypt.c)
     target_compile_options(psp2i PRIVATE -O2 -Wall -Wno-format)
     target_compile_definitions(psp2i PRIVATE PSP2I_3DS)
     target_include_directories(psp2i PRIVATE ${PORT}/host)
-    target_link_libraries(psp2i PRIVATE c3d_ge_shader_bin psp2i_game psprecomp citro3d ctru m)
+    target_link_libraries(psp2i PRIVATE c3d_ge_shader_bin c3d_test_shader_bin psp2i_game psprecomp citro3d ctru m)
     target_link_options(psp2i PRIVATE -Wl,--gc-sections -Wl,-Map=${CMAKE_CURRENT_BINARY_DIR}/psp2i.map)
     psp2i_package(psp2i "PSP2i Recomp" "Phantasy Star Portable 2 Infinity" 0xF5221 CTR-P-P2I3)
     message(STATUS "PSP2i 3DS: building the game from ${PSP2I_GEN_DIR}")

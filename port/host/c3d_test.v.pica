@@ -1,0 +1,15 @@
+; The simplest vertex shader, in the shape of devkitPro's citro3d examples:
+; c3d_ge.c's diag self-test draws with it first, as a known-good reference
+; for its own shader on the console (3DS_PROGRESS.md, T4).
+
+.out outpos position
+.out outclr color
+
+.alias inpos v0         ; clip space x, y, z, w
+.alias inclr v1         ; r, g, b, a (0..1)
+
+.proc main
+    mov outpos, inpos
+    mov outclr, inclr
+    end
+.end

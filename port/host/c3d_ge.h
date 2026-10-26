@@ -28,4 +28,11 @@ void c3d_ge_stats_get(c3d_ge_stats *s);
  * target when the GPU drew it, else from emulated VRAM). 0 on success. */
 int  c3d_ge_capture(uint32_t addr, uint32_t stride, int fmt, const char *path);
 
+/* With sdmc:/psp2i/diag present (3ds_main.c): one line appended to
+ * sdmc:/psp2i/diag.txt, the file closed after each so a line survives a
+ * freeze of the whole console (the buffered log doesn't). For finding where
+ * the first console run stopped; nothing happens without the file. */
+void psp2i_diag(const char *fmt, ...);
+extern int psp2i_diag_on;
+
 #endif

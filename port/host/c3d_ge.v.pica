@@ -18,6 +18,10 @@
 .alias inuv  v1         ; u, v (texels)
 .alias inclr v2         ; r, g, b, a (0..255)
 
+; Every output register is written whole (mask xyzw), from temporaries. On
+; the console, a shader that wrote only outuv.xy -- leaving o1.zw, which the
+; output map doesn't use, unwritten -- locked up the GPU on its first draw,
+; Rosalina included; Azahar doesn't mind (3DS_PROGRESS.md, T4).
 .proc main
     rcp r1, inpos.w             ; w
 
@@ -28,11 +32,13 @@
     max r0.z, zero, r0.z
     min r0.z, one, r0.z
     mov r0.z, -r0.z             ; the PICA clips z to 0..-w (C3D_DepthMap -1, 0 maps it back)
+    mov r0.w, one
 
-    mul outpos.xyz, r1, r0      ; times w: perspective-correct interpolation
-    mov outpos.w, r1
+    mul r2, r1, r0              ; times w: perspective-correct interpolation (w: 1 * w)
+    mov outpos, r2
 
-    mul outuv.xy, vp.zw, inuv.xy
+    mul r3, vp.zwzw, inuv       ; texels to 0..1 (z, w: unused)
+    mov outuv, r3
     mul outclr, k.zzzz, inclr
     end
 .end

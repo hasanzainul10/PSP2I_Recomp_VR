@@ -1,0 +1,26 @@
+; Self-test variant 7: c3d_ge.v.pica itself
+.fvec vp
+.constf k(1.0, 0.0000152590219, 0.00392156863, 0.0)
+.alias one  k.xxxx
+.alias zero k.wwww
+.out outpos position
+.out outuv  texcoord0
+.out outclr color
+.alias inpos v0
+.alias inuv  v1
+.alias inclr v2
+.entry main7
+.proc main7
+    rcp r1, inpos.w
+    mul r0.xy, vp.xy, inpos.xy
+    add r0.xy, -one, r0.xy
+    mul r0.z, k.y, inpos.z
+    max r0.z, zero, r0.z
+    min r0.z, one, r0.z
+    mov r0.z, -r0.z
+    mul outpos.xyz, r1, r0
+    mov outpos.w, r1
+    mul outuv.xy, vp.zw, inuv.xy
+    mul outclr, k.zzzz, inclr
+    end
+.end

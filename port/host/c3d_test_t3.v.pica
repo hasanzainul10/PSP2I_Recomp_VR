@@ -1,0 +1,16 @@
+; Self-test variant 3: variant 2 plus a .constf constant.
+.fvec vp
+.constf k(1.0, 0.0000152590219, 0.00392156863, 0.0)
+.out outpos position
+.out outuv  texcoord0
+.out outclr color
+.alias inpos v0
+.alias inuv  v1
+.alias inclr v2
+.entry main3
+.proc main3
+    mov outpos, inpos
+    mul outuv.xy, vp.zw, inuv.xy
+    mul outclr, k.zzzz, inclr
+    end
+.end

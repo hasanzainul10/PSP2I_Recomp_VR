@@ -4,6 +4,41 @@ Plan: [3DS_PLAN.md](3DS_PLAN.md). Branch `3ds_port`, worktree
 `D:\work\PSP2I_Recomp_3DS`. Skills: `psp2i-3ds-build`, `psp2i-3ds-test`.
 The user's console: **New 3DS XL, Luma3DS**.
 
+## Handoff (2026-10-26): the game runs on the console
+
+**State: the citro3d build boots and plays on the user's New 3DS XL** (.cia,
+804 MHz + L2). The user's report: ~30 fps in dialogue with 2D portraits,
+~6 fps on the field. Log on the field (console): 6-7 frames a second, ms/s
+**game 490-550, ge 160-200, wait 150-200, draw 70-85**, 250-340 draws a
+frame; `depth+texture` 70 us a draw. Before this, every console run of the
+citro3d build froze the whole console (Rosalina too) at the game's first
+draw; the software renderer worked. Azahar never showed it.
+
+**The cause: our vertex shader wrote only part of an output register**
+(`mul outuv.xy, ...`: o1.zw never written, though the output map ignores
+them). The PICA200 locks up on that; Azahar doesn't model it. Fixed in
+`port/host/c3d_ge.v.pica`: every output register is written whole, from
+temporaries. Found with a GPU self-test (`gpu_selftest` in c3d_ge.c, runs
+when `sdmc:/psp2i/diag` exists): draws one at a time, each waited for and
+traced to `sdmc:/psp2i/diag.txt` (opened, appended and closed per line, so
+it survives a hard freeze), with each step's GPU command list dumped.
+Shader variants `port/host/c3d_test*.v.pica` built up to ours a feature at a
+time; every variant with a partial output write hung, every one without
+passed (2a2 `mul outuv.xy` hung, 2a4 `mul outuv` passed).
+
+Wrong turns, so they aren't repeated: VRAM banks (depth in the same bank as
+colour draws fine on the console: the depth-bank copies in `depth_get` are
+not needed and cost time), the vertex buffer's physical address, clip-edge
+vertex data, the shbin's layout and operand descriptor count. One trap in
+the self-test itself: `C3D_BindProgram` ignores the program already bound,
+so variants sharing one `shaderProgram_s` all ran the first one.
+
+**Next:** take out the depth-bank copies (same-bank works), then the console
+baseline route (spawn stand-still 30 s, busy spots), then the present wait
+and O4b (GE on core 2). The user's Azahar save is on the console's SD
+(`GameData/ms/PSP/SAVEDATA/NPJH50332`, `NPJH50332SC`); the save the console
+made on 2026-10-26 is backed up off the console.
+
 ## Handoff (2026-10-25): where to pick up
 
 **State (2026-10-25, end of session):** T0-T3 done in Azahar (the user

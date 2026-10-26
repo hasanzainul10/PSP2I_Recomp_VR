@@ -1,0 +1,15 @@
+; Self-test variant 9: variant 1 with a uniform moved out, no arithmetic.
+.fvec vq
+.out outpos position
+.out outuv  texcoord0
+.out outclr color
+.alias inpos v0
+.alias inuv  v1
+.alias inclr v2
+.entry main9
+.proc main9
+    mov outpos, inpos
+    mov outuv.xy, vq.zw
+    mov outclr, inclr
+    end
+.end

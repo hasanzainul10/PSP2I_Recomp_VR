@@ -56,6 +56,7 @@
 #include <psprecomp/render.h>
 
 #include "c3d_ge_shbin.h"                       /* c3d_ge.v.pica, built by picasso */
+#include "c3d_test_shbin.h"                     /* c3d_test.v.pica: the self-test's reference */
 
 #define VRAM_SIZE  0x200000u
 #define RT_W       512u                          /* the widest target (stride <= 512); narrower fit their stride */
@@ -112,7 +113,9 @@ static const char *const UP_NAMES[3] = { "new", "rows", "changed" };
 typedef struct {
     int used;
     uint32_t off;
-    void *buf;                                   /* RT_W x RT_H, 16-bit depth like the PSP's */
+    void *buf[2];                                /* RT_W x RT_H, 16-bit depth like the PSP's: the copy
+                                                    in VRAM bank A, in bank B (made when a draw needs it) */
+    int cur;                                     /* the copy with the latest values; -1: none yet */
     uint64_t last_use;
 } depth_entry;
 
@@ -233,10 +236,18 @@ static int g_readback_flip;                      /* staging_from's rows run h-1 
 
 /* ---- the frame and the queue ---------------------------------------------------------- */
 
+static int g_diag_n;                             /* psp2i_diag: the first events only */
+/* VRAM's two 3 MB banks (libctru: A from 0x1F000000, B from 0x1F300000) */
+static char vram_bank(const void *p) { return (uintptr_t)p - 0x1F000000u >= 0x300000u ? 'B' : 'A'; }
+static int g_diag_present, g_in_present;         /* a present's steps traced for the first 10 only */
+#define DIAG(...) do { if (psp2i_diag_on && g_diag_n < 3000 && (!g_in_present || g_diag_present <= 10))                            { g_diag_n++; psp2i_diag(__VA_ARGS__); } } while (0)
+
 static void frame_open(void) {
     if (g_in_frame) return;
     const int pb = prof(P_WAIT);
+    DIAG("c3d: FrameBegin");
     C3D_FrameBegin(0);                           /* waits until the GPU has finished what was queued */
+    DIAG("c3d: FrameBegin done");
     prof(pb);
     g_in_frame = 1;
     g_ring_pos = 0;
@@ -254,7 +265,9 @@ static void gpu_finish(void) {
     if (!g_in_frame) return;
     ring_flush();
     const int pb = prof(P_WAIT);
+    DIAG("c3d: finish FrameEnd");
     C3D_FrameEnd(0);
+    DIAG("c3d: finish FrameEnd done");
     prof(pb);
     g_in_frame = 0;
     g_seg++;
@@ -344,7 +357,9 @@ static uint32_t *g_staging;                      /* RT_W x RT_H x 4 bytes */
 static const uint32_t *staging_from(C3D_Tex *tex) {
     const u32 dim = GX_BUFFER_DIM(tex->width, tex->height);
     const int pb = prof(P_WAIT);
+    DIAG("c3d: readback transfer");
     C3D_SyncDisplayTransfer((u32 *)tex->data, dim, g_staging, dim, READBACK_FLAGS);
+    DIAG("c3d: readback transfer done");
     GSPGPU_InvalidateDataCache(g_staging, tex->size);
     prof(pb);
     return g_staging;
@@ -356,7 +371,9 @@ static uint32_t srow(uint32_t y, uint32_t h) { return g_readback_flip ? h - 1 - 
 static void staging_to(C3D_Tex *tex) {
     const int pb = prof(P_WAIT);
     GSPGPU_FlushDataCache(g_staging, tex->size);
+    DIAG("c3d: upload copy");
     C3D_SyncTextureCopy(g_staging, 0, (u32 *)tex->data, 0, tex->size, GX_TRANSFER_RAW_COPY(1));
+    DIAG("c3d: upload copy done");
     prof(pb);
 }
 
@@ -510,6 +527,7 @@ static rt_entry *rt_get(uint32_t off, uint32_t stride, int fmt, uint32_t rows) {
             }
             rt_evict(old);
         }
+        DIAG("c3d: target create %06X %ux%u fmt %d", (unsigned)t->off, (unsigned)t->w, (unsigned)t->h, t->fmt);
         t->rt = C3D_RenderTargetCreateFromTex(&t->tex, GPU_TEXFACE_2D, 0, -1);
         if (!t->rt) {
             fprintf(stderr, "c3d: C3D_RenderTargetCreateFromTex failed\n");
@@ -549,7 +567,20 @@ static void rt_check(rt_entry *t) {
 
 /* ---- depth buffers ---------------------------------------------------------------------- */
 
-static void *depth_get(uint32_t off) {
+/* The depth buffer for a draw into a target whose colour buffer is in VRAM
+ * bank colour_b (0 A, 1 B). The PICA200 locks up -- the whole console, Rosalina
+ * included -- drawing with its colour and depth buffers in the same VRAM bank:
+ * the game's first draw (a clear with depth) froze the console every time,
+ * and citro3d's own C3D_RenderTargetCreate puts depth in the opposite bank
+ * (3DS_PROGRESS.md, T4). Azahar doesn't mind. So the depth buffer has a copy
+ * in each bank, made when a draw first needs it; switching banks copies the
+ * latest values over on the GPU. Targets that share one depth buffer usually
+ * sit in the same bank, which needs no copy. */
+static uint64_t n_depth_copies;
+
+static void *depth_get(uint32_t off, int colour_b) {
+    const int want = !colour_b;
+    const uint32_t size = RT_W * RT_H * 2;
     depth_entry *d = NULL;
     for (int i = 0; i < MAX_DEPTH; i++) if (g_depth[i].used && g_depth[i].off == off) d = &g_depth[i];
     if (!d) {
@@ -558,23 +589,37 @@ static void *depth_get(uint32_t off) {
             d = &g_depth[0];
             for (int i = 1; i < MAX_DEPTH; i++) if (g_depth[i].last_use < d->last_use) d = &g_depth[i];
             gpu_finish();                        /* a queued draw may still use it */
-            for (int i = 0; i < MAX_RT; i++) if (g_rt[i].used && g_rt[i].depth == d->buf) g_rt[i].depth = NULL;
-        } else {
-            d->buf = vramAlloc(RT_W * RT_H * 2);
-            if (!d->buf) {
-                fprintf(stderr, "c3d: no VRAM for a depth buffer (%lu KB free)\n", (unsigned long)(vramSpaceFree() >> 10));
-                return NULL;
-            }
+            for (int i = 0; i < MAX_RT; i++)
+                if (g_rt[i].used && g_rt[i].depth && (g_rt[i].depth == d->buf[0] || g_rt[i].depth == d->buf[1]))
+                    g_rt[i].depth = NULL;
         }
+        d->off = off; d->used = 1; d->cur = -1;  /* its values: cleared below */
+    }
+    if (!d->buf[want]) {
+        d->buf[want] = vramAllocAt(size, want ? VRAM_ALLOC_B : VRAM_ALLOC_A);
+        if (!d->buf[want]) {
+            fprintf(stderr, "c3d: no VRAM in bank %c for a depth buffer (%lu KB free)\n", want ? 'B' : 'A',
+                    (unsigned long)(vramSpaceFree() >> 10));
+            return NULL;
+        }
+    }
+    if (d->cur < 0) {
         /* cleared to 0, as gl_ge.c does a new one: by the GPU's fill engine,
          * since the CPU's view of VRAM isn't kept in step (see staging_from) */
         before_cpu_write(g_seg);
-        C3D_SyncMemoryFill((u32 *)d->buf, 0, (u32 *)((uint8_t *)d->buf + RT_W * RT_H * 2),
+        C3D_SyncMemoryFill((u32 *)d->buf[want], 0, (u32 *)((uint8_t *)d->buf[want] + size),
                            GX_FILL_TRIGGER | GX_FILL_16BIT_DEPTH, NULL, 0, NULL, 0);
-        d->off = off; d->used = 1;
+        d->cur = want;
+    } else if (d->cur != want) {
+        gpu_finish();                            /* the draws on the other copy first */
+        const int pb = prof(P_WAIT);
+        C3D_SyncTextureCopy((u32 *)d->buf[d->cur], 0, (u32 *)d->buf[want], 0, size, GX_TRANSFER_RAW_COPY(1));
+        prof(pb);
+        d->cur = want;
+        n_depth_copies++;
     }
     d->last_use = ++g_use;
-    return d->buf;
+    return d->buf[want];
 }
 
 /* ---- textures ----------------------------------------------------------------------------- */
@@ -1207,7 +1252,7 @@ static int c3d_draw_on(const psp_gpu_state *st, const psp_gpu_vertex *v, int nve
 
     DPART(D_TARGET);
     void *depth = NULL;
-    if (st->zb_stride && (st->ztest || (st->clear && (st->clear_which & 4)))) depth = depth_get(vram_off(st->zb_addr));
+    if (st->zb_stride && (st->ztest || (st->clear && (st->clear_which & 4)))) depth = depth_get(vram_off(st->zb_addr), vram_bank(t->tex.data) == 'B');
 
     C3D_Tex *tex = NULL;
     float uvs[2] = { 1, 1 };
@@ -1236,6 +1281,10 @@ static int c3d_draw_on(const psp_gpu_state *st, const psp_gpu_vertex *v, int nve
     }
     cs_vp(2.0f / (float)t->w, 2.0f / (float)t->h, uvs[0], uvs[1]);
     DPART(D_STATE);
+    DIAG("c3d: draw %d verts to %06X %ux%u fmt %d tex %s depth %s; colour bank %c, depth bank %c", nverts,
+         (unsigned)t->off, (unsigned)t->w, (unsigned)t->h, t->fmt, tex ? "yes" : "no", depth ? "yes" : "no",
+         vram_bank(t->tex.data), depth ? vram_bank(depth) : '-');
+    if (n_draws == 0) g_diag_present = 0;        /* the presents after the first draw traced too */
     C3D_DrawArrays(GPU_TRIANGLES, first, nverts);
     DPART(D_SUBMIT);
 
@@ -1344,7 +1393,16 @@ static void quad_vertex(psp_gpu_vertex *o, float sx, float sy, float u, float v)
     o->r = o->g = o->b = o->a = 255.0f;
 }
 
+static int c3d_ge_present_on(uint32_t addr, uint32_t stride, int fmt);
 int c3d_ge_present(uint32_t addr, uint32_t stride, int fmt) {
+    g_diag_present++;
+    g_in_present = 1;
+    const int r = c3d_ge_present_on(addr, stride, fmt);
+    g_in_present = 0;
+    return r;
+}
+
+static int c3d_ge_present_on(uint32_t addr, uint32_t stride, int fmt) {
     if (!g_ok) return -1;
     const int pb = prof(P_PRESENT);
     frame_open();
@@ -1390,7 +1448,9 @@ int c3d_ge_present(uint32_t addr, uint32_t stride, int fmt) {
     }
     ring_flush();
     prof(P_WAIT);
+    DIAG("c3d: present FrameEnd");
     C3D_FrameEnd(0);                             /* submits; the top screen shows it once drawn */
+    DIAG("c3d: present FrameEnd done");
     prof(pb);
     g_in_frame = 0;
     g_seg++;
@@ -1429,6 +1489,234 @@ int c3d_ge_capture(uint32_t addr, uint32_t stride, int fmt, const char *path) {
     return 0;
 }
 
+/* ---- GPU self-test (diag only) ----------------------------------------------------------------- */
+
+/* The game's first draw froze the whole console, Rosalina included, with
+ * depth in either bank; Azahar draws it fine. With sdmc:/psp2i/diag, the
+ * features that draw uses run one at a time at start-up, safest first, each
+ * waited for on the GPU and traced: the last "ok" line in diag.txt names
+ * the step after it as the one that hangs (3DS_PROGRESS.md, T4). */
+static float g_st_z;                             /* the quads' depth (0..65535) */
+static void st_quad(float x0, float y0, float x1, float y1, float u1, float v1) {
+    psp_gpu_vertex q[6];
+    memset(q, 0, sizeof q);
+    const float xs[6] = { x0, x1, x0, x0, x1, x1 }, ys[6] = { y0, y0, y1, y1, y0, y1 };
+    for (int i = 0; i < 6; i++) {
+        q[i].x = xs[i]; q[i].y = ys[i]; q[i].z = g_st_z; q[i].rhw = 1.0f;
+        q[i].u = xs[i] == x0 ? 0 : u1; q[i].v = ys[i] == y0 ? 0 : v1;
+        q[i].r = 255.0f; q[i].g = 128.0f; q[i].b = 0; q[i].a = 255.0f;
+    }
+    const int first = ring_put(q, 6);
+    C3D_DrawArrays(GPU_TRIANGLES, first, 6);
+}
+
+static void st_untextured(void) {
+    C3D_TexEnv *env = C3D_GetTexEnv(0);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, 0, 0);
+    C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+}
+
+/* the GPU commands queued since the last submit, into the trace (8 words a line) */
+static void st_dump(const char *name) {
+    u32 *buf, size, off;
+    GPUCMD_GetBuffer(&buf, &size, &off);
+    psp2i_diag("selftest: commands for %s: %lu words", name, (unsigned long)off);
+    for (u32 i = 0; i < off && i < 1024; i += 8) {
+        char line[128];
+        int n = 0;
+        for (u32 j = i; j < off && j < i + 8; j++) n += snprintf(line + n, sizeof line - n, " %08lX", (unsigned long)buf[j]);
+        psp2i_diag("cmd %04lX:%s", (unsigned long)i, line);
+    }
+}
+
+#define ST_STEP(name) do { st_dump(name); gpu_finish(); psp2i_diag("selftest: ok after %s", name); } while (0)
+
+static void gpu_selftest(void) {
+    psp2i_diag("selftest: start (VRAM free %lu KB)", (unsigned long)(vramSpaceFree() >> 10));
+    frame_open();
+    ST_STEP("frame");
+    {
+        u32 *cb, cbsize, cboff;
+        GPUCMD_GetBuffer(&cb, &cbsize, &cboff);
+        psp2i_diag("selftest: command buffer at physical 0x%08lX, %lu words, %lu used",
+                   (unsigned long)osConvertVirtToPhys(cb), (unsigned long)cbsize, (unsigned long)cboff);
+    }
+
+    /* 1a: the reference -- the simplest shader, its own vertex buffer */
+    DVLB_s *tdvlb = DVLB_ParseFile((u32 *)c3d_test_shbin, c3d_test_shbin_size);
+    static shaderProgram_s tprog;
+    psp2i_diag("selftest: %d test shaders", tdvlb ? (int)tdvlb->numDVLE : 0);
+    {
+        float *vbo = (float *)linearAlloc(3 * 8 * sizeof(float));
+        if (tdvlb && vbo) {
+            shaderProgramInit(&tprog);
+            shaderProgramSetVsh(&tprog, &tdvlb->DVLE[0]);
+            const float tri[3][8] = { { -0.5f, -0.5f, -0.5f, 1, 1, 0, 0, 1 },
+                                      {  0.5f, -0.5f, -0.5f, 1, 0, 1, 0, 1 },
+                                      {  0.0f,  0.5f, -0.5f, 1, 0, 0, 1, 1 } };
+            memcpy(vbo, tri, sizeof tri);
+            GSPGPU_FlushDataCache(vbo, sizeof tri);
+            const C3D_AttrInfo save_a = *C3D_GetAttrInfo();
+            const C3D_BufInfo save_b = *C3D_GetBufInfo();
+            C3D_AttrInfo ai;
+            AttrInfo_Init(&ai);
+            AttrInfo_AddLoader(&ai, 0, GPU_FLOAT, 4);
+            AttrInfo_AddLoader(&ai, 1, GPU_FLOAT, 4);
+            C3D_BufInfo bi;
+            BufInfo_Init(&bi);
+            const int bid = BufInfo_Add(&bi, vbo, 8 * sizeof(float), 2, 0x10);
+            psp2i_diag("selftest: reference buffer at physical 0x%08lX (buffer %d)",
+                       (unsigned long)osConvertVirtToPhys(vbo), bid);
+            C3D_BindProgram(&tprog);
+            C3D_SetAttrInfo(&ai);
+            C3D_SetBufInfo(&bi);
+            C3D_RenderTargetClear(g_top, C3D_CLEAR_ALL, 0x000000FF, 0);
+            C3D_FrameDrawOn(g_top);
+            C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+            st_untextured();
+            C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+            ST_STEP("1a reference shader and buffer");
+            C3D_BindProgram(&g_prog);
+            C3D_SetAttrInfo((C3D_AttrInfo *)&save_a);
+            C3D_SetBufInfo((C3D_BufInfo *)&save_b);
+        } else psp2i_diag("selftest: no reference shader");
+    }
+
+    /* 2a-2d: c3d_ge.v.pica built up a feature at a time (c3d_test_t1-t4),
+     * fed from the vertex ring as the game's draws are; 2e is c3d_ge.v.pica */
+    /* by DVLE: 1-7 c3d_test_t1-t7, 8 and 9 (t8, t9) split 2b's two new
+     * things -- arithmetic, and reading a uniform -- and run before it */
+    static const char *const VAR[11] = { "", "2a pass-through, ring", "2b uniform", "2c constant", "2d rcp/max/min/neg",
+                                         "2f + pixel to NDC mul", "2g + add of a negated constant",
+                                         "2h c3d_ge.v.pica in the test shbin", "2a2 a multiply, no uniform",
+                                         "2a3 a uniform moved, no arithmetic", "2a4 2a2 writing the whole register" };
+    /* 2a2 (t8), 2a3 (t9) and 2b (t2) hung: each writes only part of an
+     * output register; 2a4 (t10) is 2a2 writing it whole. The others write
+     * part of one too, so they're left out; c3d_ge.v.pica no longer does. */
+    static const int ORDER[2] = { 1, 10 };
+    for (int oi = 0; tdvlb && oi < 2; oi++) {
+        const int k = ORDER[oi] - 1;
+        if (k + 1 >= tdvlb->numDVLE) continue;
+        /* a program object each: C3D_BindProgram ignores the one already
+         * bound, so a single reused one ran 2a's shader for all of these */
+        static shaderProgram_s vprog[10];
+        shaderProgramInit(&vprog[k]);
+        shaderProgramSetVsh(&vprog[k], &tdvlb->DVLE[k + 1]);
+        C3D_BindProgram(&vprog[k]);
+        s8 loc = shaderInstanceGetUniformLocation(vprog[k].vertexShader, "vp");
+        if (loc < 0) loc = shaderInstanceGetUniformLocation(vprog[k].vertexShader, "vq");
+        psp2i_diag("selftest: %s: entry %u, uniform at %d", VAR[k + 1], (unsigned)tdvlb->DVLE[k + 1].mainOffset, loc);
+        const int pix = k >= 4 && k <= 6;       /* 2f-2h take pixels, as c3d_ge.v.pica */
+        if (loc >= 0) C3D_FVUnifSet(GPU_VERTEX_SHADER, loc, pix ? 2.0f / (float)TOP_H : 1, pix ? 2.0f / (float)TOP_W : 1,
+                                    1.0f / 64, 1.0f / 64);
+        C3D_FrameDrawOn(g_top);
+        C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+        C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+        st_untextured();
+        psp_gpu_vertex q[3];
+        memset(q, 0, sizeof q);
+        const float xy[3][2] = { { -0.5f, -0.5f }, { 0.5f, -0.5f }, { 0.0f, 0.5f } };
+        for (int i = 0; i < 3; i++) {
+            q[i].x = xy[i][0]; q[i].y = xy[i][1]; q[i].z = 0.5f; q[i].rhw = 1.0f;
+            if (pix) { q[i].x = 32 + 32 * xy[i][0]; q[i].y = 32 + 32 * xy[i][1]; q[i].z = 32768; }
+            q[i].r = q[i].a = 1.0f;
+        }
+        const int first = ring_put(q, 3);
+        C3D_DrawArrays(GPU_TRIANGLES, first, 3);
+        ST_STEP(VAR[k + 1]);
+    }
+    C3D_BindProgram(&g_prog);
+
+    /* 1: a ring draw to the top screen, untextured, no depth */
+    C3D_RenderTargetClear(g_top, C3D_CLEAR_ALL, 0x000000FF, 0);
+    C3D_FrameDrawOn(g_top);
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+    st_untextured();
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, u_vp, 2.0f / (float)TOP_H, 2.0f / (float)TOP_W, 1, 1);
+    /* 3a-3d: c3d_ge.v.pica with vertices inside the clip volume, then on
+     * its z = 0 plane (where z 0 comes out as -0.0), its far plane, its x edge */
+    static const struct { const char *name; float x0, x1, z; } VD[4] = {
+        { "3a inside, mid depth", 16, 48, 32768 }, { "3b inside, z 0", 16, 48, 0 },
+        { "3c inside, z 65535", 16, 48, 65535 },  { "3d on the x edge, mid depth", 0, 48, 32768 } };
+    for (int k = 0; k < 4; k++) {
+        g_st_z = VD[k].z;
+        st_quad(VD[k].x0, 16, VD[k].x1, 48, 1, 1);
+        ST_STEP(VD[k].name);
+    }
+    g_st_z = 0;
+    st_quad(0, 0, 64, 64, 1, 1);
+    ST_STEP("2e c3d_ge.v.pica, ring (step 1)");
+
+    /* 2: to a texture target (as the game's), no depth */
+    C3D_Tex tex;
+    if (!C3D_TexInitVRAM(&tex, 512, 512, GPU_RGBA8)) { psp2i_diag("selftest: no VRAM for a target"); return; }
+    C3D_RenderTarget *rt = C3D_RenderTargetCreateFromTex(&tex, GPU_TEXFACE_2D, 0, -1);
+    if (!rt) { psp2i_diag("selftest: no render target"); return; }
+    psp2i_diag("selftest: target in bank %c", vram_bank(tex.data));
+    C3D_RenderTargetClear(rt, C3D_CLEAR_ALL, 0x000000FF, 0);
+    C3D_FrameDrawOn(rt);
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+    st_untextured();
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, u_vp, 2.0f / 512.0f, 2.0f / 512.0f, 1, 1);
+    st_quad(0, 0, 64, 64, 1, 1);
+    ST_STEP("2 ring draw, texture target");
+
+    /* 3: the target sampled on the top screen (the present) */
+    C3D_FrameDrawOn(g_top);
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    C3D_DepthTest(true, GPU_ALWAYS, GPU_WRITE_COLOR);
+    C3D_TexEnv *env = C3D_GetTexEnv(0);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, 0, 0);
+    C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+    C3D_TexSetFilter(&tex, GPU_LINEAR, GPU_LINEAR);
+    C3D_TexBind(0, &tex);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, u_vp, 2.0f / (float)TOP_H, 2.0f / (float)TOP_W, 1.0f / 512.0f, 1.0f / 512.0f);
+    st_quad(0, 0, 128, 128, 512, 512);
+    C3D_TexBind(0, NULL);
+    ST_STEP("3 textured draw from the target");
+
+    /* 4, 5: depth (16-bit, as the game's) in the opposite bank, then the same one */
+    for (int same = 0; same < 2; same++) {
+        const int b = vram_bank(tex.data) == 'B';
+        void *depth = vramAllocAt(512 * 512 * 2, (same ? b : !b) ? VRAM_ALLOC_B : VRAM_ALLOC_A);
+        if (!depth) { psp2i_diag("selftest: no VRAM for depth"); break; }
+        psp2i_diag("selftest: depth in bank %c", vram_bank(depth));
+        C3D_SyncMemoryFill((u32 *)depth, 0, (u32 *)((uint8_t *)depth + 512 * 512 * 2),
+                           GX_FILL_TRIGGER | GX_FILL_16BIT_DEPTH, NULL, 0, NULL, 0);
+        ST_STEP(same ? "5a depth fill" : "4a depth fill");
+        C3D_FrameBufDepth(&rt->frameBuf, depth, GPU_RB_DEPTH16);
+        C3D_FrameDrawOn(rt);
+        C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, 0, 480, 272);
+        C3D_DepthTest(true, GPU_ALWAYS, GPU_WRITE_ALL);
+        st_untextured();
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, u_vp, 2.0f / 512.0f, 2.0f / 512.0f, 1, 1);
+        st_quad(0, 0, 480, 272, 1, 1);
+        ST_STEP(same ? "5 depth in the same bank" : "4 depth in the opposite bank");
+        C3D_FrameBufDepth(&rt->frameBuf, NULL, GPU_RB_DEPTH16);
+        C3D_FrameDrawOn(g_top);
+        ST_STEP("depth off");
+        vramFree(depth);
+    }
+    if (g_in_frame) {                            /* citro3d panics on a target deleted inside a frame */
+        ring_flush();
+        C3D_FrameEnd(0);
+        g_in_frame = 0;
+        g_seg++;
+    }
+    C3D_RenderTargetDelete(rt);
+    C3D_TexDelete(&tex);
+    state_forget();
+    g_cur = NULL; g_cur_depth = NULL;
+    gpu_finish();
+    psp2i_diag("selftest: done");
+}
+
 /* ---- set-up ---------------------------------------------------------------------------------------- */
 
 static const psp_gpu_backend C3D_BACKEND = { "citro3d", c3d_draw, c3d_sync_vram, c3d_vram_written, 1 };
@@ -1461,7 +1749,18 @@ int c3d_ge_init(void) {
     }
     C3D_BufInfo *bi = C3D_GetBufInfo();
     BufInfo_Init(bi);
-    BufInfo_Add(bi, g_ring, sizeof(psp_gpu_vertex), 3, 0x210);
+    /* citro3d gives each buffer as an offset from 0x18000000 in a 28-bit
+     * field, so only up to 0x27FFFFFF. In the .cia's 124 MB mode on a New 3DS
+     * the linear heap is in the extended FCRAM above it: the offset wrapped
+     * and the console's first draw locked up the GPU, Rosalina included
+     * (3DS_PROGRESS.md, T4). The ring is the only buffer: the base is it. */
+    const u32 ring_pa = osConvertVirtToPhys(g_ring);
+    bi->base_paddr = ring_pa;
+    const int bid = BufInfo_Add(bi, g_ring, sizeof(psp_gpu_vertex), 3, 0x210);
+    fprintf(stderr, "c3d: vertex ring at physical 0x%08lX (buffer %d), vp uniform %d\n",
+            (unsigned long)ring_pa, bid, u_vp);
+    if (psp2i_diag_on)
+        psp2i_diag("c3d: vertex ring at physical 0x%08lX (buffer %d), vp uniform %d", (unsigned long)ring_pa, bid, u_vp);
 
     for (int i = 1; i < 6; i++) {                        /* stages 1-5 pass stage 0 through */
         C3D_TexEnv *env = C3D_GetTexEnv(i);
@@ -1477,6 +1776,7 @@ int c3d_ge_init(void) {
     g_ok = 1;
     psp_gpu_set_backend(&C3D_BACKEND);
     psp_mem_set_vram_hook(cpu_access);
+    if (psp2i_diag_on) gpu_selftest();
     fprintf(stderr, "c3d: rendering on the PICA200\n");
     return 0;
 }
@@ -1502,6 +1802,7 @@ void c3d_ge_report(FILE *out) {
             (unsigned long long)n_readbacks, (unsigned long long)n_tex_decodes, texs, (unsigned long)(g_tex_bytes >> 10),
             (unsigned long long)n_rt_tex, (unsigned long long)n_approx, (unsigned long long)n_fail,
             (unsigned long long)n_evict, (unsigned long long)n_xfer, (unsigned long long)n_skip, rts, depths, (unsigned long)(linearSpaceFree() >> 10), (unsigned long)(vramSpaceFree() >> 10));
+    fprintf(out, "c3d: depth copies between VRAM banks %llu\n", (unsigned long long)n_depth_copies);
     {   /* where a draw's time goes, since the last report (nested waits and decodes included) */
         static uint64_t was[D_N], draws_was;
         const double nd = n_draws > draws_was ? (double)(n_draws - draws_was) : 1.0, us = 1e6 / SYSCLOCK_ARM11 / nd;
