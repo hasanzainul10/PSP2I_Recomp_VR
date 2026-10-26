@@ -47,10 +47,32 @@ the run above, compared at the same draws per frame: game ms per frame
 frame. Cost: 232 KiB of code (heap after the code 62132 -> 61900 KiB); peak
 heap unchanged (45 MB). PC and Azahar showed no gain; only the console does.
 
-**Next:** game code is the problem. Find where those ~100 ms a frame go on
-the console (per-function time for the hot list and beyond), then the
-console baseline route (spawn stand-still 30 s, busy spots), the present
-wait and O4b (GE on core 2). The user's Azahar save is on the console's SD
+**On-console profiler (2026-10-26, bff2f49):** `-DPSP2I_PROFILE=ON`
+(own build dir, `build_prof`) samples the current game function at 1 kHz
+from core 2 into `sdmc:/psp2i/profile.txt` (top 40 per 10 s window, with
+frames, game ms/s and draws/frame to pick the field windows). The code is
+over 32 MiB then, and makerom's code compression corrupts code that big
+(dies before `main`; Azahar: `unknown svc` at 0x00100004), so profiling
+.cias go uncompressed (`APP_COMPRESS`, psp2i.rsf). Normal builds are ~31.5
+MB, close to that edge. First field result: 55.6% in `sceGeListEnQueue`,
+7.1% sceSasCore (16% in another run), ~30% game code spread thin (no
+function over 1.8%). The `time:` line explained only ~37% of the GE share.
+
+**The profile's attribution, corrected (2026-10-26):** three ways that
+run charged time to the wrong place: the caller's code after a firmware call
+went to the import (imports have no `PSP_SP_CALL` after them); the import
+marker stayed set through `psp_sched_after_hle` (vblank interrupt handlers,
+posted calls, the host's `on_vblank`, thread switches); idle had no mark.
+Now the runtime marks its own work under `PSPRECOMP_PROF`
+(psprecomp/src/hle/prof.h: GE list commands, GE prims, scheduler events,
+idle) and the thunks put the caller back. Every build's log also gets a
+`gelist:` line (lists = prims + callbacks + commands, ms/s): the non-PRIM
+commands were counted in "game" until now.
+
+**Next:** the corrected profile on the field, then fix what it shows; the
+sound mixer (bit-exact, `psprecomp/tests/test_sas.c` holds its output);
+then the console baseline route (spawn stand-still 30 s, busy spots), the
+present wait and O4b (GE on core 2). The user's Azahar save is on the console's SD
 (`GameData/ms/PSP/SAVEDATA/NPJH50332`, `NPJH50332SC`); the save the console
 made on 2026-10-26 is backed up off the console.
 

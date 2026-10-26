@@ -1,9 +1,12 @@
 /* The on-console profiler (PSP2I_PROFILE builds; 3DS_PROGRESS.md T4): which
  * recompiled game functions the field's ~100 ms of game code a frame goes to.
  *
- * port/3ds/prof_game.h keeps psp2i_prof_fn on the function the game's thread
- * is in (a firmware call, callbacks included: its import thunk). A thread on core 2, which nothing
- * else uses, reads it 1000 times a second into a ring; the game's thread
+ * port/3ds/prof_game.h keeps psp_prof_fn on the function the game's thread
+ * is in (a firmware call: its import thunk), and the runtime sets
+ * psp_prof_where while it does work of its own (psprecomp/src/hle/prof.h:
+ * 0x10 GE list commands, 0x14 GE prims, 0x18 scheduler events, 0x1C idle),
+ * which a sample is charged to instead. A thread on core 2, which nothing
+ * else uses, reads them 1000 times a second into a ring; the game's thread
  * drains the ring once a second (time_report) and every 10 s appends that
  * window's top functions to sdmc:/psp2i/profile.txt, with the window's frames
  * and game ms/s so a window can be matched to a scene, and rewrites
@@ -19,7 +22,7 @@
 
 #define BASE "sdmc:/psp2i"
 
-volatile uint32_t psp2i_prof_fn, psp2i_prof_imp;   /* function; firmware call in progress */
+extern volatile uint32_t psp_prof_fn, psp_prof_where;   /* psprecomp/src/hle/hle.c */
 
 #define RING 8192                       /* 8 s of samples: drained every second */
 static uint32_t g_ring[RING];
@@ -36,8 +39,8 @@ static void sampler(void *arg) {
     for (;;) {
         svcSleepThread(1000000);        /* 1 ms */
         const uint32_t h = g_head;
-        const uint32_t imp = psp2i_prof_imp;
-        g_ring[h & (RING - 1)] = imp ? imp : psp2i_prof_fn;
+        const uint32_t where = psp_prof_where;
+        g_ring[h & (RING - 1)] = where ? where : psp_prof_fn;
         __sync_synchronize();           /* the sample before the index */
         g_head = h + 1;
     }

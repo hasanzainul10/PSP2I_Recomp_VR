@@ -135,6 +135,8 @@ if(EXISTS ${PSP2I_GEN_DIR}/recomp_funcs.c)
     option(PSP2I_PROFILE "sample the game's current function at 1 kHz on core 2" OFF)
     if(PSP2I_PROFILE)
         target_compile_options(psp2i_game PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/prof_game.h)
+        # the runtime's own marks: GE lists, scheduler events, idle (psprecomp/src/hle/prof.h)
+        target_compile_definitions(psprecomp PRIVATE PSPRECOMP_PROF)
     endif()
 
     # the GE backend's vertex shader, assembled by picasso and linked in

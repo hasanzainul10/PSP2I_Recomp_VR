@@ -331,6 +331,7 @@ static void read_pad(void) {
 /* ---- once per vblank, on the scheduler's clock --------------------------------- */
 
 static u64 g_stat_tick;
+static u64 g_hook_ticks;                  /* on_vblank's own time, for time_report */
 static uint64_t g_stat_flips;
 
 static uint64_t ticks_now(void) { return svcGetSystemTick(); }
@@ -339,7 +340,7 @@ static uint64_t ticks_now(void) { return svcGetSystemTick(); }
  * target traffic per frame: the bottom screen's lines 2-4 and the log. */
 static void time_report(double secs, uint64_t frames) {
     static c3d_ge_stats was;
-    static uint64_t prim_was, idle_was;
+    static uint64_t prim_was, idle_was, list_was, lprim_was, cb_was, hook_was;
     c3d_ge_stats s;
     c3d_ge_stats_get(&s);
     const uint64_t prim = psp_gpu_prim_ticks(), idle_us = psp_sched_idle_us();
@@ -372,6 +373,21 @@ static void time_report(double secs, uint64_t frames) {
     psp2i_diag("time: %llu frames; game %.0f ge %.0f draw %.0f wait %.0f idle %.0f; io %llu KB, ge cmds %llu",
                (unsigned long long)frames, game, ge, draw, wait, idle,
                (unsigned long long)(psp_io_bytes_read() >> 10), (unsigned long long)psp_ge_command_count());
+    /* the GE lists' own time (ge.c, on its clock): prims, the game's signal and
+     * finish callbacks, and the rest, the non-PRIM commands, which no other
+     * figure counts (they were in "game") */
+    {
+        const uint64_t list = psp_ge_host_us(), lprim = psp_gpu_host_us(), cb = psp_ge_callback_us();
+        const double us = 1.0 / 1000.0 / secs, l = (double)(list - list_was) * us,
+                     p = (double)(lprim - lprim_was) * us, c = (double)(cb - cb_was) * us;
+        /* and the vblank hook (this function's caller: present, the pad, this report) */
+        fprintf(stderr, "gelist: ms/s lists %.0f = prims %.0f + callbacks %.0f + commands %.0f; vblank hook %.0f\n",
+                l, p, c, l - p - c, (double)(g_hook_ticks - hook_was) * ms);
+        hook_was = g_hook_ticks;
+        list_was = list;
+        lprim_was = lprim;
+        cb_was = cb;
+    }
 #ifdef PSP2I_PROFILE
     psp2i_prof_second(game, frames, (double)(s.draws - was.draws) / f);
 #endif
@@ -396,25 +412,48 @@ static void time_report(double secs, uint64_t frames) {
     fprintf(stderr, "%s\n", line);
 }
 
+static void on_vblank_on(void);
 static void on_vblank(void) {
+    const u64 t0 = svcGetSystemTick();
+    const uint32_t where = PSP2I_PROF_WHERE();
+    on_vblank_on();
+    PSP2I_PROF_MARK(where);
+    g_hook_ticks += svcGetSystemTick() - t0;
+}
+
+static void on_vblank_on(void) {
     static int nv;
     if (psp2i_diag_on && nv < 10)
         psp2i_diag("vblank %d: vblanks %llu flips %llu io %llu KB ge cmds %llu", nv,
                    (unsigned long long)psp_sched_vblank_count(), (unsigned long long)psp_display_flips(),
                    (unsigned long long)(psp_io_bytes_read() >> 10), (unsigned long long)psp_ge_command_count());
     nv++;
+    PSP2I_PROF_MARK(0x34);
     if (!aptMainLoop()) { psp_request_exit(); return; }   /* HOME > Close */
     read_pad();
-    if (g_gpu) {
+    PSP2I_PROF_MARK(0x30);
+    /* Present a new frame, not every vblank: each present ends a citro3d
+     * frame and costs ~2 ms, and at the field's ~6 fps the other 54 a second
+     * showed the same picture (the profiler: 12% of the time, 3DS_PROGRESS.md
+     * T4). Still every 6th vblank, for a game drawing into the shown buffer
+     * without a flip. sdmc:/psp2i/present_every_vblank: every vblank, as before. */
+    static int every = -1, since;
+    static uint64_t shown = ~0ull;
+    if (every < 0) { struct stat ps; every = stat(BASE "/present_every_vblank", &ps) == 0; }
+    const uint64_t flip = psp_display_flips();
+    const int show = every || flip != shown || ++since >= 6;
+    if (show) { shown = flip; since = 0; }
+    if (show && g_gpu) {
         uint32_t addr, stride, fmt;
         psp_display_get(&addr, &stride, &fmt);
         if (nv <= 10) psp2i_diag("present %d: fb %08lX stride %lu fmt %lu", nv, (unsigned long)addr,
                                  (unsigned long)stride, (unsigned long)fmt);
         c3d_ge_present(addr, stride, (int)fmt);
         if (nv <= 10) psp2i_diag("present %d done", nv);
-    } else present();
+    } else if (show) present();
     const u64 now = svcGetSystemTick();
     if (now - g_stat_tick >= SYSCLOCK_ARM11) {            /* once a second */
+        PSP2I_PROF_MARK(0x38);
         const uint64_t flips = psp_display_flips();
         consoleSelect(&g_bottom);
         /* lines 1-4, the cursor kept where the log is */
