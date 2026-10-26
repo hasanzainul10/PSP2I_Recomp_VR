@@ -340,7 +340,7 @@ static uint64_t ticks_now(void) { return svcGetSystemTick(); }
  * target traffic per frame: the bottom screen's lines 2-4 and the log. */
 static void time_report(double secs, uint64_t frames) {
     static c3d_ge_stats was;
-    static uint64_t prim_was, idle_was, list_was, lprim_was, cb_was, hook_was;
+    static uint64_t prim_was, idle_was, list_was, lprim_was, cb_was, hook_was, ph_was[3];
     c3d_ge_stats s;
     c3d_ge_stats_get(&s);
     const uint64_t prim = psp_gpu_prim_ticks(), idle_us = psp_sched_idle_us();
@@ -391,6 +391,7 @@ static void time_report(double secs, uint64_t frames) {
 #ifdef PSP2I_PROFILE
     psp2i_prof_second(game, frames, (double)(s.draws - was.draws) / f);
 #endif
+    const double prims = (double)(prim - prim_was) * ms;
     was = s;
     prim_was = prim;
     idle_was = idle_us;
@@ -410,6 +411,20 @@ static void time_report(double secs, uint64_t frames) {
                        (double)vk[i].verts / f, (double)vk[i].draws / f);
     }
     fprintf(stderr, "%s\n", line);
+
+    /* the prims' parts, on their clock (gpu.c): before the vertex loop, the
+     * vertex loop (the kinds above), the triangles' assembly (clip, cull,
+     * collect), the backend's state, the backend (draw, waits, transfers,
+     * textures) and what none of these names */
+    uint64_t ph[3];
+    psp_gpu_phase_ticks(&ph[0], &ph[1], &ph[2]);
+    double vtx = 0;
+    for (int i = 0; i < nvk; i++) vtx += (double)vk[i].ticks * ms;
+    const double setup = (double)(ph[0] - ph_was[0]) * ms, assemble = (double)(ph[1] - ph_was[1]) * ms,
+                 state = (double)(ph[2] - ph_was[2]) * ms;
+    fprintf(stderr, "prims: ms/s %.0f = setup %.0f + vertices %.0f + assembly %.0f + state %.0f + backend %.0f + other %.0f\n",
+            prims, setup, vtx, assemble, state, backend, prims - setup - vtx - assemble - state - backend);
+    for (int k = 0; k < 3; k++) ph_was[k] = ph[k];
 }
 
 static void on_vblank_on(void);
