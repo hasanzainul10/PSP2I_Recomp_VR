@@ -137,12 +137,14 @@ def main():
         t.append('\n')
         written += write_if_changed(os.path.join(out, 'recomp_part_%02d.c' % p), ''.join(t))
     nhot = min(4, len(hot_blocks))
+    # the game functions a call to needs no write-back of the vector locals
+    vfree = reg_locals.vfpu_free(lines) if vlocals else frozenset()
     for p in range(nhot):
         t = ['/* Hot functions of recomp_funcs.c, part %d (port/android/split_gen.py) -- do not edit. */\n' % p,
              '#include "recomp_split.h"\n\n']
         for block in hot_blocks[p::nhot]:
             if locals_on:
-                block, _ = reg_locals.transform_lines(block, {int(a, 16) for a in hot}, vlocals)
+                block, _ = reg_locals.transform_lines(block, {int(a, 16) for a in hot}, vlocals, vfree)
             t.append('\n'.join(block))
             t.append('\n')
         written += write_if_changed(os.path.join(out, 'recomp_hot_%02d.c' % p), ''.join(t))

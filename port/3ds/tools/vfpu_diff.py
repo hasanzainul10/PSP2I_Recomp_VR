@@ -38,15 +38,19 @@ def pairs(old_path, new_path):
         old = f.read().replace('\r', '').split('\n')
     with open(new_path, 'r', encoding='utf-8', newline='') as f:
         new = f.read().replace('\r', '').split('\n')
-    inc = next(i for i, l in enumerate(new) if l.startswith('#include "') and l.endswith('_vfpu.h"'))
-    if len(new) != len(old) + 1:
+    is_inc = lambda l: l.startswith('#include "') and l.endswith('_vfpu.h"')
+    inc = next(i for i, l in enumerate(new) if is_inc(l))
+    shift = 0 if any(is_inc(l) for l in old[:inc + 1]) else 1   # an old file from before the include
+    if len(new) != len(old) + shift:
         sys.exit('vfpu_diff: the files do not line up (%d vs %d lines)' % (len(old), len(new)))
     seen, out = set(), []
     for i, o in enumerate(old):
-        n = new[i + 1] if i >= inc else new[i]
+        n = new[i + shift] if i >= inc else new[i]
         if i < inc and o != n:
             sys.exit('vfpu_diff: line %d differs before the include' % (i + 1))
-        so, sn = o.strip(), n.strip()
+        # the reference always takes the runtime path, so an old inline form
+        # gets the run-time guard back (the test defines PSP_VFPU_NOPFX as 1)
+        so, sn = o.strip().replace('PSP_VFPU_NOPFX', '(!psp_vfpu_pfx_any)'), n.strip()
         if so.startswith('/*') or 'psp_read' in sn or 'psp_write' in sn:
             continue
         if not ('PSP_VFPU_NOPFX' in sn or 'psp_mtv(' in so or 'psp_mfv(' in so):
@@ -149,7 +153,8 @@ int main(int argc, char **argv) {
 
 # Moves and bit operations (the forms this test was written for) must match
 # bit for bit, NaN payloads included.
-STRICT_OPS = ('psp_mtv(', 'psp_mfv(', 'psp_vmmov(', 'psp_vconv(', 'psp_vcst(', 'psp_vi2f(')
+STRICT_OPS = ('psp_mtv(', 'psp_mfv(', 'psp_vmmov(', 'psp_vconv(', 'psp_vcst(', 'psp_vi2f(',
+              'psp_vcmov(', 'psp_vidt(', 'psp_vimm(', 'psp_vmidt(', 'psp_vmzero(', 'psp_vmone(', 'psp_vcmp(')
 
 
 def strict(o, n):

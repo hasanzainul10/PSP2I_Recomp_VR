@@ -10,6 +10,10 @@
  *  2. The cost of one call of the game's 08D8BA7C (a bounding-box test, 6.8%
  *     of the game's thread on the field) on synthetic input; the CPU state
  *     and the RAM it uses are put back afterwards.
+ *
+ * Not free of side effects: on Azahar a start with the switch on ran the
+ * title, then stopped presenting frames for good ~90 s later (the same
+ * build without it reached the lobby). Measure with it, then remove it.
  */
 #include <3ds.h>
 #include <stdio.h>
