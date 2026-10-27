@@ -269,10 +269,29 @@ left there: the locals' entry loads for registers written before read, the
 reload and second write-back around a tail call, no write-back around
 callees that never touch the VFPU; ~1-2% of the game's thread together.
 
-**Next:** the game's thread's broad cost (spread over ~1,000 functions):
-the generated code's general shape (e.g. every inline memory access reloads
-`psp_mem_fast_rd` after a guest store), then `raw_pack` further and the
-submit (7 us); then the
+**The hot code's shape (88dce16, psprecomp d38b137).** The game's time is
+in ~570 hot functions (functions outside the hot list: 1.4% of a run), so
+the cuts are to their generated code: the VFPU operations still called in
+them (~130 sites, each also a write-back and reload of the vector locals)
+inline -- vmmul, vmscl, the matrix constants, vidt, viim / vfim, vcmp,
+vcmov, vcrs / vcrsp, rcp / rsq / sqrt / sat (36 calls left); `lv.q` /
+`sv.q` one range check each (`psp_read_q` / `psp_write_q`); the RAM base
+pointers in locals (a guest store is a char write that forced the pointers
+to be loaded again); no vector write-back around calls to the 60,940
+functions that never touch the VFPU, none after a tail call, and fewer
+entry loads. Checks: 2,216 VFPU statements x 1,000 register files, 0
+mismatches; `test_mem_q`; PC replay; Azahar reaches the game. `.text` 29.58
+-> 29.49 MB. (A first Azahar run stalled after the title; the same build
+without `sdmc:/psp2i/bench` didn't: the benchmark leaves something behind.)
+**Console, field (`psp2i_t4_shape`, 48 s) against cuts2 (43 s)**, fps /
+game ms a frame by draws: 300-349 19.0 / 42 (19.0 / 46), 350-399 19.25 / 42
+(17.0 / 48), 400-449 19.0 / 42 (17.0 / 54), 450-499 13.6 / 62 (13.75 / 61),
+500-549 14.5 / 53 (12.25 / 70). The same 13 fps over the field with heavier
+scenes (751 draws a frame against 529). Few seconds a bucket: a profile
+would say how much the hot functions' share moved.
+
+**Next:** a profile of this build; then `raw_pack` further and the submit
+(7 us); then the
 three VFPU functions above, which need a closer look at what they spend on
 (memory reads?). The previous Next: the game code (more hot
 functions, O3 on more of them), the sound mixer, the GE commands it still
