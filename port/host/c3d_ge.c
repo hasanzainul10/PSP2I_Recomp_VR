@@ -84,11 +84,14 @@ static int g_vs_noskin, g_vs_nolight;            /* sdmc:/psp2i/vs_noskin, vs_no
 static C3D_AttrInfo g_attr_cpu;                  /* the transformed vertices' layout (g_ring) */
 static C3D_BufInfo g_buf_cpu;
 static int g_raw_mode;                           /* the raw program and buffers are bound */
+static int g_lay_ok;                             /* raw_submit's layout is set and g_lay_key / g_lay_off hold it */
+static uint32_t g_lay_off;                       /* where in the raw ring that layout's run of vertices starts */
 #define RAW_BYTES (3u << 20)
 static uint8_t *g_raw;
 static uint32_t g_raw_pos;
 static int g_cull_flip;                          /* sdmc:/psp2i/cull_flip: the PICA's winding the other way */
 static uint64_t n_raw_draws, n_raw_verts, n_raw_refused;
+static uint64_t n_raw_copied, n_raw_lay_kept, n_unif_set, n_unif_kept;   /* raw_submit's caches */
 static C3D_RenderTarget *g_top;                  /* the top screen, left eye */
 
 /* The frame: open from the first draw after a present until the next
@@ -273,6 +276,7 @@ static void frame_open(void) {
     g_in_frame = 1;
     g_ring_pos = 0;
     g_raw_pos = 0;
+    g_lay_ok = 0;                                /* the raw ring starts over: a new run of layouts */
     g_cur = NULL;
     g_cur_depth = NULL;
 }
@@ -899,7 +903,37 @@ static struct {
     GPU_CULLMODE cull;
 } g_cs;
 
-static void state_forget(void) { g_cs.valid = 0; g_cs.tex = NULL; }
+/* citro3d marks a uniform (and the vertex layout) for sending whenever it is
+ * set, even to the value it has, and converts every marked row to the GPU's
+ * 24-bit floats at the next draw: the PICA path set ~10-60 rows and the
+ * layout on every draw (a 7 us submit on the console's field). The values
+ * the raw path last set are kept here and set again only when they change.
+ * Anything that sets them another way (the self-tests bind other programs)
+ * calls state_forget. */
+static float g_uc[C3D_FVUNIF_COUNT][4];
+static uint8_t g_uc_ok[C3D_FVUNIF_COUNT];
+static uint32_t g_ub_val, g_ub_known;
+static void unif(int r, float x, float y, float z, float w) {
+    const float v[4] = { x, y, z, w };
+    if (g_uc_ok[r] && !memcmp(g_uc[r], v, sizeof v)) { n_unif_kept++; return; }
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, r, x, y, z, w);
+    memcpy(g_uc[r], v, sizeof v);
+    g_uc_ok[r] = 1;
+    n_unif_set++;
+}
+static void unif_b(int id, int v) {
+    const uint32_t bit = 1u << id;
+    if ((g_ub_known & bit) && !!(g_ub_val & bit) == !!v) return;
+    C3D_BoolUnifSet(GPU_VERTEX_SHADER, id, v != 0);
+    g_ub_known |= bit;
+    g_ub_val = v ? g_ub_val | bit : g_ub_val & ~bit;
+}
+static void state_forget(void) {
+    g_cs.valid = 0; g_cs.tex = NULL;
+    memset(g_uc_ok, 0, sizeof g_uc_ok);
+    g_ub_known = 0;
+    g_lay_ok = 0;
+}
 
 static void cs_begin(void) {
     if (g_cs.valid) return;
@@ -962,7 +996,8 @@ static void use_cpu_path(void) {
     if (!g_raw_mode) return;
     C3D_SetAttrInfo(&g_attr_cpu);
     C3D_SetBufInfo(&g_buf_cpu);
-    C3D_BoolUnifSet(GPU_VERTEX_SHADER, ub_raw, false);
+    g_lay_ok = 0;
+    unif_b(ub_raw, 0);
     C3D_CullFace(GPU_CULL_NONE);
     g_cs.cull = GPU_CULL_NONE;
     g_raw_mode = 0;
@@ -1423,81 +1458,146 @@ static void raw_pack(const psp_gpu_raw_draw *d, const raw_lay *l, uint8_t *out) 
 
 /* A 4x3 matrix (column-major, as the GE loads it) as three rows for dp4. */
 static void unif_rows43(int at, const float *mtx) {
-    for (int r = 0; r < 3; r++) C3D_FVUnifSet(GPU_VERTEX_SHADER, at + r, mtx[r], mtx[3 + r], mtx[6 + r], mtx[9 + r]);
+    for (int r = 0; r < 3; r++) unif(at + r, mtx[r], mtx[3 + r], mtx[6 + r], mtx[9 + r]);
 }
 
 /* psp_ge_light_prep into the shader's emis, ambg, matamb, mflag and L (see
  * c3d_ge.v.pica .proc light), and the lights' booleans */
 static void unif_lights(const psp_ge_light_prep *P) {
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, u_emis, P->emissive[0], P->emissive[1], P->emissive[2], 0);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, u_ambg, P->amb_all[0], P->amb_all[1], P->amb_all[2], P->amb_alpha);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, u_matamb, P->mat_amb[0], P->mat_amb[1], P->mat_amb[2], P->mat_amb[3]);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, u_mflag, (P->mat_update & 1) ? 1.0f : 0.0f, (P->mat_update & 2) ? 1.0f : 0.0f,
+    unif(u_emis, P->emissive[0], P->emissive[1], P->emissive[2], 0);
+    unif(u_ambg, P->amb_all[0], P->amb_all[1], P->amb_all[2], P->amb_alpha);
+    unif(u_matamb, P->mat_amb[0], P->mat_amb[1], P->mat_amb[2], P->mat_amb[3]);
+    unif(u_mflag, (P->mat_update & 1) ? 1.0f : 0.0f, (P->mat_update & 2) ? 1.0f : 0.0f,
                   (P->mat_update & 4) ? 1.0f : 0.0f, P->shininess);
     for (int i = 0; i < 4; i++) {
-        C3D_BoolUnifSet(GPU_VERTEX_SHADER, ub_l[i], i < P->n);
+        unif_b(ub_l[i], i < P->n);
         if (i >= P->n) continue;
         const psp_ge_light_one *q = &P->l[i];
         const int at = u_L + i * 7, dir = q->type == 0;
-        if (dir) C3D_FVUnifSet(GPU_VERTEX_SHADER, at, q->to_ok ? q->to[0] : 0, q->to_ok ? q->to[1] : 0, q->to_ok ? q->to[2] : 0, 0);
-        else C3D_FVUnifSet(GPU_VERTEX_SHADER, at, q->pos[0], q->pos[1], q->pos[2], 1);
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, at + 1, q->dir[0], q->dir[1], q->dir[2], !dir && q->type >= 2 ? 1.0f : 0.0f);
-        if (dir) C3D_FVUnifSet(GPU_VERTEX_SHADER, at + 2, 1, 0, 0, 0);
-        else C3D_FVUnifSet(GPU_VERTEX_SHADER, at + 2, q->att[0], q->att[1], q->att[2], q->spot_cut);
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, at + 3, q->spot_exp, q->comp == 2 ? 1.0f : 0.0f, 0, 0);
-        if (dir) C3D_FVUnifSet(GPU_VERTEX_SHADER, at + 4, 0, 0, 0, 0);
-        else C3D_FVUnifSet(GPU_VERTEX_SHADER, at + 4, q->amb[0], q->amb[1], q->amb[2], 0);
-        if (q->dif_on) C3D_FVUnifSet(GPU_VERTEX_SHADER, at + 5, q->dif[0], q->dif[1], q->dif[2], 0);
-        else C3D_FVUnifSet(GPU_VERTEX_SHADER, at + 5, 0, 0, 0, 0);
-        if (q->spec_on) C3D_FVUnifSet(GPU_VERTEX_SHADER, at + 6, q->spc[0], q->spc[1], q->spc[2], 0);
-        else C3D_FVUnifSet(GPU_VERTEX_SHADER, at + 6, 0, 0, 0, 0);
+        if (dir) unif(at, q->to_ok ? q->to[0] : 0, q->to_ok ? q->to[1] : 0, q->to_ok ? q->to[2] : 0, 0);
+        else unif(at, q->pos[0], q->pos[1], q->pos[2], 1);
+        unif(at + 1, q->dir[0], q->dir[1], q->dir[2], !dir && q->type >= 2 ? 1.0f : 0.0f);
+        if (dir) unif(at + 2, 1, 0, 0, 0);
+        else unif(at + 2, q->att[0], q->att[1], q->att[2], q->spot_cut);
+        unif(at + 3, q->spot_exp, q->comp == 2 ? 1.0f : 0.0f, 0, 0);
+        if (dir) unif(at + 4, 0, 0, 0, 0);
+        else unif(at + 4, q->amb[0], q->amb[1], q->amb[2], 0);
+        if (q->dif_on) unif(at + 5, q->dif[0], q->dif[1], q->dif[2], 0);
+        else unif(at + 5, 0, 0, 0, 0);
+        if (q->spec_on) unif(at + 6, q->spc[0], q->spc[1], q->spc[2], 0);
+        else unif(at + 6, 0, 0, 0, 0);
     }
 }
 
 /* The draw itself, on the target and state already set: the vertices packed,
  * the raw layout bound, the uniforms for a tw x th target. */
+/* The game's own vertex layout copied as it is, when it already is one the
+ * console's attribute loader takes (whole words on word boundaries, the
+ * stride their sum; 3DS_PROGRESS.md T4, the GPU hangs): unskinned, 16-bit
+ * or float uv first, then a 32-bit colour, a float normal when lit, a float
+ * position -- the PSP's order. The loaders then read it in that order. */
+static int raw_copyable(const psp_gpu_raw_draw *d) {
+    if (d->bones || d->colors || d->c_off < 0 || d->t_off != 0 || d->pos_fmt != 3) return 0;
+    if (d->tex_fmt != 2 && d->tex_fmt != 3) return 0;
+    const int tsz = d->tex_fmt == 2 ? 4 : 8;
+    if (d->c_off != tsz) return 0;
+    int at = tsz + 4;
+    if (d->light) {
+        if (d->normal_fmt != 3 || d->n_off != at) return 0;
+        at += 12;
+    }
+    return d->p_off == at && d->stride == (uint32_t)at + 12u;
+}
+
+/* The layout of the last raw draw: while the next one has the same, its
+ * vertices go into the same run of the ring, a whole number of vertices on,
+ * and the draw names them by index (indices rebased, or the first vertex) --
+ * no new attribute or buffer state. */
+typedef struct { int copy, pos, tex, nrm, wts; uint32_t stride; } lay_key;
+static lay_key g_lay_key;
+
 static int raw_submit(const psp_gpu_raw_draw *d, float tw, float th, const float uvs[2]) {
     raw_lay l;
     raw_layout(d, &l);
-    const uint32_t vbytes = d->nvbuf * l.stride, ibytes = d->index ? d->count * (uint32_t)d->index_size : 0;
-    if (vbytes + ibytes + 32 > RAW_BYTES) { n_raw_refused++; return 1; }
-    if (g_raw_pos + vbytes + ibytes + 32 > RAW_BYTES) gpu_finish();
-    uint8_t *vb = raw_alloc(vbytes);
-    raw_pack(d, &l, vb);
+    const int copy = raw_copyable(d);
+    const lay_key key = { copy, d->pos_fmt, d->t_off >= 0 ? d->tex_fmt : -1, l.nrm ? d->normal_fmt : -1,
+                          l.wts ? d->weight_fmt : -1, l.stride };
+    const uint32_t vbytes = d->nvbuf * l.stride, ibytes = d->index ? d->count * 2u : 0;
+    if (vbytes + ibytes + l.stride + 32 > RAW_BYTES) { n_raw_refused++; return 1; }
+    if (g_raw_pos + vbytes + ibytes + l.stride + 32 > RAW_BYTES) gpu_finish();
+    /* the same layout, and the indices still fit in 16 bits from the run's start */
+    uint32_t base = 0;
+    int same = g_lay_ok && g_raw_mode && !memcmp(&key, &g_lay_key, sizeof key);
+    if (same) {
+        const uint32_t rel = g_raw_pos - g_lay_off, pos = g_raw_pos + (l.stride - rel % l.stride) % l.stride;
+        base = (pos - g_lay_off) / l.stride;
+        if (base + d->nvbuf > 0xFFFFu) same = 0;
+        else g_raw_pos = pos;
+    }
+    if (!same) {
+        g_raw_pos = (g_raw_pos + 15) & ~15u;
+        g_lay_off = g_raw_pos;
+        base = 0;
+    }
+    uint8_t *vb = g_raw + g_raw_pos;
+    g_raw_pos += vbytes;
+    if (copy) { memcpy(vb, d->verts, vbytes); n_raw_copied++; }
+    else raw_pack(d, &l, vb);
     void *ib = NULL;
-    if (d->index) { ib = raw_alloc(ibytes); memcpy(ib, d->index, ibytes); }
+    int ib16 = 1;
+    if (d->index) {
+        if (!base && d->index_size == 1) {           /* as the game has them */
+            ib = raw_alloc(d->count);
+            memcpy(ib, d->index, d->count);
+            ib16 = 0;
+        } else if (!base) {
+            ib = raw_alloc(d->count * 2u);
+            memcpy(ib, d->index, d->count * 2u);
+        } else {                                     /* rebased to the run's first vertex */
+            uint16_t *o = (uint16_t *)raw_alloc(d->count * 2u);
+            if (d->index_size == 1) { const uint8_t *x = (const uint8_t *)d->index; for (uint32_t i = 0; i < d->count; i++) o[i] = (uint16_t)(x[i] + base); }
+            else { const uint16_t *x = (const uint16_t *)d->index; for (uint32_t i = 0; i < d->count; i++) o[i] = (uint16_t)(x[i] + base); }
+            ib = o;
+        }
+    }
     RPART(R_PACK);
 
-    /* in register order, so attribute i is v_i (v3 left out when unlit) */
-    static const GPU_FORMATS PF[4] = { GPU_FLOAT, GPU_BYTE, GPU_SHORT, GPU_FLOAT };
-    static const int PN[4] = { 3, 4, 4, 3 };
-    static const GPU_FORMATS TF[4] = { GPU_FLOAT, GPU_UNSIGNED_BYTE, GPU_SHORT, GPU_FLOAT };
-    static const int TN[4] = { 2, 4, 2, 2 };
-    static const GPU_FORMATS WF[4] = { GPU_FLOAT, GPU_UNSIGNED_BYTE, GPU_SHORT, GPU_FLOAT };
-    C3D_AttrInfo ai;
-    AttrInfo_Init(&ai);
-    AttrInfo_AddLoader(&ai, 0, PF[d->pos_fmt & 3], PN[d->pos_fmt & 3]);
-    if (d->t_off >= 0) AttrInfo_AddLoader(&ai, 1, TF[d->tex_fmt & 3], TN[d->tex_fmt & 3]);
-    else AttrInfo_AddLoader(&ai, 1, GPU_UNSIGNED_BYTE, 4);
-    AttrInfo_AddLoader(&ai, 2, GPU_UNSIGNED_BYTE, 4);
-    u64 perm = 0x210;
-    int na = 3;
-    if (l.nrm) { AttrInfo_AddLoader(&ai, 3, PF[d->normal_fmt & 3], PN[d->normal_fmt & 3]); perm |= (u64)na << (na * 4); na++; }
-    if (l.wts) {
-        AttrInfo_AddLoader(&ai, 4, WF[d->weight_fmt & 3], 4);
-        perm |= (u64)na << (na * 4); na++;
-        AttrInfo_AddLoader(&ai, 5, WF[d->weight_fmt & 3], 4);
-        perm |= (u64)na << (na * 4); na++;
-    }
-    C3D_BufInfo bi;
-    BufInfo_Init(&bi);
-    bi.base_paddr = osConvertVirtToPhys(g_raw);
-    BufInfo_Add(&bi, vb, l.stride, na, perm);
-    C3D_SetAttrInfo(&ai);
-    C3D_SetBufInfo(&bi);
-    C3D_BoolUnifSet(GPU_VERTEX_SHADER, ub_raw, true);
-    C3D_BoolUnifSet(GPU_VERTEX_SHADER, ub_skin, d->bones != NULL);
-    C3D_BoolUnifSet(GPU_VERTEX_SHADER, ub_light, d->light != NULL);
+    if (!same) {
+        /* in register order, so attribute i is v_i (v3 left out when unlit) */
+        static const GPU_FORMATS PF[4] = { GPU_FLOAT, GPU_BYTE, GPU_SHORT, GPU_FLOAT };
+        static const int PN[4] = { 3, 4, 4, 3 };
+        static const GPU_FORMATS TF[4] = { GPU_FLOAT, GPU_UNSIGNED_BYTE, GPU_SHORT, GPU_FLOAT };
+        static const int TN[4] = { 2, 4, 2, 2 };
+        static const GPU_FORMATS WF[4] = { GPU_FLOAT, GPU_UNSIGNED_BYTE, GPU_SHORT, GPU_FLOAT };
+        C3D_AttrInfo ai;
+        AttrInfo_Init(&ai);
+        AttrInfo_AddLoader(&ai, 0, PF[d->pos_fmt & 3], PN[d->pos_fmt & 3]);
+        if (d->t_off >= 0) AttrInfo_AddLoader(&ai, 1, TF[d->tex_fmt & 3], TN[d->tex_fmt & 3]);
+        else AttrInfo_AddLoader(&ai, 1, GPU_UNSIGNED_BYTE, 4);
+        AttrInfo_AddLoader(&ai, 2, GPU_UNSIGNED_BYTE, 4);
+        u64 perm = 0x210;
+        int na = 3;
+        if (l.nrm) { AttrInfo_AddLoader(&ai, 3, PF[d->normal_fmt & 3], PN[d->normal_fmt & 3]); perm |= (u64)na << (na * 4); na++; }
+        if (l.wts) {
+            AttrInfo_AddLoader(&ai, 4, WF[d->weight_fmt & 3], 4);
+            perm |= (u64)na << (na * 4); na++;
+            AttrInfo_AddLoader(&ai, 5, WF[d->weight_fmt & 3], 4);
+            perm |= (u64)na << (na * 4); na++;
+        }
+        /* the game's order: uv (attribute 1), colour (2), normal (3), position (0) */
+        if (copy) perm = l.nrm ? 0x0321 : 0x021;
+        C3D_BufInfo bi;
+        BufInfo_Init(&bi);
+        bi.base_paddr = osConvertVirtToPhys(g_raw);
+        BufInfo_Add(&bi, vb, l.stride, na, perm);
+        C3D_SetAttrInfo(&ai);
+        C3D_SetBufInfo(&bi);
+        g_lay_key = key;
+        g_lay_ok = 1;
+    } else n_raw_lay_kept++;
+    unif_b(ub_raw, 1);
+    unif_b(ub_skin, d->bones != NULL);
+    unif_b(ub_light, d->light != NULL);
     g_raw_mode = 1;
     cs_cull(pica_cull(d->cull));
     RPART(R_LAYOUT);
@@ -1518,18 +1618,17 @@ static int raw_submit(const psp_gpu_raw_draw *d, float tw, float th, const float
         const float z = az * ms[2][c] + bz * ms[3][c];
         ms[0][c] = x; ms[1][c] = y; ms[2][c] = z;
     }
-    for (int r = 0; r < 4; r++) C3D_FVUnifSet(GPU_VERTEX_SHADER, u_m + r, ms[r][0], ms[r][1], ms[r][2], ms[r][3]);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, u_uvk, d->uv_scale[0] * uvs[0], d->uv_scale[1] * uvs[1],
-                  d->uv_off[0] * uvs[0], d->uv_off[1] * uvs[1]);
+    for (int r = 0; r < 4; r++) unif(u_m + r, ms[r][0], ms[r][1], ms[r][2], ms[r][3]);
+    unif(u_uvk, d->uv_scale[0] * uvs[0], d->uv_scale[1] * uvs[1], d->uv_off[0] * uvs[0], d->uv_off[1] * uvs[1]);
     const float fix = d->t_off >= 0 && d->tex_fmt == 2 ? 65536.0f : 0.0f;
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, u_uvfix, fix, fix, fix, fix);
+    unif(u_uvfix, fix, fix, fix, fix);
     static const float NORM[4] = { 1.0f, 1.0f / 128.0f, 1.0f / 32768.0f, 1.0f };
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, u_pscale, NORM[d->pos_fmt & 3], NORM[d->weight_fmt & 3],
-                  d->weight_fmt == 2 ? 65536.0f : 0.0f, d->reverse_normals ? -1.0f : 1.0f);
+    unif(u_pscale, NORM[d->pos_fmt & 3], NORM[d->weight_fmt & 3], d->weight_fmt == 2 ? 65536.0f : 0.0f,
+         d->reverse_normals ? -1.0f : 1.0f);
     if (d->bones) {
         for (int b = 0; b < 8; b++) {
             if (b < d->nweights) unif_rows43(u_bone + b * 3, d->bones + 12 * b);
-            else for (int r = 0; r < 3; r++) C3D_FVUnifSet(GPU_VERTEX_SHADER, u_bone + b * 3 + r, 0, 0, 0, 0);
+            else for (int r = 0; r < 3; r++) unif(u_bone + b * 3 + r, 0, 0, 0, 0);
         }
     }
     if (d->light) {
@@ -1547,8 +1646,8 @@ static int raw_submit(const psp_gpu_raw_draw *d, float tw, float th, const float
          d->t_off >= 0 ? d->tex_fmt : 0, d->c_off >= 0 ? (d->colors ? 16 : 32) : 0, l.nrm ? d->normal_fmt : 0,
          l.wts ? d->nweights : 0, l.wts ? d->weight_fmt : 0,
          ib ? (d->index_size == 1 ? "8-bit indices" : "16-bit indices") : "no indices");
-    if (ib) C3D_DrawElements(prim, (int)d->count, d->index_size == 1 ? C3D_UNSIGNED_BYTE : C3D_UNSIGNED_SHORT, ib);
-    else C3D_DrawArrays(prim, 0, (int)d->count);
+    if (ib) C3D_DrawElements(prim, (int)d->count, ib16 ? C3D_UNSIGNED_SHORT : C3D_UNSIGNED_BYTE, ib);
+    else C3D_DrawArrays(prim, (int)base, (int)d->count);
     RPART(R_SUBMIT);
     return 0;
 }
@@ -1572,7 +1671,7 @@ static int c3d_draw_raw_on(const psp_gpu_state *st, const psp_gpu_raw_draw *d) {
     {   /* room in the ring first: making it ends the frame (gpu_finish), and the target is bound after */
         raw_lay l;
         raw_layout(d, &l);
-        const uint32_t need = d->nvbuf * l.stride + (d->index ? d->count * (uint32_t)d->index_size : 0) + 32;
+        const uint32_t need = d->nvbuf * l.stride + (d->index ? d->count * 2u : 0) + l.stride + 32;
         if (need > RAW_BYTES) { n_raw_refused++; return 1; }
         if (g_raw_pos + need > RAW_BYTES) gpu_finish();
     }
@@ -2154,6 +2253,62 @@ static void gpu_selftest(void) {
             raw_submit(&d, (float)TOP_H, (float)TOP_W, uvs);
             ST_STEP(SV[k].name);
         }
+        /* 6n-6p: the game's own layout copied as it is (raw_copyable: 16-bit
+         * uv, colour, [float normal,] float position), the loaders reading it
+         * in the PSP's order; 6p draws it twice in one frame, so the second
+         * keeps the layout and its indices are rebased onto the run
+         * (raw_submit's layout cache; ST_STEP's finish starts a new run) */
+        static const char *const CN[3] = { "6n raw: the game's layout copied", "6o raw: copied, lit, float normals",
+                                            "6p raw: copied twice, the layout kept, indices rebased" };
+        for (int k = 0; k < 3; k++)
+          for (int rep = 0; rep < (k == 2 ? 2 : 1); rep++) {
+            const int lit = k == 1;
+            const uint32_t stride = lit ? 32u : 20u, p_off = lit ? 20u : 8u;
+            uint8_t vb[4 * 32];
+            memset(vb, 0, sizeof vb);
+            for (int i = 0; i < 4; i++) {
+                uint8_t *v = vb + (uint32_t)i * stride;
+                const uint16_t uv[2] = { (uint16_t)((QX[i] + 0.5f) * 32768), (uint16_t)((QY[i] + 0.5f) * 32768) };
+                memcpy(v, uv, 4);
+                const uint32_t c = 0xFF80FF00u;
+                memcpy(v + 4, &c, 4);
+                if (lit) { const float n3[3] = { 0, 0, 1 }; memcpy(v + 8, n3, 12); }
+                const float p3[3] = { QX[i], QY[i], 0 };
+                memcpy(v + p_off, p3, 12);
+            }
+            psp_ge_light_prep lp;
+            memset(&lp, 0, sizeof lp);
+            lp.amb_all[0] = lp.amb_all[1] = lp.amb_all[2] = 0.3f;
+            lp.amb_alpha = 1;
+            lp.mat_amb[0] = lp.mat_amb[1] = lp.mat_amb[2] = lp.mat_amb[3] = 1;
+            lp.mat_update = 2;
+            psp_ge_light_one *q = &lp.l[lp.n++];
+            q->type = 0; q->dif_on = 1; q->to[2] = 1; q->to_ok = 1;
+            q->dif[0] = q->dif[1] = q->dif[2] = 0.7f;
+            psp_gpu_raw_draw d;
+            memset(&d, 0, sizeof d);
+            d.prim = 5;
+            d.verts = vb; d.nvbuf = 4; d.stride = stride;
+            d.t_off = 0; d.c_off = 4; d.p_off = (int)p_off; d.w_off = -1;
+            d.tex_fmt = 2; d.pos_fmt = 3;
+            if (lit) { d.n_off = 8; d.normal_fmt = 3; d.world = world; d.light = &lp; }
+            else d.n_off = -1;
+            static const uint8_t FANC[4] = { 0, 1, 3, 2 };
+            uint8_t ix[4];
+            memcpy(ix, FANC, 4);
+            d.index = ix; d.index_size = 1; d.count = 4;
+            for (int i = 0; i < 16; i++) d.mvp[i] = (i % 5) == 0 ? 1.0f : 0.0f;
+            d.vscale[0] = 64; d.vscale[1] = 64; d.vscale[2] = 32767;
+            d.voff[0] = 120 + 40.0f * (float)(k + rep); d.voff[1] = 200; d.voff[2] = 32768;
+            d.uv_scale[0] = d.uv_scale[1] = 1;
+            const float uvs[2] = { 1, 1 };
+            C3D_FrameDrawOn(g_top);
+            C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+            C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+            st_untextured();
+            raw_submit(&d, (float)TOP_H, (float)TOP_W, uvs);
+            if (k < 2 || rep == 1) ST_STEP(CN[k]);
+          }
         use_cpu_path();
     }
     if (g_in_frame) {                            /* citro3d panics on a target deleted inside a frame */
@@ -2309,6 +2464,12 @@ void c3d_ge_report(FILE *out) {
                 (double)(g_rdt[R_LAYOUT] - rwas[R_LAYOUT]) * rus, (double)(g_rdt[R_UNIF] - rwas[R_UNIF]) * rus,
                 (double)(g_rdt[R_SUBMIT] - rwas[R_SUBMIT]) * rus, (double)(g_rdt[R_ROWS] - rwas[R_ROWS]) * rus);
         memcpy(rwas, g_rdt, sizeof rwas);
+        static uint64_t cp_was, lk_was, us_was, uk_was;
+        fprintf(out, "c3d: PICA path caches: %.0f%% of draws copied the game's layout, %.0f%% kept the layout; "
+                     "%.1f uniform rows set a draw, %.1f kept\n",
+                100.0 * (double)(n_raw_copied - cp_was) / nr, 100.0 * (double)(n_raw_lay_kept - lk_was) / nr,
+                (double)(n_unif_set - us_was) / nr, (double)(n_unif_kept - uk_was) / nr);
+        cp_was = n_raw_copied; lk_was = n_raw_lay_kept; us_was = n_unif_set; uk_was = n_unif_kept;
         raw_was = n_raw_draws; skin_was = n_raw_skin; lit_was = n_raw_lit;
         fprintf(out, "c3d: us per CPU-path draw (%.0f): target %.1f, depth+texture %.1f, ring %.1f, state %.1f, submit %.1f, rows %.1f\n", nd,
                 (double)(g_dt[D_TARGET] - was[D_TARGET]) * us, (double)(g_dt[D_TEXTURE] - was[D_TEXTURE]) * us,
