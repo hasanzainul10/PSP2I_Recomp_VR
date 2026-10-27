@@ -297,7 +297,22 @@ calls) 1.4% -> out of the top 25; `sceGeDrawSync` (waiting for core 2) 17.6
 -> 9.0%, idle 7.7 -> 9.0%. The rest is spread thin (each function under
 1%). A longer field profile would firm these up.
 
-**Next:** `raw_pack` further and the submit (7 us); then the
+**PICA path caches (d396a76; console, field, `psp2i_t4_c3dcache`, 462,000
+draws).** citro3d sends a uniform row (converted to float24) and the vertex
+layout whenever they're set, changed or not, and the PICA path set them on
+every draw. Now `unif()` / `unif_b()` set only what changed (1.2-3.1 rows a
+draw set, 11-19 skipped); while the layout repeats (93-97% of draws), the
+draw's vertices go into the same run of the ring and it names them by
+index (indices rebased, or the first vertex); and a vertex the attribute
+loader takes as it is (`raw_copyable`: 16-bit / float uv, 32-bit colour,
+float normal and position in the PSP's order) is copied with one `memcpy`
+(5-18% of draws there). Per draw **31.9 -> 26.8 us**: submit 7.2 -> 5.2,
+layout 1.8 -> 0.8, pack 9.5 -> 8.4, depth+texture 6.4 -> 5.1, uniforms 1.5
+-> 2.4 (the comparisons). No GPU hang with the copied layout (self-test
+steps 6n-6p ran first); the run was uneventful.
+
+**Next:** `raw_pack` for the skinned layouts (pack is 16 us a draw where a
+third are skinned); then the
 three VFPU functions above, which need a closer look at what they spend on
 (memory reads?). The previous Next: the game code (more hot
 functions, O3 on more of them), the sound mixer, the GE commands it still
