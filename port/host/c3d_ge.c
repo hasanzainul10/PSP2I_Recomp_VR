@@ -1420,7 +1420,7 @@ static uint8_t *raw_alloc(uint32_t bytes) {
 /* n bytes of src into room bytes at o (4-byte aligned, room a multiple of
  * 4), zero past them: what memset then memcpy gave, by words. src may be
  * unaligned and is read only inside its n bytes. */
-static inline uint32_t *put_field(uint32_t *o, const uint8_t *src, uint32_t n, uint32_t room) {
+static inline __attribute__((always_inline)) uint32_t *put_field(uint32_t *o, const uint8_t *src, uint32_t n, uint32_t room) {
     uint32_t k = 0;
     for (; k + 4 <= n; k += 4) { uint32_t w; memcpy(&w, src + k, 4); *o++ = w; }
     switch (n - k) {
@@ -1434,27 +1434,56 @@ static inline uint32_t *put_field(uint32_t *o, const uint8_t *src, uint32_t n, u
 }
 
 /* Per vertex: position, uv, colour, normal, weights, each padded to its
- * slot (raw_layout). A memset and five memcpys a vertex were 11 us a draw on
- * the console's field, 30 in skinned scenes (3DS_PROGRESS.md T4). */
+ * slot (raw_layout); pn / un / nn / wn bytes of the game's into rooms of pr /
+ * ur / nr / wr, the colour from the 16-bit colours unpacked (cs 0), the
+ * vertex (1) or the material (2). Inlined with constants (raw_pack), each
+ * vertex is a few fixed loads and stores. */
+static inline __attribute__((always_inline)) void pack_loop(const psp_gpu_raw_draw *d, uint8_t *out,
+        uint32_t pn, uint32_t pr, uint32_t un, uint32_t ur, int cs, uint32_t nn, uint32_t nr, uint32_t wn, uint32_t wr) {
+    const uint32_t mat = d->material;
+    uint32_t *o = (uint32_t *)out;
+    const uint8_t *a = d->verts;
+    for (uint32_t i = 0; i < d->nvbuf; i++, a += d->stride) {
+        o = put_field(o, a + d->p_off, pn, pr);
+        o = put_field(o, un ? a + d->t_off : a, un, ur);
+        if (cs == 0) *o++ = d->colors[i];
+        else if (cs == 1) { uint32_t c; memcpy(&c, a + d->c_off, 4); *o++ = c; }
+        else *o++ = mat;
+        if (nr) o = put_field(o, a + d->n_off, nn, nr);
+        if (wr) o = put_field(o, a + d->w_off, wn, wr);
+    }
+}
+
+/* The game's vertex formats, by how often they're drawn (PC, the town, 75 s:
+ * 16-bit positions throughout; the skinned ones with 8-bit normals, no
+ * colour, 1-4 8- or 16-bit weights; the most common unskinned one with
+ * 16-bit colours) get a loop of their own: the generic one was 16 us a draw
+ * on the console's field where a third of the draws are skinned
+ * (3DS_PROGRESS.md T4). Same bytes as the generic loop. */
+#define PACK_CASE(PN, UN, CS, NN, NR, WN, WR)                                                        \
+    if (pn == (PN) && un == (UN) && cs == (CS) && nn == (NN) && l->nrm == (NR) && wn == (WN) && l->wts == (WR)) { \
+        pack_loop(d, out, PN, 8, UN, 4, CS, NN, NR, WN, WR); n_pack_fixed++; return; }
+#define PACK_SKIN(UN, NN, NR)                                                                        \
+    PACK_CASE(6, UN, 2, NN, NR, 0, 0) PACK_CASE(6, UN, 2, NN, NR, 1, 8) PACK_CASE(6, UN, 2, NN, NR, 2, 8)  \
+    PACK_CASE(6, UN, 2, NN, NR, 3, 8) PACK_CASE(6, UN, 2, NN, NR, 4, 8) PACK_CASE(6, UN, 2, NN, NR, 2, 16) \
+    PACK_CASE(6, UN, 2, NN, NR, 4, 16) PACK_CASE(6, UN, 2, NN, NR, 6, 16) PACK_CASE(6, UN, 2, NN, NR, 8, 16)
+static uint64_t n_pack_fixed, n_pack_any;
+
 static void raw_pack(const psp_gpu_raw_draw *d, const raw_lay *l, uint8_t *out) {
     static const int CS[4] = { 0, 1, 2, 4 };
     const uint32_t pn = 3u * (uint32_t)CS[d->pos_fmt & 3], un = d->t_off >= 0 ? 2u * (uint32_t)CS[d->tex_fmt & 3] : 0,
                    nn = l->nrm ? 3u * (uint32_t)CS[d->normal_fmt & 3] : 0,
                    wn = l->wts ? (uint32_t)d->nweights * (uint32_t)CS[d->weight_fmt & 3] : 0;
-    const uint32_t mat = d->material;
-    const int csrc = d->colors ? 0 : d->c_off >= 0 ? 1 : 2;
-    uint32_t *o = (uint32_t *)out;
-    for (uint32_t i = 0; i < d->nvbuf; i++) {
-        const uint8_t *a = d->verts + i * d->stride;
-        o = put_field(o, a + d->p_off, pn, l->pos);
-        o = put_field(o, un ? a + d->t_off : a, un, l->uv);
-        if (csrc == 0) *o++ = d->colors[i];
-        else if (csrc == 1) { uint32_t c; memcpy(&c, a + d->c_off, 4); *o++ = c; }
-        else *o++ = mat;
-        if (l->nrm) o = put_field(o, a + d->n_off, nn, l->nrm);
-        if (l->wts) o = put_field(o, a + d->w_off, wn, l->wts);
+    const int cs = d->colors ? 0 : d->c_off >= 0 ? 1 : 2;
+    if (l->pos == 8 && l->uv == 4) {             /* 16-bit positions, uv of 8 or 16 bits or none */
+        PACK_SKIN(4, 3, 4) PACK_SKIN(4, 0, 0) PACK_SKIN(2, 3, 4) PACK_SKIN(2, 0, 0)
+        PACK_CASE(6, 4, 0, 0, 0, 0, 0) PACK_CASE(6, 2, 0, 0, 0, 0, 0) PACK_CASE(6, 0, 0, 0, 0, 0, 0)
     }
+    pack_loop(d, out, pn, l->pos, un, l->uv, cs, nn, l->nrm, wn, l->wts);
+    n_pack_any++;
 }
+#undef PACK_SKIN
+#undef PACK_CASE
 
 /* A 4x3 matrix (column-major, as the GE loads it) as three rows for dp4. */
 static void unif_rows43(int at, const float *mtx) {
@@ -2470,6 +2499,11 @@ void c3d_ge_report(FILE *out) {
                 100.0 * (double)(n_raw_copied - cp_was) / nr, 100.0 * (double)(n_raw_lay_kept - lk_was) / nr,
                 (double)(n_unif_set - us_was) / nr, (double)(n_unif_kept - uk_was) / nr);
         cp_was = n_raw_copied; lk_was = n_raw_lay_kept; us_was = n_unif_set; uk_was = n_unif_kept;
+        static uint64_t pf_was, pa_was;
+        const double pk = (double)(n_pack_fixed - pf_was) + (double)(n_pack_any - pa_was);
+        fprintf(out, "c3d: packed draws: %.0f%% by a loop of their format's own\n",
+                pk > 0 ? 100.0 * (double)(n_pack_fixed - pf_was) / pk : 0.0);
+        pf_was = n_pack_fixed; pa_was = n_pack_any;
         raw_was = n_raw_draws; skin_was = n_raw_skin; lit_was = n_raw_lit;
         fprintf(out, "c3d: us per CPU-path draw (%.0f): target %.1f, depth+texture %.1f, ring %.1f, state %.1f, submit %.1f, rows %.1f\n", nd,
                 (double)(g_dt[D_TARGET] - was[D_TARGET]) * us, (double)(g_dt[D_TEXTURE] - was[D_TEXTURE]) * us,
