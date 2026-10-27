@@ -290,8 +290,14 @@ game ms a frame by draws: 300-349 19.0 / 42 (19.0 / 46), 350-399 19.25 / 42
 scenes (751 draws a frame against 529). Few seconds a bucket: a profile
 would say how much the hot functions' share moved.
 
-**Next:** a profile of this build; then `raw_pack` further and the submit
-(7 us); then the
+**Profiled (`psp2i_t4_profile7`, console; only 3 field windows, 413-740
+draws, against profile6's 10):** 08D8BA7C 6.8 -> 3.4%, 08D921F8 4.2 ->
+2.0%, 08D920A0 3.7 -> 1.9%, 08D8B864 2.2 -> 2.7%, 08D7AF4C (two `vmmul`
+calls) 1.4% -> out of the top 25; `sceGeDrawSync` (waiting for core 2) 17.6
+-> 9.0%, idle 7.7 -> 9.0%. The rest is spread thin (each function under
+1%). A longer field profile would firm these up.
+
+**Next:** `raw_pack` further and the submit (7 us); then the
 three VFPU functions above, which need a closer look at what they spend on
 (memory reads?). The previous Next: the game code (more hot
 functions, O3 on more of them), the sound mixer, the GE commands it still
