@@ -311,8 +311,20 @@ layout 1.8 -> 0.8, pack 9.5 -> 8.4, depth+texture 6.4 -> 5.1, uniforms 1.5
 -> 2.4 (the comparisons). No GPU hang with the copied layout (self-test
 steps 6n-6p ran first); the run was uneventful.
 
-**Next:** `raw_pack` for the skinned layouts (pack is 16 us a draw where a
-third are skinned); then the
+**Packing by format (cca8efc; console, field, `psp2i_t4_pack`, 597,000
+draws, 15% skinned).** The game's vertex formats (PC, the town: a
+temporary count in `psp_gpu_prim`): 16-bit positions throughout; the
+skinned ones with 8-bit normals, no colour, 1-4 8- or 16-bit weights; the
+most common unskinned one (`00011A`, 799k draws in 75 s) with 16-bit
+colours. Fields of 6 and 3 bytes rule out handing them to the loader as
+they are (the hangs), so `pack_loop` is inlined with those formats' sizes
+as constants (36 cases; same bytes as the generic loop on 200,000 random
+layouts). 96-99% of the packed draws take one. Per PICA-path draw **26.8
+-> 22.4 us**: pack 8.4 -> 4.6. Fps 19.7 / 15.0 / 12.5 / 12.2 / 10.9 by
+300-399 ... 700+ draws (54 field seconds).
+
+**Next:** what's left per draw is ~5 us submit, ~4.5 depth+texture, ~2.4
+uniforms; core 2 isn't what the game waits for in most scenes; then the
 three VFPU functions above, which need a closer look at what they spend on
 (memory reads?). The previous Next: the game code (more hot
 functions, O3 on more of them), the sound mixer, the GE commands it still
