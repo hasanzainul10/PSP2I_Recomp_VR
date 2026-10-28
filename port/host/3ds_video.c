@@ -37,7 +37,8 @@ typedef struct {
     MVDSTD_Config cfg;
     int64_t pts[NPTS];
     int npts;
-    unsigned pictures, nals, errors;
+    int64_t last_in;                    /* the newest unit's pts */
+    unsigned pictures, nals, errors, units, readies, drained, repeated;
 } vdec;
 
 static int g_open;                      /* MVD has one session: one movie at a time */
@@ -108,14 +109,41 @@ static int picture(vdec *d, psp_video_frame *out) {
     out->ystride = VID_W; out->uvstride = VID_W / 2;
     out->pts = take_pts(d);
     d->pictures++;
+    /* every 300 pictures: the pts handed out against the newest unit's
+     * (pictures come out one unit late: -33 ms, steady, on the console) */
+    if (d->pictures % 300 == 0)
+        fprintf(stderr, "video: picture %u pts %lld, newest unit %lld (%+lld ms), %d units waiting, %u units %u NALs\n",
+                d->pictures, (long long)out->pts, (long long)d->last_in, (long long)(out->pts - d->last_in) / 90,
+                d->npts, d->units, d->nals);
     return 1;
 }
 
 static int vid_decode(void *p, const uint8_t *au, int size, int64_t pts, psp_video_frame *out) {
     vdec *d = (vdec *)p;
-    if (!au) return 0;                  /* pictures MVD still holds at the end aren't drained */
+    if (!au) {
+        /* The end. MVD holds one picture back (each comes out one unit
+         * late), and the game waits for the last one: without it the movie
+         * ended on a black screen until a button was pressed (console,
+         * 2026-10-29: 2,507 units, 2,506 pictures). An end-of-stream NAL
+         * asks MVD for it; if none comes, the last picture again, with the
+         * held unit's pts, so every unit has its picture. */
+        if (!d->npts) return 0;
+        static const uint8_t EOS[4] = { 0, 0, 1, 11 };
+        memcpy(d->in, EOS, sizeof EOS);
+        GSPGPU_FlushDataCache(d->in, sizeof EOS);
+        if (mvdstdProcessVideoFrame(d->in, sizeof EOS, 0, NULL) == MVD_STATUS_FRAMEREADY) { d->drained++; return picture(d, out); }
+        if (!d->pictures) { d->npts = 0; return 0; }
+        out->width = VID_W; out->height = VID_H;
+        out->y = d->y; out->u = d->u; out->v = d->v;
+        out->ystride = VID_W; out->uvstride = VID_W / 2;
+        out->pts = take_pts(d);
+        d->repeated++;
+        return 1;
+    }
     if (d->npts == NPTS) take_pts(d);   /* units that never gave a picture */
     d->pts[d->npts++] = pts;
+    d->last_in = pts;
+    d->units++;
     int got = 0;
     /* each NAL unit, between start codes (00 00 01 or 00 00 00 01) */
     int i = 0;
@@ -140,7 +168,10 @@ static int vid_decode(void *p, const uint8_t *au, int size, int64_t pts, psp_vid
                 if (!MVD_CHECKNALUPROC_SUCCESS(rc)) {
                     if (d->errors++ < 8) fprintf(stderr, "video: MVD refused NAL type %d (%d bytes): 0x%08lX\n", type, n, (unsigned long)rc);
                     if (d->errors > 64 && !d->pictures) return -1;      /* never decodes: black from here */
-                } else if (rc == MVD_STATUS_FRAMEREADY && !got) got = picture(d, out);
+                } else if (rc == MVD_STATUS_FRAMEREADY) {
+                    d->readies++;                /* more than one a unit would lose pictures */
+                    if (!got) got = picture(d, out);
+                }
             }
         }
         i = end;
@@ -151,7 +182,8 @@ static int vid_decode(void *p, const uint8_t *au, int size, int64_t pts, psp_vid
 static void vid_close(void *p) {
     vdec *d = (vdec *)p;
     if (!d) return;
-    fprintf(stderr, "video: MVD closed: %u pictures from %u NAL units, %u errors\n", d->pictures, d->nals, d->errors);
+    fprintf(stderr, "video: MVD closed: %u pictures (%u frame-ready, %u drained at the end, %u repeated) from %u units, %u NAL units, %u errors\n",
+            d->pictures, d->readies, d->drained, d->repeated, d->units, d->nals, d->errors);
     mvdstdExit();
     g_open = 0;
     linearFree(d->in);

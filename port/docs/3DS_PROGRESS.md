@@ -35,6 +35,16 @@ fps, town 29-30, fields 11-16 (as before). Peak heap 45.1 MB of 61.7.
 **Not measured:** ATRAC decoding's own cost on the game's thread (needs a
 run with `nomusic` in the same place, or the profiler).
 
+**The whole opening movie** (console, 2026-10-29, played to its end):
+2,507 access units; MVD gives each picture one unit late (pts steady at
+-33 ms, no drift) and keeps the last one. The decoder now drains it at the
+end: an end-of-stream NAL gives nothing, so the last picture is repeated
+with the held unit's pts (`1 repeated`). After the movie the screen stays
+black until a button is pressed, **on the PC build as well** (the user), so
+it isn't this decoder: the shared runtime's sceMpeg end (`psprecomp`
+`src/hle/mpeg.c`, the same on both) or the game's own behaviour. Not
+followed up here.
+
 **The slow intro is the `diag` switch, not the renderer** (branch
 `3ds_intro`, 2026-10-29). The intro before the movie ran at 1-3 fps on the
 console with only 8-28 draws a frame of 6-48 vertices, ~30-46 ms a draw.
