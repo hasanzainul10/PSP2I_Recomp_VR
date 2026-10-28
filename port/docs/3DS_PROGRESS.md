@@ -27,10 +27,20 @@ host gave them nowhere to go (no audio sink, no codecs). Now:
 **Checked in Azahar** (the user listened): sound effects and music right;
 3,927 blocks played, 0 dropped; field scenery drawn (~853 draws a frame);
 linear memory ~12 MB free. `.text` 29.55 MB (+0.05).
-**Not checked:** movies (none played: the scripted presses on Azahar's SD
-pass the opening movie; Azahar may not emulate MVD at all), and everything
-on the console: sound there, and the cost of ATRAC decoding on the game's
-thread (the frame-rate limit; compare a run with `nomusic`).
+**Checked on the console** (`.3dsx` from HBL, the user watched and
+listened): the opening movie plays right (MVD: 989 pictures from 1,027 NAL
+units, 0 errors; linear memory 21.6 -> 11.6 MB free while it's open, ~18-21
+fps reported during it); sound and music, 7,482 blocks, 0 dropped. Title 29
+fps, town 29-30, fields 11-16 (as before). Peak heap 45.1 MB of 61.7.
+**Not measured:** ATRAC decoding's own cost on the game's thread (needs a
+run with `nomusic` in the same place, or the profiler).
+
+**Seen, not this branch's:** the intro before the movie (logos, the save
+load) runs at 1-3 fps on the console with only 8-28 draws a frame: core 2
+spends ~700 ms/s in the backend, ~30-46 ms a draw (CPU-path target ~46 ms,
+submit ~32-36 ms), and the game waits on core 2 for VRAM accesses (~850
+ms/s). The report's PICA `pack` figure there (40,579,429 us) is a broken
+average. A renderer task for 3ds_port.
 
 **Pitfall:** gen must come from an allegrexrecomp built from this
 worktree's psprecomp. The one in `D:\work\PSP2I_Recomp_VR` (10-22) builds and
