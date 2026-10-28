@@ -4,6 +4,39 @@ Plan: [3DS_PLAN.md](3DS_PLAN.md). Branch `3ds_port`, worktree
 `D:\work\PSP2I_Recomp_3DS`. Skills: `psp2i-3ds-build`, `psp2i-3ds-test`.
 The user's console: **New 3DS XL, Luma3DS**.
 
+## Sound, music and movies (2026-10-28, branch `3ds_av`)
+
+The runtime already mixed the sound and handled ATRAC and sceMpeg; the 3DS
+host gave them nowhere to go (no audio sink, no codecs). Now:
+
+- **Sound out** (`port/host/3ds_audio.c`): the runtime's audio sink on ndsp,
+  one ndsp channel per PSP channel, 4 x 2048-frame wave buffers each in
+  linear memory (256 KB). A block that finds no free buffer is dropped and
+  counted (the `audio:` line every 10 s), never waited for. Needs
+  `sdmc:/3ds/dspfirm.cdc` (the console has it; copied to Azahar's SD).
+- **Music** (`atrac_at3.c`, `__3DS__` branch): the PC's LGPL ATRAC3plus
+  decoder (`port/atrac_dll`, PPSSPP's at3_standalone) linked in as a static
+  library, since the 3DS can't load one at run time (`port/3ds/LGPL_ATRAC.txt`).
+  newlib has no `posix_memalign`: the shim uses `memalign` there.
+- **Movies** (`port/host/3ds_video.c`): H.264 on the New 3DS's decoder
+  (`mvd:STD`), YUYV output turned into 4:2:0 for the runtime. MVD's ~9 MB
+  work buffer is taken only while a movie is open; without room, or if MVD
+  refuses the stream, the movie stays black with sound as before.
+- Switch files `sdmc:/psp2i/nosound`, `nomusic`, `nomovie` turn each off.
+
+**Checked in Azahar** (the user listened): sound effects and music right;
+3,927 blocks played, 0 dropped; field scenery drawn (~853 draws a frame);
+linear memory ~12 MB free. `.text` 29.55 MB (+0.05).
+**Not checked:** movies (none played: the scripted presses on Azahar's SD
+pass the opening movie; Azahar may not emulate MVD at all), and everything
+on the console: sound there, and the cost of ATRAC decoding on the game's
+thread (the frame-rate limit; compare a run with `nomusic`).
+
+**Pitfall:** gen must come from an allegrexrecomp built from this
+worktree's psprecomp. The one in `D:\work\PSP2I_Recomp_VR` (10-22) builds and
+runs but draws no field scenery (~99 draws a frame) and `.text` grows by
+~0.2 MB; the perf session found it.
+
 ## Handoff (2026-10-28): speed work done, quality options in progress
 
 **Where it stands (console, field):** ~20 fps in light scenes (300-450
