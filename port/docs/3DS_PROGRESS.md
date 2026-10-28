@@ -4,6 +4,66 @@ Plan: [3DS_PLAN.md](3DS_PLAN.md). Branch `3ds_port`, worktree
 `D:\work\PSP2I_Recomp_3DS`. Skills: `psp2i-3ds-build`, `psp2i-3ds-test`.
 The user's console: **New 3DS XL, Luma3DS**.
 
+## Sound, music and movies (2026-10-28, branch `3ds_av`)
+
+The runtime already mixed the sound and handled ATRAC and sceMpeg; the 3DS
+host gave them nowhere to go (no audio sink, no codecs). Now:
+
+- **Sound out** (`port/host/3ds_audio.c`): the runtime's audio sink on ndsp,
+  one ndsp channel per PSP channel, 4 x 2048-frame wave buffers each in
+  linear memory (256 KB). A block that finds no free buffer is dropped and
+  counted (the `audio:` line every 10 s), never waited for. Needs
+  `sdmc:/3ds/dspfirm.cdc` (the console has it; copied to Azahar's SD).
+- **Music** (`atrac_at3.c`, `__3DS__` branch): the PC's LGPL ATRAC3plus
+  decoder (`port/atrac_dll`, PPSSPP's at3_standalone) linked in as a static
+  library, since the 3DS can't load one at run time (`port/3ds/LGPL_ATRAC.txt`).
+  newlib has no `posix_memalign`: the shim uses `memalign` there.
+- **Movies** (`port/host/3ds_video.c`): H.264 on the New 3DS's decoder
+  (`mvd:STD`), YUYV output turned into 4:2:0 for the runtime. MVD's ~9 MB
+  work buffer is taken only while a movie is open; without room, or if MVD
+  refuses the stream, the movie stays black with sound as before.
+- Switch files `sdmc:/psp2i/nosound`, `nomusic`, `nomovie` turn each off.
+
+**Checked in Azahar** (the user listened): sound effects and music right;
+3,927 blocks played, 0 dropped; field scenery drawn (~853 draws a frame);
+linear memory ~12 MB free. `.text` 29.55 MB (+0.05).
+**Checked on the console** (`.3dsx` from HBL, the user watched and
+listened): the opening movie plays right (MVD: 989 pictures from 1,027 NAL
+units, 0 errors; linear memory 21.6 -> 11.6 MB free while it's open, ~18-21
+fps reported during it); sound and music, 7,482 blocks, 0 dropped. Title 29
+fps, town 29-30, fields 11-16 (as before). Peak heap 45.1 MB of 61.7.
+**Not measured:** ATRAC decoding's own cost on the game's thread (needs a
+run with `nomusic` in the same place, or the profiler).
+
+**The whole opening movie** (console, 2026-10-29, played to its end):
+2,507 access units; MVD gives each picture one unit late (pts steady at
+-33 ms, no drift) and keeps the last one. The decoder now drains it at the
+end: an end-of-stream NAL gives nothing, so the last picture is repeated
+with the held unit's pts (`1 repeated`). After the movie the screen stays
+black until a button is pressed, **on the PC build as well** (the user), so
+it isn't this decoder: the shared runtime's sceMpeg end (`psprecomp`
+`src/hle/mpeg.c`, the same on both) or the game's own behaviour. Not
+followed up here.
+
+**The slow intro is the `diag` switch, not the renderer** (branch
+`3ds_intro`, 2026-10-29). The intro before the movie ran at 1-3 fps on the
+console with only 8-28 draws a frame of 6-48 vertices, ~30-46 ms a draw.
+`sdmc:/psp2i/diag` was still on the console's SD (left from the freeze
+hunts): it traces the renderer's first 3,000 events (`DIAG` in c3d_ge.c),
+each line an open / append / close of `diag.txt` on the SD. In that run the
+3,001 `c3d:` lines took the first 164 s, one every 55 ms, and ended two
+seconds into the title, exactly where the log goes from 1 fps to 29.
+**Delete `sdmc:/psp2i/diag` for any speed run** (and for play). Azahar's SD
+has it too: its intro crawls the same way. Not re-measured yet without it.
+The report's PICA `pack` of 40,579,429 us a draw was the diag-only GPU
+self-test's `raw_submit` calls with `g_rtk` unset (the console's uptime
+charged once); its counters are now reset when it ends.
+
+**Pitfall:** gen must come from an allegrexrecomp built from this
+worktree's psprecomp. The one in `D:\work\PSP2I_Recomp_VR` (10-22) builds and
+runs but draws no field scenery (~99 draws a frame) and `.text` grows by
+~0.2 MB; the perf session found it.
+
 ## Handoff (2026-10-28): speed work done, quality options in progress
 
 **Where it stands (console, field):** ~20 fps in light scenes (300-450

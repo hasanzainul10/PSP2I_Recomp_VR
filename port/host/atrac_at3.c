@@ -12,7 +12,10 @@
  * before. PSP2i uses ATRAC3plus.
  *
  * Android and other Unix-likes load libpsp2i_atrac.so (the same source, built
- * by atrac_dll/CMakeLists.txt) with dlopen. */
+ * by atrac_dll/CMakeLists.txt) with dlopen. The 3DS can't load a library at
+ * run time, so there the decoder is linked into the game as a static library
+ * (port/3ds/LGPL_ATRAC.txt); those builds contain the game's code and are
+ * never published. */
 
 #include "atrac_at3.h"
 
@@ -22,8 +25,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-#if defined(_WIN32) || defined(__unix__) || defined(__APPLE__)
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__unix__) || defined(__APPLE__) || (defined(__3DS__) && !defined(PSP2I_NO_ATRAC))
+#if defined(__3DS__)
+#define AT3_LIB "the linked ATRAC decoder"
+#include <stdint.h>
+/* atrac_dll/at3_export.cpp, linked in */
+int   psp2i_atrac_api(void);
+void *psp2i_at3p_open(int channels, int *block_align);
+void  psp2i_at3p_close(void *ctx);
+void  psp2i_at3p_flush(void *ctx);
+int   psp2i_at3p_decode(void *ctx, float *left, float *right, int *samples, const uint8_t *buf, int size);
+#elif defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #define AT3_LIB "psp2i_atrac.dll"
@@ -98,6 +110,16 @@ static void dec_close(void *p) {
 
 static const psp_atrac_codec CODEC = { "psp2i_atrac (FFmpeg ATRAC3plus, LGPL)", dec_open, dec_decode, dec_reset, dec_close };
 
+#if defined(__3DS__)
+int atrac_at3_init(const char *exedir) {
+    (void)exedir;
+    A.api = psp2i_atrac_api; A.open = psp2i_at3p_open; A.close = psp2i_at3p_close;
+    A.flush = psp2i_at3p_flush; A.decode = psp2i_at3p_decode;
+    psp_atrac_set_codec(&CODEC);
+    fprintf(stderr, "audio: ATRAC music decoded by " AT3_LIB "\n");
+    return 0;
+}
+#else
 #ifdef _WIN32
 static void *lib_open(const char *dir) {
     char path[900];
@@ -134,6 +156,7 @@ int atrac_at3_init(const char *exedir) {
     fprintf(stderr, "audio: ATRAC music decoded by " AT3_LIB "\n");
     return 0;
 }
+#endif /* __3DS__ */
 
 #else
 int atrac_at3_init(const char *exedir) { (void)exedir; return -1; }
