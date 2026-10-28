@@ -2351,6 +2351,10 @@ static void gpu_selftest(void) {
     state_forget();
     g_cur = NULL; g_cur_depth = NULL;
     gpu_finish();
+    /* its raw_submit calls aren't the game's draws: they ran with g_rtk unset
+     * and charged the console's whole uptime to the report's PICA-path "pack" */
+    memset(g_rdt, 0, sizeof g_rdt);
+    n_raw_copied = n_raw_lay_kept = n_unif_set = n_unif_kept = 0;
     psp2i_diag("selftest: done");
 }
 

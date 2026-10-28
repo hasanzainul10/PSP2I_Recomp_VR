@@ -35,12 +35,19 @@ fps, town 29-30, fields 11-16 (as before). Peak heap 45.1 MB of 61.7.
 **Not measured:** ATRAC decoding's own cost on the game's thread (needs a
 run with `nomusic` in the same place, or the profiler).
 
-**Seen, not this branch's:** the intro before the movie (logos, the save
-load) runs at 1-3 fps on the console with only 8-28 draws a frame: core 2
-spends ~700 ms/s in the backend, ~30-46 ms a draw (CPU-path target ~46 ms,
-submit ~32-36 ms), and the game waits on core 2 for VRAM accesses (~850
-ms/s). The report's PICA `pack` figure there (40,579,429 us) is a broken
-average. A renderer task for 3ds_port.
+**The slow intro is the `diag` switch, not the renderer** (branch
+`3ds_intro`, 2026-10-29). The intro before the movie ran at 1-3 fps on the
+console with only 8-28 draws a frame of 6-48 vertices, ~30-46 ms a draw.
+`sdmc:/psp2i/diag` was still on the console's SD (left from the freeze
+hunts): it traces the renderer's first 3,000 events (`DIAG` in c3d_ge.c),
+each line an open / append / close of `diag.txt` on the SD. In that run the
+3,001 `c3d:` lines took the first 164 s, one every 55 ms, and ended two
+seconds into the title, exactly where the log goes from 1 fps to 29.
+**Delete `sdmc:/psp2i/diag` for any speed run** (and for play). Azahar's SD
+has it too: its intro crawls the same way. Not re-measured yet without it.
+The report's PICA `pack` of 40,579,429 us a draw was the diag-only GPU
+self-test's `raw_submit` calls with `g_rtk` unset (the console's uptime
+charged once); its counters are now reset when it ends.
 
 **Pitfall:** gen must come from an allegrexrecomp built from this
 worktree's psprecomp. The one in `D:\work\PSP2I_Recomp_VR` (10-22) builds and
