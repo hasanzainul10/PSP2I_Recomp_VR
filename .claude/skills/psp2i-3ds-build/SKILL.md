@@ -50,11 +50,19 @@ MSYSTEM=MSYS /d/msys64/usr/bin/bash.exe -l /d/work/PSP2I_Recomp_3DS/port/3ds/bui
   `build.sh Release psprecomp` (the runtime), `build.sh Release psp2i_3dsx`.
   `PSP2I_JOBS` sets the parallel jobs (default 12; 32 GB of RAM).
 - **The game** (`psp2i`) is built when `port/gen/recomp_funcs.c` exists in
-  this worktree (or `-DPSP2I_GEN_DIR=`). Make it with the recompiler from the
-  main checkout (same as `psp2i-build-run`, about 4 s):
+  this worktree (or `-DPSP2I_GEN_DIR=`). Make it with **this worktree's**
+  recompiler, built from its `psprecomp` submodule (about 4 s). Not the main
+  checkout's: that one is older than the 3DS runtime (VFPU inline, the RAM
+  base as an argument), and its gen built and ran but drew no scenery and
+  broken characters (2026-10-28). Rebuild the recompiler first whenever
+  `psprecomp/tools/allegrexrecomp` changed:
+
+  ```powershell
+  cmd /c '"D:\VSBuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul && cmake --build D:\work\PSP2I_Recomp_3DS\psprecomp\build --target allegrexrecomp --config Release'
+  ```
 
   ```bash
-  cd /d/work/PSP2I_Recomp_3DS/port && /d/work/PSP2I_Recomp_VR/psprecomp/build/tools/allegrexrecomp/Release/allegrexrecomp.exe emit /d/work/PSP2I_Recomp_VR/FinalBuild/EBOOT.BIN gen recomp --hooks hooks.txt --fixes fixes.txt
+  cd /d/work/PSP2I_Recomp_3DS/port && ../psprecomp/build/tools/allegrexrecomp/Release/allegrexrecomp.exe emit /d/work/PSP2I_Recomp_VR/FinalBuild/EBOOT.BIN gen recomp --hooks hooks.txt --fixes fixes.txt
   ```
 
   Configuring splits it into 256 parts (`build/gen_split`, `PSP2I_GEN_PARTS`);

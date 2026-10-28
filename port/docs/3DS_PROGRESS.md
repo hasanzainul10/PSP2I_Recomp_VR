@@ -44,11 +44,28 @@ ADDRESS_MAP.md, "Drawing less"):
   0x08A07C40 (in draw method 0x08A07C30) ~200/s steady = **the minimap's
   player and enemy markers** (the user saw them vanish with it skipped);
   0x0896839C (in render 0x08967FB8, an 18x18 grid of quads) rising in
-  fights = **the effect candidate, not yet confirmed**; 0x08AD9E68 occasional,
-  unlooked. `sdmc:/psp2i/skip_sprites` skips them (bit 1 the grid render,
-  bit 2 the draw method). Skipping the grid render returning 0 stalled the
-  game after the title (its normal end returns 1): now returns 1, **built
-  but not yet run**.
+  fights; 0x08AD9E68 occasional, unlooked. `sdmc:/psp2i/skip_sprites` skips
+  them (bit 1 the grid render, bit 2 the draw method, bit 4 0x089BBC30;
+  `<bits> cycle` turns the skip on and off every 6 s, logged, so one run
+  compares both).
+- **2026-10-28 (Azahar, the user playing):** the grid render **isn't the
+  effects** (skip cycled in a fight: no change in draws, nothing seen
+  missing; ~1 quad a frame). Counting sceGuDrawArray (0x08D94330) by caller
+  and vtype: the `0x19F` quads come almost all from `0x08D79CE4` (the
+  quad-array twin of the sprite one), and **of those the busiest callers are
+  UI**: `0x08D3ED40` (via `0x08D4A66C`, also at the title and loading) and
+  `0x089BBC30` = **the HUD party panels' frames** (skip cycled: the user saw
+  the frames blink). So the field dump's "effect sprites ~21%" is largely
+  HUD / UI quads; sceGuDrawArray as a whole is under a fifth of the
+  field's ~500 draws a frame, and scenery / skinned meshes don't come
+  through it. Real effects, if they're a cost at all, are among the
+  smaller callers (`0x08AD3D68` / `0x08AD3FE0` strips, `0x089B39B4`,
+  `0x08981B18`, ...).
+- **Two traps found today**: gen must come from this worktree's recompiler
+  (the main checkout's is older: its gen runs but draws no scenery,
+  `.text` 29.70 instead of 29.50 MB; the build skill is fixed); a hook
+  address that isn't a recompiler function entry is silently ignored
+  (ADDRESS_MAP.md, "Drawing less").
 - **The bottom-screen menu** is being built in a separate session
   (`local_1fa4e431-cf18-4c66-a35c-1136fc20eaad`, branch
   `claude/nice-faraday-e2db1e`): `3ds_quality.c/.h`, `quality.ini`; it
@@ -56,10 +73,11 @@ ADDRESS_MAP.md, "Drawing less"):
   Not merged here.
 
 **Next:**
-1. Azahar with `skip_sprites` 1 (the switch is already set there): what
-   disappears in the field fight, and the draws a frame. If it's the
-   effects, make it a cap (draw only part of `obj+68`'s quads) rather than
-   a skip, and find what decides how many there are.
+1. Effects: probably a small share (above). Before more hunting, a field
+   GE dump split by who built each draw would say what the 500 draws a
+   frame are (scenery strips, skinned, HUD, effects) and so which option
+   can pay at all; the game's thread being the limit, an option only helps
+   if it saves game-thread time, not just draws.
 2. Characters: who draws other players / NPCs (skinned, 19% of field draws).
 3. Merge the menu session's branch (ask the user first), hook the found
    knobs to its settings, console runs per option.

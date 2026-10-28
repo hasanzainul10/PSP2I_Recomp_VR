@@ -48,6 +48,11 @@
 0x08D7A80C   # its twin (another primitive): as above
 0x08967FB8   # an object's render: an 18x18 grid of quads from *(0x08ED2BAC), drawn as sprites (0x089682E4); sprite caller 0x0896839C, rises in fights: skipped with skip_sprites bit 1 (dev, host/3ds_hooks.c)
 0x08A07C30   # a draw method (vtable 0x08E3182C): sprites, prim at obj+47; the busiest sprite caller (0x08A07C40): skipped with skip_sprites bit 2 (dev)
+0x08D94330   # sceGuDrawArray(prim, vtype $a1, count, indices, vertices $t0), 9 callers: draws counted per (caller, vtype) with fx_trace, to find who draws the effects' 0x19F (dev, host/3ds_hooks.c)
+0x08D79F8C   # quad-array draw wrapper (-> 0x08D79CE4: format by mode 0x08EE2284; mode 2 = 0x19F, the effect quads, ~5,000 draws per 10 s in a field fight): callers counted with fx_trace (dev, host/3ds_hooks.c)
+0x08D7A080   # its twin: as above
+0x08D3ED40   # a wrapper of 0x08D79F8C (a0 = 1, $f12 from 0x08EBA454), only called through pointers: the busiest quad caller (title, loading and field): callers counted with fx_trace (dev)
+0x089BBC30   # builds a quad array and draws it through 0x08D79F8C (its last act), only called through pointers; quads only in the field (2,000-4,400 per 10 s): skipped with skip_sprites bit 4 (dev, host/3ds_hooks.c)
 0x08D7D8E0   # SetNearFar(near $f12, far $f13): the frustum tests' near / far (0x08FA981C / 0x08FA9818); from ApplyCamera with cam+244 / +248: the 3DS's draw distance (host/3ds_hooks.c)
 0x08AFD474   # ApplyCamera(camera): VR first person puts the field camera's view at the player's head (host/main.c)
 0x089D06E8   # on the path that starts the menus' cursor counter 0x08EE2F70 (write watch 2026-10-23): calls counted per second (dev, host/main.c)
