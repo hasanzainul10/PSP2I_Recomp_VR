@@ -43,7 +43,14 @@ if(AT3_OK)
         message(STATUS "ATRAC: decoder sources from hrydgard/ppsspp ${PSP2I_AT3_COMMIT} (LGPL-2.1+)")
         set(AT3_ANNOUNCED TRUE CACHE INTERNAL "")
     endif()
-    add_library(psp2i_atrac SHARED
+    # The 3DS can't load a library at run time: there it's linked into the
+    # game (port/3ds/CMakeLists.txt), in builds that are never published.
+    if(NINTENDO_3DS)
+        set(AT3_KIND STATIC)
+    else()
+        set(AT3_KIND SHARED)
+    endif()
+    add_library(psp2i_atrac ${AT3_KIND}
         ${AT3_DIR}/atrac.cpp ${AT3_DIR}/atrac3.cpp ${AT3_DIR}/atrac3plus.cpp ${AT3_DIR}/atrac3plusdec.cpp
         ${AT3_DIR}/atrac3plusdsp.cpp ${AT3_DIR}/get_bits.cpp ${AT3_DIR}/compat.cpp ${AT3_DIR}/fft.cpp
         ${AT3_DIR}/mem.cpp
@@ -52,6 +59,10 @@ if(AT3_OK)
     if(MSVC)
         target_compile_options(psp2i_atrac PRIVATE /W0 /O2)
         target_compile_definitions(psp2i_atrac PRIVATE _CRT_SECURE_NO_WARNINGS _USE_MATH_DEFINES)
+    endif()
+    if(NINTENDO_3DS)
+        target_compile_options(psp2i_atrac PRIVATE -O2 -w -fno-exceptions -fno-rtti)
+        return()
     endif()
     # Next to psp2i.exe, which loads it.
     set_target_properties(psp2i_atrac PROPERTIES

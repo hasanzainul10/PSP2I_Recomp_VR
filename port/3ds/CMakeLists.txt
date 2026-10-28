@@ -6,7 +6,7 @@
 # (port/3ds/build.sh does this through MSYS2.) For now it builds the T0
 # check app, psp2i_hello, as a .3dsx and a .cia; the game joins in T1.
 cmake_minimum_required(VERSION 3.20)
-project(psp2i_3ds C ASM)
+project(psp2i_3ds C CXX ASM)                  # CXX: the ATRAC decoder (atrac_dll/)
 
 set(MAKEROM    "D:/Tools/makerom/makerom.exe" CACHE FILEPATH "makerom (Project_CTR)")
 set(BANNERTOOL "D:/Tools/bannertool/bannertool-1.2.3-windows/bannertool.exe" CACHE FILEPATH "bannertool")
@@ -156,11 +156,22 @@ if(EXISTS ${PSP2I_GEN_DIR}/recomp_funcs.c)
         ${PORT}/host/c3d_test_t10.v.pica OUTPUT c3d_test.shbin)
     dkp_add_embedded_binary_library(c3d_test_shader_bin c3d_test_shader)
 
+    # Music: FFmpeg's ATRAC3plus decoder (LGPL, PPSSPP's at3_standalone),
+    # linked in as a static library here (LGPL_ATRAC.txt); the PC loads it as
+    # a DLL. Its sources are downloaded at configure time.
+    add_subdirectory(${PORT}/atrac_dll atrac_dll)
+
     add_executable(psp2i ${PORT}/host/3ds_main.c ${PORT}/host/c3d_ge.c ${PORT}/host/camera.c
-                         ${PORT}/host/savecrypt.c ${PORT}/host/3ds_prof.c ${PORT}/host/3ds_bench.c ${PORT}/host/3ds_hooks.c)
+                         ${PORT}/host/savecrypt.c ${PORT}/host/3ds_prof.c ${PORT}/host/3ds_bench.c ${PORT}/host/3ds_hooks.c
+                         ${PORT}/host/3ds_audio.c ${PORT}/host/3ds_video.c ${PORT}/host/atrac_at3.c)
     target_compile_options(psp2i PRIVATE -O2 -Wall -Wno-format)
     target_compile_definitions(psp2i PRIVATE PSP2I_3DS $<$<BOOL:${PSP2I_PROFILE}>:PSP2I_PROFILE>)
     target_include_directories(psp2i PRIVATE ${PORT}/host)
+    if(TARGET psp2i_atrac)
+        target_link_libraries(psp2i PRIVATE psp2i_atrac)
+    else()
+        target_compile_definitions(psp2i PRIVATE PSP2I_NO_ATRAC)   # sources couldn't be downloaded: silent music
+    endif()
     target_link_libraries(psp2i PRIVATE c3d_ge_shader_bin c3d_test_shader_bin psp2i_game psprecomp citro3d ctru m)
     target_link_options(psp2i PRIVATE -Wl,--gc-sections -Wl,-Map=${CMAKE_CURRENT_BINARY_DIR}/psp2i.map)
     if(PSP2I_PROFILE)

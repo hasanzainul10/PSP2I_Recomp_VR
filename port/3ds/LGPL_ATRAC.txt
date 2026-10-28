@@ -1,0 +1,17 @@
+The 3DS build's ATRAC3 / ATRAC3plus decoder (music and movie sound)
+
+The 3DS game links FFmpeg's ATRAC3 and ATRAC3plus decoder, as extracted to
+stand alone by PPSSPP (ext/at3_standalone), as a static library. That code is
+licensed under the GNU Lesser General Public License, version 2.1 or later.
+Source: the hrydgard/ppsspp commit pinned in port/atrac_dll/CMakeLists.txt
+(PSP2I_AT3_COMMIT), downloaded at configure time, plus port/atrac_dll's build
+files and compatibility headers.
+
+On Windows, Android and macOS the same decoder is a separate library loaded at
+run time (psp2i_atrac.dll / libpsp2i_atrac.so). The 3DS can't load libraries
+at run time, so there it is linked into the game.
+
+3DS builds of the game contain code generated from the user's own copy of the
+game and are never published (CLAUDE.md, "3DS port"). Anyone building one has
+the decoder's source and this project's source, and can relink with their own
+build of the decoder: port/3ds/build.sh rebuilds everything from source.

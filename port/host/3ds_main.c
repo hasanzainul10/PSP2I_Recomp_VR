@@ -34,7 +34,10 @@
 #include "psprecomp/mem.h"
 #include "psprecomp/render.h"
 
+#include "3ds_audio.h"
 #include "3ds_prof.h"
+#include "3ds_video.h"
+#include "atrac_at3.h"
 #include "c3d_ge.h"
 #include "camera.h"
 #include "savecrypt.h"
@@ -598,6 +601,7 @@ static void on_vblank_on(void) {
             }
         if (secs % 10 == 0) {
             psp_sched_stack_report(stderr);   /* each thread's peak, to size the stacks */
+            psp2i_audio_3ds_report(stderr);
             if (g_gpu) psp_ge_post(report_job, NULL, 0);
         }
     }
@@ -674,6 +678,14 @@ int main(void)
     psp_sysmem_set_heap(mi.load_hi, USER_PARTITION_TOP);
     psp_recomp_register();
     psp2i_hooks_init();                                   /* the quality hooks (3ds_hooks.c) */
+    /* sound (ndsp), music (the linked ATRAC3plus decoder) and movies (the New
+     * 3DS's H.264 decoder); sdmc:/psp2i/nosound, nomusic, nomovie turn each
+     * off, and without them the game runs as before: silent, movies black */
+    psp2i_audio_3ds_init();
+    if (stat(BASE "/nomusic", &st) == 0) say("music: off (" BASE "/nomusic)");
+    else atrac_at3_init(NULL);
+    if (stat(BASE "/nomovie", &st) == 0) say("movies: off (" BASE "/nomovie)");
+    else psp2i_video_3ds_init();
     /* sdmc:/psp2i/bench: the compare forms and one hot game function timed
      * (3ds_bench.c), before the game starts */
     if (stat(BASE "/bench", &st) == 0) psp2i_bench(stderr);
@@ -702,8 +714,10 @@ int main(void)
     if (g_report) psp_sched_stack_report(g_report);
     psp_sched_stack_report(stderr);
     if (g_gpu) c3d_ge_report(stderr);
+    psp2i_audio_3ds_report(stderr);
     if (g_report) fclose(g_report);
     fflush(stderr);
+    psp2i_audio_3ds_exit();
     psp_mem_free();
     gfxExit();
     return rc;
