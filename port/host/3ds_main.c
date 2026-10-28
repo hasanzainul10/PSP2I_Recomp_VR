@@ -40,6 +40,7 @@
 #include "savecrypt.h"
 
 void psp2i_bench(FILE *out);                     /* 3ds_bench.c */
+void psp2i_hooks_init(void);                      /* 3ds_hooks.c */
 
 #define BASE "sdmc:/psp2i"
 #define SCREEN_W 480
@@ -672,6 +673,7 @@ int main(void)
     psp_savedata_set_crypto(&SAVE_CRYPTO);
     psp_sysmem_set_heap(mi.load_hi, USER_PARTITION_TOP);
     psp_recomp_register();
+    psp2i_hooks_init();                                   /* the quality hooks (3ds_hooks.c) */
     /* sdmc:/psp2i/bench: the compare forms and one hot game function timed
      * (3ds_bench.c), before the game starts */
     if (stat(BASE "/bench", &st) == 0) psp2i_bench(stderr);

@@ -157,7 +157,7 @@ if(EXISTS ${PSP2I_GEN_DIR}/recomp_funcs.c)
     dkp_add_embedded_binary_library(c3d_test_shader_bin c3d_test_shader)
 
     add_executable(psp2i ${PORT}/host/3ds_main.c ${PORT}/host/c3d_ge.c ${PORT}/host/camera.c
-                         ${PORT}/host/savecrypt.c ${PORT}/host/3ds_prof.c ${PORT}/host/3ds_bench.c)
+                         ${PORT}/host/savecrypt.c ${PORT}/host/3ds_prof.c ${PORT}/host/3ds_bench.c ${PORT}/host/3ds_hooks.c)
     target_compile_options(psp2i PRIVATE -O2 -Wall -Wno-format)
     target_compile_definitions(psp2i PRIVATE PSP2I_3DS $<$<BOOL:${PSP2I_PROFILE}>:PSP2I_PROFILE>)
     target_include_directories(psp2i PRIVATE ${PORT}/host)

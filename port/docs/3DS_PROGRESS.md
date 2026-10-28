@@ -4,6 +4,82 @@ Plan: [3DS_PLAN.md](3DS_PLAN.md). Branch `3ds_port`, worktree
 `D:\work\PSP2I_Recomp_3DS`. Skills: `psp2i-3ds-build`, `psp2i-3ds-test`.
 The user's console: **New 3DS XL, Luma3DS**.
 
+## Handoff (2026-10-28): speed work done, quality options in progress
+
+**Where it stands (console, field):** ~20 fps in light scenes (300-450
+draws a frame), 12-15 in busy ones, ~11 at 700+. Frames snap to the 60 Hz
+display (30 / 20 / 15 / 12), and **the game's own thread is the limit**
+(~40 ms a frame light, ~61 busy); core 2 (GE lists + citro3d) waits are
+small now. A PICA-path draw costs 22.4 us (from 40.5) on core 2. The T4
+sections below have every step and number; the summary of this stretch:
+- VFPU code (psprecomp `emit.c`): prefix check proven away, most ops inline,
+  VFPU registers in C locals in hot functions; `port/3ds/tools/vfpu_diff.py`
+  checks the inline code against the runtime (2,216 statements, 0 mismatches).
+- Hot functions' register traffic (`port/android/reg_locals.py`): RAM base
+  pointers in locals, tail calls, calls to VFPU-free functions.
+- Core 2: `raw_pack` per format, row marking by words, uniform / layout
+  caches (citro3d re-sends anything set), the game's layout copied when it
+  fits, GE matrix-data runs.
+- The console benchmark (`sdmc:/psp2i/bench`, `3ds_bench.c`): the FPU is
+  flush-to-zero; integer compares are slower than float ones. **It leaves
+  something behind**: with it, the game later stalled on Azahar. Off by
+  default; the switch was deleted from the console's SD.
+- The log reaches the SD only on a close, so `psp2i_log.txt` is reopened
+  every 10 s (47039c7); a run ended from HOME still loses its last seconds.
+
+**In progress: quality options (draw less for speed), plan agreed with the
+user:** glow off, shorter draw distance, fewer effects, simpler characters,
+switched from a bottom-screen menu. Findings (addresses also in
+ADDRESS_MAP.md, "Drawing less"):
+- Town frames: 92-96% of scene draws are small scenery strips, mostly far;
+  field frame (`draws_011461`): scenery ~50%, effect sprites (`0x00019F`)
+  ~21%, skinned ~19%. The glow pass is ~10 draws: little gain.
+- **Draw distance**: `SetNearFar` 0x08D7D8E0 (far 30,000 for the field
+  camera, 10,000 for title / menus) hooked in `port/host/3ds_hooks.c`
+  (`sdmc:/psp2i/draw_distance`: a percentage, or `cycle` to step 100 / 20 /
+  10 / 5 / 3 / 2% every 6 s). In field rooms **no change** in draws even at
+  2%; in town 50% looked like -32% but from two separate runs (not proven).
+- **Effects**: sprite arrays go through 0x08D7A4CC (via wrappers 0x08D7A74C /
+  0x08D7A80C, all over the game). Their callers counted (`sdmc:/psp2i/fx_trace`):
+  0x08A07C40 (in draw method 0x08A07C30) ~200/s steady = **the minimap's
+  player and enemy markers** (the user saw them vanish with it skipped);
+  0x0896839C (in render 0x08967FB8, an 18x18 grid of quads) rising in
+  fights = **the effect candidate, not yet confirmed**; 0x08AD9E68 occasional,
+  unlooked. `sdmc:/psp2i/skip_sprites` skips them (bit 1 the grid render,
+  bit 2 the draw method). Skipping the grid render returning 0 stalled the
+  game after the title (its normal end returns 1): now returns 1, **built
+  but not yet run**.
+- **The bottom-screen menu** is being built in a separate session
+  (`local_1fa4e431-cf18-4c66-a35c-1136fc20eaad`, branch
+  `claude/nice-faraday-e2db1e`): `3ds_quality.c/.h`, `quality.ini`; it
+  compiled but wasn't committed or run (its shell checks kept failing).
+  Not merged here.
+
+**Next:**
+1. Azahar with `skip_sprites` 1 (the switch is already set there): what
+   disappears in the field fight, and the draws a frame. If it's the
+   effects, make it a cap (draw only part of `obj+68`'s quads) rather than
+   a skip, and find what decides how many there are.
+2. Characters: who draws other players / NPCs (skinned, 19% of field draws).
+3. Merge the menu session's branch (ask the user first), hook the found
+   knobs to its settings, console runs per option.
+4. Before shipping options: draw distance only if a same-view test shows a
+   gain; nothing that changes what other players see (CLAUDE.md).
+
+**Practicalities:**
+- Azahar: don't stop it from a script (the user allowed it once for one
+  bisect; the permission check blocks it otherwise): start it only if it's
+  not running, or ask the user to close it. A run's draws a frame aren't
+  comparable between runs (the scripted route's timing varies): compare
+  within one run (the `cycle` trick) or by screenshots.
+- Azahar's SD (`%APPDATA%\Azahar\sdmc\psp2i`) has my switch files:
+  `draw_distance` (100), `fx_trace`, `skip_sprites` (1); `diag` was there
+  already. The console's SD has `diag` on, no bench, no quality switches.
+- The console: ftpd at 192.168.137.x (last .11), port 5000. `/cias/` was
+  cleared by the user; the latest field build there is `psp2i_t4_pack.cia`.
+- The harness's permission check often failed with "no verdict" for long
+  stretches; read-only tools still work then.
+
 ## Handoff (2026-10-26): the game runs on the console
 
 **State: the citro3d build boots and plays on the user's New 3DS XL** (.cia,

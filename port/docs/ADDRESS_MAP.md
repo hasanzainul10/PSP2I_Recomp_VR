@@ -186,6 +186,20 @@ projection `0x08FA97A0` (lui/offset scan of `port/gen/recomp_funcs.c`).
 | `0x08D7CAEC` | Box (centre, axes, half sizes) against the planes: 16 = outside, 2 = inside, else crossing flags. Its neighbours `0x08D7C934`, `0x08D7CD88`, `0x08D7CE6C`, `0x08D7CF90` use the same planes (other shapes, not decoded) | decoded |
 | `0x08D7DCE4` | From an integer angle: the floats at camera +0x118 / +0x11C (likely sin / cos of the FOV angle), called by the projection build `0x08AFCF3C` | seen |
 
+### Drawing less: draw distance and sprites (3DS quality options, 2026-10-27)
+
+Found for the 3DS port's quality options (3DS_PROGRESS.md, handoff
+2026-10-28); hooked in `port/host/3ds_hooks.c` behind switch files.
+
+| Address | What | Status |
+|---|---|---|
+| `0x08D7D8E0` | **SetNearFar(near $f12, far $f13)**: the frustum tests' near / far (`0x08FA981C` / `0x08FA9818`, copies at `0x08FA9784` / `0x08FA9780`). Called by ApplyCamera `0x08AFD474` (cam+244 near, cam+248 far), `0x08AFD500` and `0x089EFE5C`. Far: 30,000 for the field camera, 10,000 for the title / menu one (Azahar log) | disassembled, hooked (3DS); scaling far changed nothing in field rooms, even at 2% |
+| `0x08D7A4CC` | **Draw a sprite array(prim, vertices, count)**: the vertex format by the mode at `0x08EE229C` (jump table `0x08E8614C`); the `0x19F` path copies 24-byte vertices into the list (`0x08D7A6D0` / `0x08D7A6F0`) and draws with vtype 415 (`0x08D7A56C`) | disassembled |
+| `0x08D7A74C`, `0x08D7A80C` | Its two wrappers, called from all over the game (the library's draw calls) | hooked (3DS, `fx_trace`: callers counted) |
+| `0x08A07C30` | A draw method (in a table at `0x08E3182C`), prim at obj+47: **the minimap's player and enemy markers** (skipped: they vanished, the user saw); ~200 sprite draws a second in the field | hooked, skip seen by the user |
+| `0x08967FB8` | An object's render: needs `*(0x08ED2BAC)` and obj+72 != -1, builds an 18x18 grid of quads into `*(0x08EBA45C)`, draws obj+68 of them through `0x089682E4` (sprite mode 2, one quad a call, from obj+64); returns 1 at its end, 0 when there is nothing to draw (returning 0 from a skip stalled the game). Called by `0x08967B50`. Its sprite calls rise in fights | hooked; **what it draws not yet seen** |
+| `0x08AD9E68` | A third sprite-array caller, occasional (mode 4) | seen in the count only |
+
 ### The HUD pass (GE dump, town, 2026-10-22)
 
 After the 3D scene (into `0x0CC000`) and the orthographic bloom passes, the

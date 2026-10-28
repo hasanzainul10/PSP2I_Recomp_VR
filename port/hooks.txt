@@ -44,6 +44,11 @@
 0x08D7CF90   # frustum test of another shape: as above
 0x08D7D270   # a scene node's visibility (flags[i] bit 0x1 = hidden, from its description's 0x10 / 0x20 and the frustum test): counted per reason (dev, host/main.c)
 0x08D7DA78   # SetProjection: VR first person widens a field-like perspective projection after it (host/main.c)
+0x08D7A74C   # sprite-array draw wrapper (-> 0x08D7A4CC: vertex format by mode 0x08EE229C; 415 = the effects' 0x19F): callers counted with sdmc:/psp2i/fx_trace (dev, host/3ds_hooks.c)
+0x08D7A80C   # its twin (another primitive): as above
+0x08967FB8   # an object's render: an 18x18 grid of quads from *(0x08ED2BAC), drawn as sprites (0x089682E4); sprite caller 0x0896839C, rises in fights: skipped with skip_sprites bit 1 (dev, host/3ds_hooks.c)
+0x08A07C30   # a draw method (vtable 0x08E3182C): sprites, prim at obj+47; the busiest sprite caller (0x08A07C40): skipped with skip_sprites bit 2 (dev)
+0x08D7D8E0   # SetNearFar(near $f12, far $f13): the frustum tests' near / far (0x08FA981C / 0x08FA9818); from ApplyCamera with cam+244 / +248: the 3DS's draw distance (host/3ds_hooks.c)
 0x08AFD474   # ApplyCamera(camera): VR first person puts the field camera's view at the player's head (host/main.c)
 0x089D06E8   # on the path that starts the menus' cursor counter 0x08EE2F70 (write watch 2026-10-23): calls counted per second (dev, host/main.c)
 0x089F0BBC   # ... its callee: calls 0x089F0E80, then a virtual (counted, dev)
