@@ -160,6 +160,104 @@ static void hook_quads(void (*original)(void)) {
     original();
 }
 
+/* sdmc:/psp2i/cull_trace (dev): why the far plane culls nothing in field
+ * rooms. The five frustum tests (ADDRESS_MAP.md "The frustum cull"; 16 =
+ * outside, 2 = inside, else crossing) counted per test and caller with
+ * their answers; the scene-node visibility 0x08D7D270 (flags[i] bit 1 =
+ * hidden) counted visited / visible; and 0x08D7C934's (the field's
+ * scenery test) view-space depth of each centre, with the limits it
+ * reads, bucketed by distance and answer. Logged every 10 s. */
+#define FN_NODE_VIS 0x08D7D270u
+static const uint32_t CULL_TESTS[5] = { 0x08D7C934u, 0x08D7CAECu, 0x08D7CD88u, 0x08D7CE6Cu, 0x08D7CF90u };
+static struct { uint32_t test, ra; uint64_t out, in, cross; } g_ct[48];
+static uint64_t g_node_seen, g_node_shown, g_ct_tick;
+/* 0x08D7C934 depths: < 25, 50, 100, 200, 400, 800, 1600, 3200, 6400, more; outside / not */
+static const float DEPTH_EDGES[9] = { 25, 50, 100, 200, 400, 800, 1600, 3200, 6400 };
+static uint64_t g_depth[10][2];
+/* the pair 0x08D7C934 reads (0x08FA9818 / 0x08FA981C), lowest and highest in a report */
+static float g_lim_lo = 1e30f, g_lim_hi = -1e30f, g_lim2_lo = 1e30f, g_lim2_hi = -1e30f;
+static void cull_report(void) {
+    const uint64_t now = svcGetSystemTick();
+    if (!g_ct_tick) g_ct_tick = now;
+    if (now - g_ct_tick < SYSCLOCK_ARM11 * 10ull) return;
+    g_ct_tick = now;
+    char line[768];
+    int at = snprintf(line, sizeof line, "quality: cull in 10 s: nodes %llu visited, %llu visible; tests (test/caller: out, in, crossing):",
+                      (unsigned long long)g_node_seen, (unsigned long long)g_node_shown);
+    for (int k = 0; k < 10 && at < (int)sizeof line - 64; k++) {
+        int b = -1;
+        for (int i = 0; i < 48; i++) {
+            const uint64_t n = g_ct[i].out + g_ct[i].in + g_ct[i].cross;
+            if (n && (b < 0 || n > g_ct[b].out + g_ct[b].in + g_ct[b].cross)) b = i;
+        }
+        if (b < 0) break;
+        at += snprintf(line + at, sizeof line - (size_t)at, " %08lX/%08lX: %llu, %llu, %llu", (unsigned long)g_ct[b].test,
+                       (unsigned long)g_ct[b].ra, (unsigned long long)g_ct[b].out, (unsigned long long)g_ct[b].in,
+                       (unsigned long long)g_ct[b].cross);
+        g_ct[b].out = g_ct[b].in = g_ct[b].cross = 0;
+    }
+    fprintf(stderr, "%s\n", line);
+    fprintf(stderr, "quality: 0x08D7C934 read 0x08FA9818 %.1f .. %.1f, 0x08FA981C %.1f .. %.1f (draw distance %d%%)\n",
+            (double)g_lim_lo, (double)g_lim_hi, (double)g_lim2_lo, (double)g_lim2_hi, g_far_pct);
+    g_lim_lo = g_lim2_lo = 1e30f; g_lim_hi = g_lim2_hi = -1e30f;
+    at = snprintf(line, sizeof line, "quality: 0x08D7C934 depths (up to: outside/kept):");
+    for (int i = 0; i < 10; i++)
+        at += snprintf(line + at, sizeof line - (size_t)at, " %s%.0f: %llu/%llu", i == 9 ? ">" : "", (double)DEPTH_EDGES[i < 9 ? i : 8],
+                       (unsigned long long)g_depth[i][0], (unsigned long long)g_depth[i][1]);
+    fprintf(stderr, "%s\n", line);
+    memset(g_ct, 0, sizeof g_ct);
+    memset(g_depth, 0, sizeof g_depth);
+    g_node_seen = g_node_shown = 0;
+}
+/* 0x08D7C934 (the field's scenery test): centre $a0 (3 floats) by the 4x4
+ * matrix at $a1 (columns), compared with the pair it reads at 0x08FA9818 /
+ * 0x08FA981C; its depth worked out here the same way, and the pair logged */
+static float c934_depth(void) {
+    const uint32_t c = psp_cpu.r[4], m = psp_cpu.r[5];
+    const float x = psp_read_f32(c), y = psp_read_f32(c + 4), z = psp_read_f32(c + 8);
+    return psp_read_f32(m + 8) * x + psp_read_f32(m + 24) * y + psp_read_f32(m + 40) * z + psp_read_f32(m + 56);
+}
+static void cull_test(uint32_t test, void (*original)(void)) {
+    const uint32_t ra = psp_cpu.r[31];
+    float z934 = 0;
+    if (test == 0x08D7C934u) {
+        z934 = c934_depth();
+        const float a = psp_read_f32(0x08FA9818u), b = psp_read_f32(0x08FA981Cu);
+        if (a < g_lim_lo) g_lim_lo = a;
+        if (a > g_lim_hi) g_lim_hi = a;
+        if (b < g_lim2_lo) g_lim2_lo = b;
+        if (b > g_lim2_hi) g_lim2_hi = b;
+    }
+    if (g_far_cycle && test == 0x08D7C934u) far_cycle_step();
+    original();
+    const uint32_t v = psp_cpu.r[2];
+    if (test == 0x08D7C934u) {
+        const float d = z934 < 0 ? -z934 : z934;
+        int b = 0;
+        while (b < 9 && d >= DEPTH_EDGES[b]) b++;
+        g_depth[b][v == 16 ? 0 : 1]++;
+    }
+    for (int i = 0; i < 48; i++)
+        if ((g_ct[i].test == test && g_ct[i].ra == ra) || !(g_ct[i].out + g_ct[i].in + g_ct[i].cross)) {
+            g_ct[i].test = test; g_ct[i].ra = ra;
+            if (v == 16) g_ct[i].out++; else if (v == 2) g_ct[i].in++; else g_ct[i].cross++;
+            break;
+        }
+    cull_report();
+}
+/* a hook isn't told its address: one each */
+static void hook_cull_0(void (*o)(void)) { cull_test(CULL_TESTS[0], o); }
+static void hook_cull_1(void (*o)(void)) { cull_test(CULL_TESTS[1], o); }
+static void hook_cull_2(void (*o)(void)) { cull_test(CULL_TESTS[2], o); }
+static void hook_cull_3(void (*o)(void)) { cull_test(CULL_TESTS[3], o); }
+static void hook_cull_4(void (*o)(void)) { cull_test(CULL_TESTS[4], o); }
+static void hook_node_vis(void (*original)(void)) {
+    const uint32_t fa = psp_cpu.r[4] + psp_cpu.r[6] * 4u;
+    original();
+    g_node_seen++;
+    if (!(psp_read32(fa) & 1)) g_node_shown++;
+}
+
 void psp2i_hooks_init(void) {
     FILE *f = fopen(BASE "/draw_distance", "r");
     if (f) {
@@ -192,6 +290,13 @@ void psp2i_hooks_init(void) {
         psp_hook_set(FN_QUADS_WRAP, hook_quads_wrap);
         psp_hook_set(FN_FIELD_QUADS, hook_field_quads);   /* counted, skipped or not */
         fprintf(stderr, "quality: sprite-array callers counted (fx_trace)\n");
+    }
+    if ((f = fopen(BASE "/cull_trace", "r")) != NULL) {
+        fclose(f);
+        static const psp_hook_fn H[5] = { hook_cull_0, hook_cull_1, hook_cull_2, hook_cull_3, hook_cull_4 };
+        for (int i = 0; i < 5; i++) psp_hook_set(CULL_TESTS[i], H[i]);
+        psp_hook_set(FN_NODE_VIS, hook_node_vis);
+        fprintf(stderr, "quality: frustum tests and scene nodes counted (cull_trace)\n");
     }
     fprintf(stderr, "quality: draw distance %d%%\n", g_far_pct);
 }
